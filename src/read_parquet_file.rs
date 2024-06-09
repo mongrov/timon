@@ -31,10 +31,17 @@ pub fn read_parquet_file(file_path: &str) -> Result<Vec<Value>, Box<dyn std::err
   
   let mut json_records = Vec::new();
 
-  while let Some(record) = iter.next() {
-    // Convert the record to a JSON-like format
-    let json_record = row_to_json(&record);
-    json_records.push(json_record);
+  while let Some(record_result) = iter.next() {
+    match record_result {
+      Ok(record) => {
+        // Convert the record to a JSON-like format
+        let json_record = row_to_json(&record);
+        json_records.push(json_record);
+      },
+      Err(_) => {
+        return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Error reading record")));
+      }
+    }
   }
   Ok(json_records)
 }
