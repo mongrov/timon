@@ -9,8 +9,9 @@ pub mod android {
         write_json_to_parquet,
     };
     use jni::JNIEnv;
-    use jni::objects::{JClass, JString};
-    use jni::sys::jstring;
+    use jni::objects::{JClass, JString, JObjectArray};
+    use jni::sys::{jobjectArray, jstring};
+    use tokio::runtime::Runtime;    
 
     #[no_mangle]
     pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_readParquetFile(
@@ -63,17 +64,28 @@ pub mod android {
     pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_datafusionQuerier(
         mut env: JNIEnv,
         _class: JClass,
-        file_path: JString,
+        parquet_paths: jobjectArray,
         table_name: JString,
         sql_query: JString,
     ) -> jstring {
         // Convert Java strings to Rust strings
-        let rust_file_path: String = env.get_string(&file_path).expect("Couldn't get java string!").into();
+        let parquet_paths_array = JObjectArray::from_raw(parquet_paths);
+        let array_len = env.get_array_length(&parquet_paths_array).expect("Couldn't get array length");
+        let mut rust_parquet_paths = Vec::new();
+        for i in 0..array_len {
+            let element = env.get_object_array_element(&parquet_paths_array, i).expect("Couldn't get array element");
+            let jstr: JString = element.into();
+            let string: String = env.get_string(&jstr).expect("Couldn't get string element").into();
+            rust_parquet_paths.push(string);
+        }
+    
         let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
         let rust_sql_query: String = env.get_string(&sql_query).expect("Couldn't get java string!").into();
+        // Convert Vec<String> to Vec<&str>
+        let rust_parquet_paths: Vec<&str> = rust_parquet_paths.iter().map(|s| &**s).collect();
     
         // Call the datafusion_querier function
-        match tokio::runtime::Runtime::new().unwrap().block_on(datafusion_querier(&rust_file_path, &rust_table_name, &rust_sql_query)) {
+        match Runtime::new().unwrap().block_on(datafusion_querier(rust_parquet_paths, &rust_table_name, &rust_sql_query)) {
             Ok(json_result) => {
                 // Convert Rust string to Java string
                 let output = env.new_string(json_result).expect("Couldn't create java string!");
