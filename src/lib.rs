@@ -19,18 +19,16 @@ pub mod android {
         _class: JClass,
         file_path: JString,
     ) -> jstring {
-        let rust_string: String = env.get_string(&file_path)
-            .expect("Couldn't get java string!")
-            .into();
-
+        let rust_string: String = env.get_string(&file_path).expect("Couldn't get java string!").into();
+        
         match read_parquet_file(&rust_string) {
             Ok(json_records) => {
                 let json_str = serde_json::to_string(&json_records).unwrap();
                 let output = env.new_string(json_str).expect("Couldn't create java string!");
                 output.into_raw() // Use into_raw to return the jstring
             },
-            Err(_) => {
-                let error_message = env.new_string("Error reading Parquet file").expect("Couldn't create java string!");
+            Err(e) => {
+                let error_message = env.new_string(format!("Error reading Parquet file: {:?}", e)).expect("Couldn't create java string!");
                 error_message.into_raw() // Use into_raw to return the jstring
             },
         }
@@ -52,9 +50,7 @@ pub mod android {
                 success_message.into_raw() // Use into_raw to return the jstring
             },
             Err(e) => {
-                let error_message = env.new_string(format!("Error writing JSON data to Parquet file: {:?}", e))
-                    .expect("Couldn't create java string!");
-
+                let error_message = env.new_string(format!("Error writing JSON data to Parquet file: {:?}", e)).expect("Couldn't create java string!");
                 error_message.into_raw() // Use into_raw to return the jstring
             },
         }
@@ -91,9 +87,9 @@ pub mod android {
                 let output = env.new_string(json_result).expect("Couldn't create java string!");
                 output.into_raw()
             },
-            Err(_) => {
-                let error_message = env.new_string("Error querying Parquet file").expect("Couldn't create java string!");
-                error_message.into_raw()
+            Err(e) => {
+                let error_message = env.new_string(format!("Error querying Parquet files: {:?}", e)).expect("Couldn't create java string!");
+                error_message.into_raw() // Use into_raw to return the jstring
             },
         }
     }
