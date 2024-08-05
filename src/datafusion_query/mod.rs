@@ -16,10 +16,21 @@ pub async fn datafusion_querier(parquet_paths: Vec<&str>, table_prefix: &str, sq
   let ctx = SessionContext::new();
   let mut table_names = Vec::new();
   for (i, parquet_path) in parquet_paths.iter().enumerate() {
-    let table_name = format!("{}_{}", table_prefix, i);
-    ctx.register_parquet(&table_name, parquet_path, ParquetReadOptions::default()).await?;
-    table_names.push(table_name);
+    if Path::new(parquet_path).exists() {
+      let table_name = format!("{}_{}", table_prefix, i);
+      match ctx.register_parquet(&table_name, parquet_path, ParquetReadOptions::default()).await {
+        Ok(_) => table_names.push(table_name),
+        Err(e) => eprintln!("Failed to register {}: {:?}", parquet_path, e),
+      }
+    } else {
+      eprintln!("File does not exist: {}", parquet_path);
+    }
   }
+
+  if table_names.is_empty() {
+    return Err(datafusion::error::DataFusionError::Plan("No valid tables found to query.".to_string()));
+  }
+
   // Combine all tables into a single SQL query using UNION ALL
   let combined_query = format!(
     "SELECT * FROM ({}) AS combined_table",
