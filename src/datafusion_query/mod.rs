@@ -10,9 +10,35 @@ use std::sync::Arc;
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
+use datafusion::error::Result as DataFusionResult;
+use datafusion::dataframe::DataFrame;
+use std::fmt;
+
+pub enum DataFusionOutput {
+  Json(String),
+  DataFrame(DataFrame),
+}
+
+impl fmt::Debug for DataFusionOutput {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      DataFusionOutput::Json(s) => write!(f, "Json({})", s),
+      DataFusionOutput::DataFrame(df) => {
+        let runtime = tokio::runtime::Runtime::new().expect("Failed to create runtime");
+        let result = runtime.block_on(async {
+          df.clone().collect().await.expect("Failed to collect DataFrame results")
+        });
+        for batch in result {
+          writeln!(f, "{:?}", batch)?;
+        }
+        Ok(())
+      }
+    }
+  }
+}
 
 #[allow(dead_code)]
-pub async fn datafusion_querier(parquet_paths: Vec<&str>, table_prefix: &str, sql_query: &str) -> datafusion::error::Result<String> {
+pub async fn datafusion_querier(parquet_paths: Vec<&str>, table_prefix: &str, sql_query: &str, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
   let ctx = SessionContext::new();
   let mut table_names = Vec::new();
   for (i, parquet_path) in parquet_paths.iter().enumerate() {
@@ -53,8 +79,16 @@ pub async fn datafusion_querier(parquet_paths: Vec<&str>, table_prefix: &str, sq
   // Execute the user-provided SQL query on the combined table
   let final_df = ctx.sql(&adjusted_sql_query).await?;
   let final_results = final_df.collect().await?;
-  let json_result = record_batches_to_json(&final_results).unwrap();
-  Ok(json_result)
+  
+  if is_json_format {
+    let json_result = record_batches_to_json(&final_results).unwrap();
+    Ok(DataFusionOutput::Json(json_result))
+  } else {
+    let final_schema = final_results[0].schema();
+    let final_mem_table = MemTable::try_new(final_schema, vec![final_results])?;
+    let final_df = ctx.read_table(Arc::new(final_mem_table))?;
+    Ok(DataFusionOutput::DataFrame(final_df))
+  }
 }
 
 pub fn read_parquet_file(file_path: &str) -> Result<Vec<Value>, Box<dyn std::error::Error>> {

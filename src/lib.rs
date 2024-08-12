@@ -7,10 +7,11 @@ pub mod android {
         datafusion_querier,
         read_parquet_file,
         write_json_to_parquet,
+        DataFusionOutput,
     };
     use jni::JNIEnv;
     use jni::objects::{JClass, JString, JObjectArray};
-    use jni::sys::{jobjectArray, jstring};
+    use jni::sys::{jobjectArray, jstring, jboolean, JNI_TRUE};
     use tokio::runtime::Runtime;    
 
     #[no_mangle]
@@ -63,6 +64,7 @@ pub mod android {
         parquet_paths: jobjectArray,
         table_name: JString,
         sql_query: JString,
+        is_json_format: jboolean,
     ) -> jstring {
         // Convert Java strings to Rust strings
         let parquet_paths_array = JObjectArray::from_raw(parquet_paths);
@@ -77,15 +79,19 @@ pub mod android {
     
         let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
         let rust_sql_query: String = env.get_string(&sql_query).expect("Couldn't get java string!").into();
-        // Convert Vec<String> to Vec<&str>
-        let rust_parquet_paths: Vec<&str> = rust_parquet_paths.iter().map(|s| &**s).collect();
-    
-        // Call the datafusion_querier function
-        match Runtime::new().unwrap().block_on(datafusion_querier(rust_parquet_paths, &rust_table_name, &rust_sql_query)) {
-            Ok(json_result) => {
-                // Convert Rust string to Java string
-                let output = env.new_string(json_result).expect("Couldn't create java string!");
-                output.into_raw()
+        let rust_parquet_paths: Vec<&str> = rust_parquet_paths.iter().map(|s| &**s).collect(); // Convert Vec<String> to Vec<&str>
+        let is_json_format = is_json_format == JNI_TRUE; // Convert jboolean to Rust bool
+
+        match Runtime::new().unwrap().block_on(datafusion_querier(rust_parquet_paths, &rust_table_name, &rust_sql_query, is_json_format)) {
+            Ok(output) => {
+                let json_string = match output {
+                    DataFusionOutput::Json(s) => s,
+                    DataFusionOutput::DataFrame(_df) => {
+                        format!("DataFrame output is not directly convertible to string")
+                    }
+                };
+                let java_string = env.new_string(json_string).expect("Couldn't create java string!");
+                java_string.into_raw()
             },
             Err(e) => {
                 let error_message = env.new_string(format!("Error querying Parquet files: {:?}", e)).expect("Couldn't create java string!");

@@ -8,7 +8,6 @@ use parquet::data_type::{AsBytes, ByteArray, Decimal};
 use base64::{engine::general_purpose, Engine as _};
 use std::sync::Arc;
 
-#[allow(dead_code)]
 pub fn record_batches_to_json(batches: &[RecordBatch]) -> Result<String, serde_json::Error> {
     let mut rows = Vec::new();
 
@@ -127,7 +126,6 @@ fn decimal_to_string(decimal: &Decimal) -> String {
   result
 }
 
-#[allow(dead_code)]
 pub fn json_to_arrow(json_values: &[Value]) -> Result<(Vec<ArrayRef>, Schema), Box<dyn std::error::Error>> {
   // Extract schema from the first JSON object
   let first_obj = json_values.first().ok_or("No data to write")?.as_object().ok_or("Expected JSON object")?;

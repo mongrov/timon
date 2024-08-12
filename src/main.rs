@@ -1,5 +1,5 @@
 mod datafusion_query;
-pub use datafusion_query::{datafusion_querier, read_parquet_file, write_json_to_parquet};
+pub use datafusion_query::{datafusion_querier, read_parquet_file, write_json_to_parquet, DataFusionOutput};
 
 fn main() {
   const TABLE_NAME: &str = "temperature";
@@ -42,8 +42,18 @@ fn main() {
   ];
   let files_paths: Vec<&str> = parquet_paths.iter().map(|s| s.as_str()).collect();
 
-  tokio::runtime::Runtime::new().expect("Failed to create runtime").block_on(async {
-    let df_result = datafusion_querier(files_paths, TABLE_NAME, &sql_query2).await;
-    println!("datafusion_query {:?}", df_result);
-  })
+  let runtime = tokio::runtime::Runtime::new().expect("Failed to create runtime");
+  runtime.block_on(async {
+    let df_result = datafusion_querier(files_paths, TABLE_NAME, &sql_query2, false).await;
+    match df_result {
+      Ok(DataFusionOutput::Json(s)) => println!("Json result: {}", s),
+      Ok(DataFusionOutput::DataFrame(df)) => {
+        let df_batches = df.collect().await;
+        for batch in df_batches.unwrap() {
+          println!("{:?}", batch);
+        }
+      },
+      Err(e) => eprintln!("Error: {:?}", e),
+    }
+  });
 }
