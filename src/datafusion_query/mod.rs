@@ -13,6 +13,9 @@ use parquet::file::properties::WriterProperties;
 use datafusion::error::Result as DataFusionResult;
 use datafusion::dataframe::DataFrame;
 use std::fmt;
+use std::fs::{self};
+use std::collections::HashMap;
+use regex::Regex;
 
 pub enum DataFusionOutput {
   Json(String),
@@ -148,5 +151,96 @@ pub fn write_json_to_parquet(file_path: &str, json_data: &str) -> Result<(), Box
     // Close the writer to ensure data is written to the file
     writer.close()?;
   }
+  Ok(())
+}
+
+#[allow(dead_code)]
+pub async fn aggregate_monthly_parquet(dir_path: &str, table_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+  let files = fs::read_dir(dir_path)?
+    .filter_map(|entry| entry.ok())
+    .filter(|entry| {
+      entry.path().is_file() && entry.file_name().to_string_lossy().starts_with(format!("{}_", table_name).as_str())
+    })
+    .map(|entry| entry.path().to_string_lossy().to_string())
+    .collect::<Vec<_>>();
+
+  let mut files_by_month: HashMap<String, Vec<String>> = HashMap::new();
+  let regx = Regex::new(r"(\d{4}-\d{2})-\d{2}\.parquet$")?; // capture YYYY-MM part of the filename
+
+  for file in files {
+    if let Some(filename) = Path::new(&file).file_name().and_then(|n| n.to_str()) {
+      if let Some(caps) = regx.captures(filename) {
+        if let Some(month) = caps.get(1) {
+          files_by_month
+            .entry(month.as_str().to_string())
+            .or_insert_with(Vec::new)
+            .push(file);
+        }
+      }
+    }
+  }
+
+  for (month, files) in files_by_month {
+    let merged_file_path = format!("{}/{}_{}.parquet", dir_path, table_name, month);
+    
+    if files.len() == 1 {
+      // If there's only one file for the month, simply rename it to the merged file name
+      fs::rename(&files[0], &merged_file_path)?;
+    } else {
+      // Merge multiple files into one Parquet file
+      let ctx = SessionContext::new();
+      let mut table_names = Vec::new();
+      
+      for (i, file_path) in files.iter().enumerate() {
+        let table_name = format!("table_{}", i);
+        
+        match SerializedFileReader::try_from(File::open(file_path)?) {
+          Ok(_) => {
+            ctx.register_parquet(&table_name, file_path, ParquetReadOptions::default()).await?;
+            table_names.push(table_name);
+          }
+          Err(e) => {
+            eprintln!("Skipping file due to error: {} - Error: {:?}", file_path, e);
+            continue;
+          }
+        };
+      }
+
+      if table_names.is_empty() {
+        eprintln!("No valid tables found to merge for month: {}", month);
+        continue;
+      }
+      
+      let combined_query = format!(
+        "SELECT * FROM ({}) AS combined_table",
+        table_names
+          .iter()
+          .map(|name| format!("SELECT * FROM {}", name))
+          .collect::<Vec<_>>()
+          .join(" UNION ALL ")
+      );
+      
+      let combined_df = ctx.sql(&combined_query).await?;
+      let combined_results = combined_df.collect().await?;
+      let schema = combined_results[0].schema();
+      let mem_table = MemTable::try_new(schema.clone(), vec![combined_results])?;
+      
+      let combined_table = ctx.read_table(Arc::new(mem_table))?.collect().await?;
+      let output_file = File::create(&merged_file_path)?;
+      let props = WriterProperties::builder().build();
+      let mut writer = ArrowWriter::try_new(output_file, schema.clone(), Some(props))?;
+      
+      for batch in combined_table {
+        writer.write(&batch)?;
+      }
+      writer.close()?;
+    }
+
+    // Delete the original files after merging
+    for file in files {
+      fs::remove_file(file)?;
+    }
+  }
+
   Ok(())
 }

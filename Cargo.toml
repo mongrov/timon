@@ -13,6 +13,7 @@ base64 = "0.22.0"
 libc = "0.2.155"
 datafusion = "39.0"
 tokio = { version = "1", features = ["full"] }
+regex = "1.10.6"
 
 [lib]
 crate-type = ["staticlib", "cdylib"]
