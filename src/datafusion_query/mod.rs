@@ -1,7 +1,8 @@
 mod helpers;
+mod cloud_sync;
 use datafusion::datasource::MemTable;
 use datafusion::prelude::*;
-use helpers::{record_batches_to_json, row_to_json, json_to_arrow};
+use helpers::{record_batches_to_json, row_to_json, json_to_arrow, extract_year_month};
 use std::fs::File;
 use std::path::Path;
 use parquet::file::reader::{FileReader, SerializedFileReader};
@@ -13,9 +14,10 @@ use parquet::file::properties::WriterProperties;
 use datafusion::error::Result as DataFusionResult;
 use datafusion::dataframe::DataFrame;
 use std::fmt;
-use std::fs::{self};
+use std::fs;
 use std::collections::HashMap;
 use regex::Regex;
+use chrono::Utc;
 
 pub enum DataFusionOutput {
   Json(String),
@@ -41,12 +43,12 @@ impl fmt::Debug for DataFusionOutput {
 }
 
 #[allow(dead_code)]
-pub async fn datafusion_querier(parquet_paths: Vec<&str>, table_prefix: &str, sql_query: &str, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
+pub async fn datafusion_querier(parquet_paths: Vec<&str>, file_name: &str, sql_query: &str, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
   let ctx = SessionContext::new();
   let mut table_names = Vec::new();
   for (i, parquet_path) in parquet_paths.iter().enumerate() {
     if Path::new(parquet_path).exists() {
-      let table_name = format!("{}_{}", table_prefix, i);
+      let table_name = format!("{}_{}", file_name, i);
       match ctx.register_parquet(&table_name, parquet_path, ParquetReadOptions::default()).await {
         Ok(_) => table_names.push(table_name),
         Err(e) => eprintln!("Failed to register {}: {:?}", parquet_path, e),
@@ -78,7 +80,7 @@ pub async fn datafusion_querier(parquet_paths: Vec<&str>, table_prefix: &str, sq
   let mem_table = MemTable::try_new(schema, vec![combined_results])?;
   ctx.register_table("combined_table", Arc::new(mem_table))?;
   // Adjust the user-provided SQL query to run on the combined table
-  let adjusted_sql_query = sql_query.replace(table_prefix, "combined_table");
+  let adjusted_sql_query = sql_query.replace(file_name, "combined_table");
   // Execute the user-provided SQL query on the combined table
   let final_df = ctx.sql(&adjusted_sql_query).await?;
   let final_results = final_df.collect().await?;
@@ -184,8 +186,8 @@ pub async fn aggregate_monthly_parquet(dir_path: &str, table_name: &str) -> Resu
     let merged_file_path = format!("{}/{}_{}.parquet", dir_path, table_name, month);
     
     if files.len() == 1 {
-      // If there's only one file for the month, simply rename it to the merged file name
-      fs::rename(&files[0], &merged_file_path)?;
+      // If there's only one file for the month, simply copy it to the merged file name
+      fs::copy(&files[0], &merged_file_path)?;
     } else {
       // Merge multiple files into one Parquet file
       let ctx = SessionContext::new();
@@ -236,9 +238,26 @@ pub async fn aggregate_monthly_parquet(dir_path: &str, table_name: &str) -> Resu
       writer.close()?;
     }
 
-    // Delete the original files after merging
+    // upload the merged monthly parquet files to S3 storage
+    let target_path = format!("{}_{}.parquet", table_name, month);
+    if let Err(e) = cloud_sync::CloudQuerier::sink_data_to_bucket(&merged_file_path, &target_path).await {
+      eprintln!("Failed to upload to S3: {:?}", e);
+    }
+
+    // clean old files(less than a month)
+    let current_year_month = Utc::now().format("%Y-%m").to_string();
     for file in files {
-      fs::remove_file(file)?;
+      if let Some(path_year_month) = extract_year_month(&file) {
+        if path_year_month < current_year_month {
+          // Remove the old file
+          fs::remove_file(&file)?;
+          // Remove the corresponding merged file for the current month if it exists
+          let merged_file_path = format!("{}/{}_{}.parquet", dir_path, table_name, path_year_month);
+          if Path::new(&merged_file_path).exists() {
+            fs::remove_file(merged_file_path)?;
+          }
+        }
+      }
     }
   }
 

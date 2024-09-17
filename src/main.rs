@@ -5,10 +5,11 @@ pub use datafusion_query::{
   write_json_to_parquet,
   aggregate_monthly_parquet,
   DataFusionOutput,
+  // cloud_sync,
 };
 
 fn main() {
-  const TABLE_NAME: &str = "temperature";
+  // const TABLE_NAME: &str = "temperature";
   // let file_path = format!("/tmp/timon/{TABLE_NAME}_2024-07-11.parquet").to_string();
 
   // **************** write_json_to_parquet **************** //
@@ -63,9 +64,16 @@ fn main() {
   //   }
   // });
 
-  let runtime = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-  runtime.block_on(async {
-    aggregate_monthly_parquet("/tmp/timon/android", TABLE_NAME).await.unwrap();
+  tokio::runtime::Runtime::new().expect("Failed to create runtime").block_on(async {
+    aggregate_monthly_parquet("/tmp/timon", "temperature").await.unwrap();
     println!("aggregate_monthly_parquet() called!");
   });
+
+  // tokio::runtime::Runtime::new().expect("Failed to create runtime").block_on(async {
+  //   let result = cloud_sync::CloudQuerier::sink_data_to_bucket(
+  //     "/tmp/timon/temperature_2024-08-13.parquet",
+  //     "temperature.parquet"
+  //   ).await;
+  //   println!("sink_data_to_bucket result: {:?}", result);
+  // });
 }
