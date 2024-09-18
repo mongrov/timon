@@ -1,11 +1,11 @@
 mod datafusion_query;
+use std::collections::HashMap;
 pub use datafusion_query::{
   datafusion_querier,
   read_parquet_file,
   write_json_to_parquet,
   aggregate_monthly_parquet,
-  DataFusionOutput,
-  // cloud_sync,
+  cloud_sync,
 };
 
 fn main() {
@@ -53,8 +53,8 @@ fn main() {
   // runtime.block_on(async {
   //   let df_result = datafusion_querier(files_paths, TABLE_NAME, &sql_query2, false).await;
   //   match df_result {
-  //     Ok(DataFusionOutput::Json(s)) => println!("Json result: {}", s),
-  //     Ok(DataFusionOutput::DataFrame(df)) => {
+  //     Ok(cloud_sync::DataFusionOutput::Json(s)) => println!("Json result: {}", s),
+  //     Ok(cloud_sync::DataFusionOutput::DataFrame(df)) => {
   //       let df_batches = df.collect().await;
   //       for batch in df_batches.unwrap() {
   //         println!("{:?}", batch);
@@ -64,9 +64,19 @@ fn main() {
   //   }
   // });
 
+  // tokio::runtime::Runtime::new().expect("Failed to create runtime").block_on(async {
+  //   aggregate_monthly_parquet("/tmp/timon", "temperature").await.unwrap();
+  //   println!("aggregate_monthly_parquet() called!");
+  // });
+
   tokio::runtime::Runtime::new().expect("Failed to create runtime").block_on(async {
-    aggregate_monthly_parquet("/tmp/timon", "temperature").await.unwrap();
-    println!("aggregate_monthly_parquet() called!");
+    let range = HashMap::from([("start_date", "2024-07-01"), ("end_date", "2024-08-01")]);
+    let bucket_name = "timon";
+    let file_name = "temperature";
+    let sql_query = "SELECT * FROM temperature LIMIT 25";
+    let df_result = cloud_sync::CloudQuerier::query_bucket(&bucket_name, &file_name, range, &sql_query, true).await;
+    
+    println!("datafusion_query {:?}", df_result);
   });
 
   // tokio::runtime::Runtime::new().expect("Failed to create runtime").block_on(async {

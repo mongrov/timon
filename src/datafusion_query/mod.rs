@@ -1,5 +1,6 @@
-mod helpers;
-mod cloud_sync;
+pub mod helpers;
+pub mod cloud_sync;
+use cloud_sync::DataFusionOutput;
 use datafusion::datasource::MemTable;
 use datafusion::prelude::*;
 use helpers::{record_batches_to_json, row_to_json, json_to_arrow, extract_year_month};
@@ -12,35 +13,10 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use datafusion::error::Result as DataFusionResult;
-use datafusion::dataframe::DataFrame;
-use std::fmt;
 use std::fs;
 use std::collections::HashMap;
 use regex::Regex;
 use chrono::Utc;
-
-pub enum DataFusionOutput {
-  Json(String),
-  DataFrame(DataFrame),
-}
-
-impl fmt::Debug for DataFusionOutput {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    match self {
-      DataFusionOutput::Json(s) => write!(f, "Json({})", s),
-      DataFusionOutput::DataFrame(df) => {
-        let runtime = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-        let result = runtime.block_on(async {
-          df.clone().collect().await.expect("Failed to collect DataFrame results")
-        });
-        for batch in result {
-          writeln!(f, "{:?}", batch)?;
-        }
-        Ok(())
-      }
-    }
-  }
-}
 
 #[allow(dead_code)]
 pub async fn datafusion_querier(parquet_paths: Vec<&str>, file_name: &str, sql_query: &str, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
