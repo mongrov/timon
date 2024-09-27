@@ -1,36 +1,44 @@
-pub mod helpers;
 pub mod cloud_sync;
+pub mod helpers;
+use arrow::record_batch::RecordBatch;
+use chrono::Utc;
 use cloud_sync::DataFusionOutput;
 use datafusion::datasource::MemTable;
+use datafusion::error::Result as DataFusionResult;
 use datafusion::prelude::*;
-use helpers::{record_batches_to_json, row_to_json, json_to_arrow, extract_year_month};
-use std::fs::File;
-use std::path::Path;
-use parquet::file::reader::{FileReader, SerializedFileReader};
-use serde_json::Value;
-use std::sync::Arc;
-use arrow::record_batch::RecordBatch;
+use helpers::{extract_table_name, extract_year_month, generate_paths, json_to_arrow, record_batches_to_json, row_to_json, Granularity};
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
-use datafusion::error::Result as DataFusionResult;
-use std::fs;
-use std::collections::HashMap;
+use parquet::file::reader::{FileReader, SerializedFileReader};
 use regex::Regex;
-use chrono::Utc;
+use serde_json::Value;
+use std::collections::HashMap;
+use std::fs;
+use std::fs::File;
+use std::path::Path;
+use std::sync::Arc;
 
 #[allow(dead_code)]
-pub async fn datafusion_querier(parquet_paths: Vec<&str>, file_name: &str, sql_query: &str, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
+pub async fn datafusion_querier(
+  base_dir: &str,
+  date_range: HashMap<&str, &str>,
+  sql_query: &str,
+  is_json_format: bool,
+) -> DataFusionResult<DataFusionOutput> {
   let ctx = SessionContext::new();
   let mut table_names = Vec::new();
-  for (i, parquet_path) in parquet_paths.iter().enumerate() {
-    if Path::new(parquet_path).exists() {
+  let file_name = &extract_table_name(&sql_query);
+  let file_list = generate_paths(base_dir, file_name, date_range, Granularity::Day, false).unwrap();
+
+  for (i, file_path) in file_list.iter().enumerate() {
+    if Path::new(file_path).exists() {
       let table_name = format!("{}_{}", file_name, i);
-      match ctx.register_parquet(&table_name, parquet_path, ParquetReadOptions::default()).await {
+      match ctx.register_parquet(&table_name, file_path, ParquetReadOptions::default()).await {
         Ok(_) => table_names.push(table_name),
-        Err(e) => eprintln!("Failed to register {}: {:?}", parquet_path, e),
+        Err(e) => eprintln!("Failed to register {}: {:?}", file_path, e),
       }
     } else {
-      eprintln!("File does not exist: {}", parquet_path);
+      eprintln!("File does not exist: {}", file_path);
     }
   }
 
@@ -60,7 +68,7 @@ pub async fn datafusion_querier(parquet_paths: Vec<&str>, file_name: &str, sql_q
   // Execute the user-provided SQL query on the combined table
   let final_df = ctx.sql(&adjusted_sql_query).await?;
   let final_results = final_df.collect().await?;
-  
+
   if is_json_format {
     let json_result = record_batches_to_json(&final_results).unwrap();
     Ok(DataFusionOutput::Json(json_result))
@@ -76,7 +84,7 @@ pub fn read_parquet_file(file_path: &str) -> Result<Vec<Value>, Box<dyn std::err
   let file = File::open(&Path::new(file_path))?;
   let reader = SerializedFileReader::new(file)?;
   let mut iter = reader.get_row_iter(None)?;
-  
+
   let mut json_records = Vec::new();
 
   while let Some(record_result) = iter.next() {
@@ -85,7 +93,7 @@ pub fn read_parquet_file(file_path: &str) -> Result<Vec<Value>, Box<dyn std::err
         // Convert the record to a JSON-like format
         let json_record = row_to_json(&record);
         json_records.push(json_record);
-      },
+      }
       Err(_) => {
         return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Error reading record")));
       }
@@ -136,9 +144,7 @@ pub fn write_json_to_parquet(file_path: &str, json_data: &str) -> Result<(), Box
 pub async fn aggregate_monthly_parquet(dir_path: &str, table_name: &str) -> Result<(), Box<dyn std::error::Error>> {
   let files = fs::read_dir(dir_path)?
     .filter_map(|entry| entry.ok())
-    .filter(|entry| {
-      entry.path().is_file() && entry.file_name().to_string_lossy().starts_with(format!("{}_", table_name).as_str())
-    })
+    .filter(|entry| entry.path().is_file() && entry.file_name().to_string_lossy().starts_with(format!("{}_", table_name).as_str()))
     .map(|entry| entry.path().to_string_lossy().to_string())
     .collect::<Vec<_>>();
 
@@ -149,10 +155,7 @@ pub async fn aggregate_monthly_parquet(dir_path: &str, table_name: &str) -> Resu
     if let Some(filename) = Path::new(&file).file_name().and_then(|n| n.to_str()) {
       if let Some(caps) = regx.captures(filename) {
         if let Some(month) = caps.get(1) {
-          files_by_month
-            .entry(month.as_str().to_string())
-            .or_insert_with(Vec::new)
-            .push(file);
+          files_by_month.entry(month.as_str().to_string()).or_insert_with(Vec::new).push(file);
         }
       }
     }
@@ -160,7 +163,7 @@ pub async fn aggregate_monthly_parquet(dir_path: &str, table_name: &str) -> Resu
 
   for (month, files) in files_by_month {
     let merged_file_path = format!("{}/{}_{}.parquet", dir_path, table_name, month);
-    
+
     if files.len() == 1 {
       // If there's only one file for the month, simply copy it to the merged file name
       fs::copy(&files[0], &merged_file_path)?;
@@ -168,10 +171,10 @@ pub async fn aggregate_monthly_parquet(dir_path: &str, table_name: &str) -> Resu
       // Merge multiple files into one Parquet file
       let ctx = SessionContext::new();
       let mut table_names = Vec::new();
-      
+
       for (i, file_path) in files.iter().enumerate() {
         let table_name = format!("table_{}", i);
-        
+
         match SerializedFileReader::try_from(File::open(file_path)?) {
           Ok(_) => {
             ctx.register_parquet(&table_name, file_path, ParquetReadOptions::default()).await?;
@@ -188,7 +191,7 @@ pub async fn aggregate_monthly_parquet(dir_path: &str, table_name: &str) -> Resu
         eprintln!("No valid tables found to merge for month: {}", month);
         continue;
       }
-      
+
       let combined_query = format!(
         "SELECT * FROM ({}) AS combined_table",
         table_names
@@ -197,17 +200,17 @@ pub async fn aggregate_monthly_parquet(dir_path: &str, table_name: &str) -> Resu
           .collect::<Vec<_>>()
           .join(" UNION ALL ")
       );
-      
+
       let combined_df = ctx.sql(&combined_query).await?;
       let combined_results = combined_df.collect().await?;
       let schema = combined_results[0].schema();
       let mem_table = MemTable::try_new(schema.clone(), vec![combined_results])?;
-      
+
       let combined_table = ctx.read_table(Arc::new(mem_table))?.collect().await?;
       let output_file = File::create(&merged_file_path)?;
       let props = WriterProperties::builder().build();
       let mut writer = ArrowWriter::try_new(output_file, schema.clone(), Some(props))?;
-      
+
       for batch in combined_table {
         writer.write(&batch)?;
       }
@@ -216,7 +219,7 @@ pub async fn aggregate_monthly_parquet(dir_path: &str, table_name: &str) -> Resu
 
     // upload the merged monthly parquet files to S3 storage
     let target_path = format!("{}_{}.parquet", table_name, month);
-    if let Err(e) = cloud_sync::CloudQuerier::sink_data_to_bucket(&merged_file_path, &target_path).await {
+    if let Err(e) = cloud_sync::CloudStorageManager::sink_data_to_bucket(&merged_file_path, &target_path).await {
       eprintln!("Failed to upload to S3: {:?}", e);
     }
 

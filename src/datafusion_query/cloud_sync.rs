@@ -1,17 +1,21 @@
 use crate::datafusion_query::helpers;
-use helpers::record_batches_to_json;
-use datafusion::datasource::MemTable;
+use datafusion::dataframe::DataFrame;
 use datafusion::datasource::listing::{ListingTable, ListingTableConfig, ListingTableUrl};
-use object_store::{aws::{AmazonS3, AmazonS3Builder}, path::Path, ObjectStore};
+use datafusion::datasource::MemTable;
+use datafusion::error::Result as DataFusionResult;
 use datafusion::prelude::*;
+use helpers::{generate_paths, record_batches_to_json, Granularity};
+use object_store::{
+  aws::{AmazonS3, AmazonS3Builder},
+  path::Path,
+  ObjectStore,
+};
+use std::fmt;
 use std::{collections::HashMap, sync::Arc};
 use tokio::io::AsyncReadExt;
-use chrono::{Datelike, NaiveDate};
-use chrono::format::ParseError;
-use datafusion::dataframe::DataFrame;
-use datafusion::error::Result as DataFusionResult;
 use url::Url;
-use std::fmt;
+
+use super::helpers::extract_table_name;
 
 pub enum DataFusionOutput {
   Json(String),
@@ -24,9 +28,7 @@ impl fmt::Debug for DataFusionOutput {
       DataFusionOutput::Json(s) => write!(f, "Json({})", s),
       DataFusionOutput::DataFrame(df) => {
         let runtime = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-        let result = runtime.block_on(async {
-          df.clone().collect().await.expect("Failed to collect DataFrame results")
-        });
+        let result = runtime.block_on(async { df.clone().collect().await.expect("Failed to collect DataFrame results") });
         for batch in result {
           writeln!(f, "{:?}", batch)?;
         }
@@ -36,52 +38,41 @@ impl fmt::Debug for DataFusionOutput {
   }
 }
 
-pub struct CloudQuerier;
+pub struct CloudStorageManager;
 
-impl CloudQuerier {
-  fn get_s3_store(minio_endpoint: Option<&str>, access_key_id: Option<&str>, secret_access_key: Option<&str>, bucket_name: Option<&str>) ->AmazonS3 {
+impl CloudStorageManager {
+  fn get_s3_store(minio_endpoint: Option<&str>, access_key_id: Option<&str>, secret_access_key: Option<&str>, bucket_name: Option<&str>) -> AmazonS3 {
     let minio_endpoint = minio_endpoint.unwrap_or("http://localhost:9000");
     let bucket_name = bucket_name.unwrap_or("timon");
     let access_key_id = access_key_id.unwrap_or("ahmed");
     let secret_access_key = secret_access_key.unwrap_or("ahmed1234");
-    
+
     let s3_store = AmazonS3Builder::new()
-    .with_endpoint(minio_endpoint)
-    .with_bucket_name(bucket_name)
-    .with_access_key_id(access_key_id)
-    .with_secret_access_key(secret_access_key)
-    .with_allow_http(true)
-    .build()
-    .unwrap();
+      .with_endpoint(minio_endpoint)
+      .with_bucket_name(bucket_name)
+      .with_access_key_id(access_key_id)
+      .with_secret_access_key(secret_access_key)
+      .with_allow_http(true)
+      .build()
+      .unwrap();
 
     s3_store
   }
 
-  fn generate_parquet_files_in_range(bucket_name: &str, file_name: &str, range: &HashMap<&str, &str>) -> Result<Vec<String>, ParseError> {
-    let start_date = NaiveDate::parse_from_str(range.get("start_date").unwrap(), "%Y-%m-%d")?;
-    let end_date = NaiveDate::parse_from_str(range.get("end_date").unwrap(), "%Y-%m-%d")?;
-    
-    // Generate a list of Parquet file paths for each month in the range
-    let mut file_list = Vec::new();
-    let mut current_date = start_date;
-    while current_date <= end_date {
-      let file_path = format!("s3://{}/{}_{}.parquet", bucket_name, file_name, current_date.format("%Y-%m"));
-      file_list.push(file_path);
-      current_date = current_date.with_month(current_date.month() % 12 + 1).unwrap(); // Increment month
-    }
-
-    Ok(file_list)
-  }
-
   #[allow(dead_code)]
-  pub async fn query_bucket(bucket_name: &str, file_name: &str, range: HashMap<&str, &str>, sql_query: &str, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
-    let s3_store = CloudQuerier::get_s3_store(None, None, None, None);
+  pub async fn query_bucket(
+    bucket_name: &str,
+    date_range: HashMap<&str, &str>,
+    sql_query: &str,
+    is_json_format: bool,
+  ) -> DataFusionResult<DataFusionOutput> {
+    let s3_store = CloudStorageManager::get_s3_store(None, None, None, None);
     let session_context = SessionContext::new();
     let object_store = Arc::new(s3_store);
-    
-    // Parse the range and generate Parquet file paths
-    let file_list = CloudQuerier::generate_parquet_files_in_range(bucket_name, file_name, &range).unwrap();
+    let file_name = &extract_table_name(sql_query);
 
+    // Parse the date_range and generate Parquet file paths
+    let file_list = generate_paths(bucket_name, file_name, date_range, Granularity::Month, true).unwrap();
     // Register the object store with the session context
     let store_url = Url::parse(&format!("s3://{}", bucket_name)).unwrap();
     session_context.runtime_env().register_object_store(&store_url, object_store);
@@ -91,10 +82,10 @@ impl CloudQuerier {
     for (i, file_url) in file_list.iter().enumerate() {
       let table_name = format!("{}_{}", file_name, i);
       let file_url_parsed = ListingTableUrl::parse(file_url)?;
-      
+
       let mut config = ListingTableConfig::new(file_url_parsed);
       config = config.infer(&session_context.state()).await?;
-      
+
       let table = ListingTable::try_new(config)?;
       session_context.register_table(&table_name, Arc::new(table))?;
       table_names.push(table_name);
@@ -126,7 +117,7 @@ impl CloudQuerier {
     // Execute the user-provided SQL query on the combined table
     let final_df = session_context.sql(&adjusted_sql_query).await?;
     let final_results = final_df.collect().await?;
-    
+
     if is_json_format {
       let json_result = record_batches_to_json(&final_results).unwrap();
       Ok(DataFusionOutput::Json(json_result))
@@ -138,10 +129,9 @@ impl CloudQuerier {
     }
   }
 
-  #[allow(dead_code)]
   pub async fn sink_data_to_bucket(source_path: &str, target_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     // Initialize S3 store (assumed MinIO in your case)
-    let s3_store = CloudQuerier::get_s3_store(None, None, None, None);
+    let s3_store = CloudStorageManager::get_s3_store(None, None, None, None);
     let object_store = Arc::new(s3_store);
 
     // Prepare the file for upload
@@ -149,7 +139,7 @@ impl CloudQuerier {
     let mut data = Vec::new();
     file.read_to_end(&mut data).await?;
     object_store.put(&Path::from(target_path), data.into()).await?;
-    
+
     Ok(())
   }
 }
