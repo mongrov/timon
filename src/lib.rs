@@ -1,60 +1,182 @@
-mod datafusion_query;
+mod timon_engine;
 
 /// cbindgen:ignore
 #[cfg(target_os = "android")]
 pub mod android {
-  use crate::datafusion_query::{cloud_sync::DataFusionOutput, datafusion_querier, read_parquet_file, write_json_to_parquet};
+  use crate::timon_engine::{
+    create_database, create_table, delete_database, delete_table, init_bucket, init_timon, insert, list_databases, list_tables, query, query_bucket,
+    sink_monthly_parquet,
+  };
   use jni::objects::{JClass, JObject, JString, JValue};
   use jni::sys::jstring;
   use jni::JNIEnv;
   use std::collections::HashMap;
   use tokio::runtime::Runtime;
 
+  // ******************************** File Storage ********************************
   #[no_mangle]
-  pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_readParquetFile(
+  pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_initTimon(
     mut env: JNIEnv,
     _class: JClass,
-    file_path: JString,
+    storage_path: JString,
   ) -> jstring {
-    let rust_string: String = env.get_string(&file_path).expect("Couldn't get java string!").into();
+    let rust_storage_path: String = env.get_string(&storage_path).expect("Couldn't get java string!").into();
 
-    match read_parquet_file(&rust_string) {
-      Ok(json_records) => {
-        let json_str = serde_json::to_string(&json_records).unwrap();
-        let output = env.new_string(json_str).expect("Couldn't create java string!");
-        output.into_raw() // Use into_raw to return the jstring
+    match init_timon(&rust_storage_path) {
+      Ok(success_message) => {
+        let output = env.new_string(success_message).expect("Couldn't create success string!");
+        output.into_raw()
       }
-      Err(e) => {
-        let error_message = env
-          .new_string(format!("Error reading Parquet file: {:?}", e))
-          .expect("Couldn't create java string!");
-        error_message.into_raw() // Use into_raw to return the jstring
+      Err(err) => {
+        let err_message = format!("Failed to initialize Timon: {:?}", err);
+        let output = env.new_string(err_message).expect("Couldn't create error string!");
+        output.into_raw()
       }
     }
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_writeJsonToParquet(
+  pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_createDatabase(
     mut env: JNIEnv,
     _class: JClass,
-    file_path: JString,
+    db_name: JString,
+  ) -> jstring {
+    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
+
+    match create_database(&rust_db_name) {
+      Ok(result) => {
+        let output = env.new_string(result).expect("Couldn't create success string!");
+        output.into_raw()
+      }
+      Err(err) => {
+        let err_message = format!("Failed to create database: {:?}", err);
+        let output = env.new_string(err_message).expect("Couldn't create error string!");
+        output.into_raw()
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_createTable(
+    mut env: JNIEnv,
+    _class: JClass,
+    db_name: JString,
+    table_name: JString,
+  ) -> jstring {
+    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
+    let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
+
+    match create_table(&rust_db_name, &rust_table_name) {
+      Ok(result) => {
+        let output = env.new_string(result).expect("Couldn't create success string!");
+        output.into_raw()
+      }
+      Err(err) => {
+        let err_message = format!("Failed to create table: {:?}", err);
+        let output = env.new_string(err_message).expect("Couldn't create error string!");
+        output.into_raw()
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_listDatabases(env: JNIEnv, _class: JClass) -> jstring {
+    match list_databases() {
+      Ok(result) => {
+        let output = env.new_string(result).expect("Couldn't create success string!");
+        output.into_raw()
+      }
+      Err(err) => {
+        let err_message = format!("Failed to list databases: {:?}", err);
+        let output = env.new_string(err_message).expect("Couldn't create error string!");
+        output.into_raw()
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_listTables(mut env: JNIEnv, _class: JClass, db_name: JString) -> jstring {
+    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
+
+    match list_tables(&rust_db_name) {
+      Ok(result) => {
+        let output = env.new_string(result).expect("Couldn't create success string!");
+        output.into_raw()
+      }
+      Err(err) => {
+        let err_message = format!("Failed to list tables: {:?}", err);
+        let output = env.new_string(err_message).expect("Couldn't create error string!");
+        output.into_raw()
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_deleteDatabase(
+    mut env: JNIEnv,
+    _class: JClass,
+    db_name: JString,
+  ) -> jstring {
+    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
+
+    match delete_database(&rust_db_name) {
+      Ok(result) => {
+        let output = env.new_string(result).expect("Couldn't create success string!");
+        output.into_raw()
+      }
+      Err(err) => {
+        let err_message = format!("Failed to delete database: {:?}", err);
+        let output = env.new_string(err_message).expect("Couldn't create error string!");
+        output.into_raw()
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_deleteTable(
+    mut env: JNIEnv,
+    _class: JClass,
+    db_name: JString,
+    table_name: JString,
+  ) -> jstring {
+    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
+    let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
+
+    match delete_table(&rust_db_name, &rust_table_name) {
+      Ok(result) => {
+        let output = env.new_string(result).expect("Couldn't create success string!");
+        output.into_raw()
+      }
+      Err(err) => {
+        let err_message = format!("Failed to delete table: {:?}", err);
+        let output = env.new_string(err_message).expect("Couldn't create error string!");
+        output.into_raw()
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_insert(
+    mut env: JNIEnv,
+    _class: JClass,
+    db_name: JString,
+    table_name: JString,
     json_data: JString,
   ) -> jstring {
-    let rust_file_path: String = env.get_string(&file_path).expect("Couldn't get java string!").into();
+    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
+    let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
     let rust_json_data: String = env.get_string(&json_data).expect("Couldn't get java string!").into();
 
-    match write_json_to_parquet(&rust_file_path, &rust_json_data) {
-      Ok(_) => {
-        let success_message = env
-          .new_string("Successfully wrote JSON data to Parquet file")
-          .expect("Couldn't create java string!");
-        success_message.into_raw() // Use into_raw to return the jstring
+    match insert(&rust_db_name, &rust_table_name, &rust_json_data) {
+      Ok(success_message) => {
+        let output = env.new_string(success_message).expect("Couldn't create success string!");
+        output.into_raw()
       }
       Err(e) => {
         let error_message = env
           .new_string(format!("Error writing JSON data to Parquet file: {:?}", e))
           .expect("Couldn't create java string!");
-        error_message.into_raw() // Use into_raw to return the jstring
+        error_message.into_raw()
       }
     }
   }
@@ -92,42 +214,114 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_datafusionQuerier(
+  pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_query(
     mut env: JNIEnv,
     _class: JClass,
-    base_dir: JString,
+    db_name: JString,
     date_range: JObject,
     sql_query: JString,
   ) -> jstring {
     // Convert Java strings to Rust strings
-    let rust_base_dir: String = env.get_string(&base_dir).expect("Couldn't get java string!").into();
+    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
     let rust_sql_query: String = env.get_string(&sql_query).expect("Couldn't get java string!").into();
 
+    let mut rust_date_range: HashMap<&str, &str> = HashMap::new();
     let rust_start = get_date_range_value(&mut env, &date_range, "start");
     let rust_end = get_date_range_value(&mut env, &date_range, "end");
-    let mut rust_date_range: HashMap<&str, &str> = HashMap::new();
     rust_date_range.insert("start_date", &rust_start);
     rust_date_range.insert("end_date", &rust_end);
 
-    match Runtime::new()
-      .unwrap()
-      .block_on(datafusion_querier(&rust_base_dir, rust_date_range, &rust_sql_query, true))
-    {
+    match Runtime::new().unwrap().block_on(query(&rust_db_name, rust_date_range, &rust_sql_query)) {
       Ok(output) => {
-        let json_string = match output {
-          DataFusionOutput::Json(s) => s,
-          DataFusionOutput::DataFrame(_df) => {
-            format!("DataFrame output is not directly convertible to string")
-          }
-        };
-        let java_string = env.new_string(json_string).expect("Couldn't create java string!");
+        let java_string = env.new_string(output).expect("Couldn't create java string!");
         java_string.into_raw()
       }
       Err(e) => {
         let error_message = env
           .new_string(format!("Error querying Parquet files: {:?}", e))
           .expect("Couldn't create java string!");
-        error_message.into_raw() // Use into_raw to return the jstring
+        error_message.into_raw()
+      }
+    }
+  }
+
+  // ******************************** S3 Compatible Storage ********************************
+  #[no_mangle]
+  pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_initBucket(
+    mut env: JNIEnv,
+    _class: JClass,
+    bucket_endpoint: JString,
+    bucket_name: JString,
+    access_key_id: JString,
+    secret_access_key: JString,
+  ) -> jstring {
+    let rust_bucket_endpoint: String = env.get_string(&bucket_endpoint).expect("Couldn't get java string!").into();
+    let rust_bucket_name: String = env.get_string(&bucket_name).expect("Couldn't get java string!").into();
+    let rust_access_key_id: String = env.get_string(&access_key_id).expect("Couldn't get java string!").into();
+    let rust_secret_access_key: String = env.get_string(&secret_access_key).expect("Couldn't get java string!").into();
+
+    match init_bucket(&rust_bucket_endpoint, &rust_bucket_name, &rust_access_key_id, &rust_secret_access_key) {
+      Ok(success_message) => {
+        let output = env.new_string(success_message).expect("Couldn't create success string!");
+        output.into_raw()
+      }
+      Err(err) => {
+        let err_message = format!("Failed to initialize S3 bucket: {:?}", err);
+        let output = env.new_string(err_message).expect("Couldn't create error string!");
+        output.into_raw()
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_queryBucket(
+    mut env: JNIEnv,
+    _class: JClass,
+    date_range: JObject,
+    sql_query: JString,
+  ) -> jstring {
+    // Convert Java strings to Rust strings
+    let rust_sql_query: String = env.get_string(&sql_query).expect("Couldn't get java string!").into();
+
+    let mut rust_date_range: HashMap<&str, &str> = HashMap::new();
+    let rust_start = get_date_range_value(&mut env, &date_range, "start");
+    let rust_end = get_date_range_value(&mut env, &date_range, "end");
+    rust_date_range.insert("start_date", &rust_start);
+    rust_date_range.insert("end_date", &rust_end);
+
+    match Runtime::new().unwrap().block_on(query_bucket(rust_date_range, &rust_sql_query)) {
+      Ok(output) => {
+        let java_string = env.new_string(output).expect("Couldn't create java string!");
+        java_string.into_raw()
+      }
+      Err(e) => {
+        let error_message = env
+          .new_string(format!("Error querying Parquet files: {:?}", e))
+          .expect("Couldn't create java string!");
+        error_message.into_raw()
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_sinkMonthlyParquet(
+    mut env: JNIEnv,
+    _class: JClass,
+    db_name: JString,
+    table_name: JString,
+  ) -> jstring {
+    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
+    let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
+
+    match Runtime::new().unwrap().block_on(sink_monthly_parquet(&rust_db_name, &rust_table_name)) {
+      Ok(success_message) => {
+        let output = env.new_string(success_message).expect("Couldn't create success string!");
+        output.into_raw()
+      }
+      Err(err) => {
+        let err_message = format!("Failed sink monthly parquet files: {:?}", err);
+        let output = env.new_string(err_message).expect("Couldn't create error string!");
+        output.into_raw()
       }
     }
   }

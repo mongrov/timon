@@ -1648,25 +1648,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "native_rust_lib"
-version = "0.1.0"
-dependencies = [
- "arrow",
- "base64",
- "chrono",
- "datafusion",
- "jni",
- "libc",
- "object_store",
- "parquet",
- "regex",
- "serde",
- "serde_json",
- "tokio",
- "url",
-]
-
-[[package]]
 name = "num"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2610,6 +2591,25 @@ dependencies = [
  "byteorder",
  "integer-encoding",
  "ordered-float",
+]
+
+[[package]]
+name = "timon"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "base64",
+ "chrono",
+ "datafusion",
+ "jni",
+ "libc",
+ "object_store",
+ "parquet",
+ "regex",
+ "serde",
+ "serde_json",
+ "tokio",
+ "url",
 ]
 
 [[package]]

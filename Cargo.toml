@@ -1,5 +1,5 @@
 [package]
-name = "native_rust_lib"
+name = "timon"
 version = "0.1.0"
 edition = "2021"
 
@@ -19,8 +19,17 @@ url = "2.5.2"
 chrono = "0.4.38"
 
 [lib]
+name="timon"
 crate-type = ["staticlib", "cdylib"]
 
 [[bin]]
 name = "native_rust_lib"
 path = "src/main.rs"
+
+[profile.release]
+debug = 0
+lto = true
+opt-level = 'z'
+split-debuginfo = "off"
+codegen-units = 1
+strip = true
