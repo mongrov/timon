@@ -1,0 +1,7 @@
+# Rust
+target
+build
+jniLibs
+
+# local env files
+.env*.local

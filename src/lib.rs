@@ -15,11 +15,7 @@ pub mod android {
 
   // ******************************** File Storage ********************************
   #[no_mangle]
-  pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_initTimon(
-    mut env: JNIEnv,
-    _class: JClass,
-    storage_path: JString,
-  ) -> jstring {
+  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_initTimon(mut env: JNIEnv, _class: JClass, storage_path: JString) -> jstring {
     let rust_storage_path: String = env.get_string(&storage_path).expect("Couldn't get java string!").into();
 
     match init_timon(&rust_storage_path) {
@@ -36,11 +32,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_createDatabase(
-    mut env: JNIEnv,
-    _class: JClass,
-    db_name: JString,
-  ) -> jstring {
+  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_createDatabase(mut env: JNIEnv, _class: JClass, db_name: JString) -> jstring {
     let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
 
     match create_database(&rust_db_name) {
@@ -57,7 +49,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_createTable(
+  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_createTable(
     mut env: JNIEnv,
     _class: JClass,
     db_name: JString,
@@ -80,7 +72,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_listDatabases(env: JNIEnv, _class: JClass) -> jstring {
+  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_listDatabases(env: JNIEnv, _class: JClass) -> jstring {
     match list_databases() {
       Ok(result) => {
         let output = env.new_string(result).expect("Couldn't create success string!");
@@ -95,7 +87,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_listTables(mut env: JNIEnv, _class: JClass, db_name: JString) -> jstring {
+  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_listTables(mut env: JNIEnv, _class: JClass, db_name: JString) -> jstring {
     let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
 
     match list_tables(&rust_db_name) {
@@ -112,11 +104,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_deleteDatabase(
-    mut env: JNIEnv,
-    _class: JClass,
-    db_name: JString,
-  ) -> jstring {
+  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_deleteDatabase(mut env: JNIEnv, _class: JClass, db_name: JString) -> jstring {
     let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
 
     match delete_database(&rust_db_name) {
@@ -133,7 +121,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_deleteTable(
+  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_deleteTable(
     mut env: JNIEnv,
     _class: JClass,
     db_name: JString,
@@ -156,7 +144,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_insert(
+  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_insert(
     mut env: JNIEnv,
     _class: JClass,
     db_name: JString,
@@ -214,7 +202,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_query(
+  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_query(
     mut env: JNIEnv,
     _class: JClass,
     db_name: JString,
@@ -247,7 +235,7 @@ pub mod android {
 
   // ******************************** S3 Compatible Storage ********************************
   #[no_mangle]
-  pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_initBucket(
+  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_initBucket(
     mut env: JNIEnv,
     _class: JClass,
     bucket_endpoint: JString,
@@ -274,7 +262,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_queryBucket(
+  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_queryBucket(
     mut env: JNIEnv,
     _class: JClass,
     date_range: JObject,
@@ -304,7 +292,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_expo_modules_testrustmodule_TestRustModule_sinkMonthlyParquet(
+  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_sinkMonthlyParquet(
     mut env: JNIEnv,
     _class: JClass,
     db_name: JString,
