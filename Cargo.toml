@@ -1,7 +1,13 @@
 [package]
 name = "timon"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+authors = ["Ahmed Boutaraa <ahmed@mongrov.com>"]
+description = "Efficient local storage and Amazon S3-compatible data synchronization for time-series data,leveraging Parquet for storage and DataFusion for querying, all wrapped in a simple and intuitive API."
+license = "Apache-2.0"
+repository = "https://github.com/mongrov/timon"
+keywords = ["rust", "crate", "parquet", "datafusion", "tsdb", "time-series", "storage", "S3", "synchronization", "query-engine"]
+categories = ["database", "data-processing", "cloud-services", "storage"]
 
 [dependencies]
 jni = "0.21.1"
