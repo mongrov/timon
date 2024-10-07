@@ -5,6 +5,7 @@ pub mod helpers;
 use cloud_sync::CloudStorageManager;
 use db_manager::DatabaseManager;
 use serde::Serialize;
+use serde_json::{self, Value};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -21,17 +22,13 @@ use std::sync::OnceLock;
 pub struct TimonResult {
   pub status: u16,
   pub message: String,
-  pub json_string: Option<String>,
+  pub json_value: Option<Value>,
 }
 
 impl TimonResult {
   pub fn to_string(&self) -> Result<String, serde_json::Error> {
     serde_json::to_string(self)
   }
-}
-
-fn vec_to_json_string(vec: Vec<String>) -> String {
-  serde_json::to_string(&vec).expect("Failed to convert Vec<String> to JSON")
 }
 
 static DATABASE_MANAGER: OnceLock<DatabaseManager> = OnceLock::new();
@@ -48,11 +45,18 @@ pub fn init_timon(storage_path: &str) -> Result<String, String> {
       let result = TimonResult {
         status: 200,
         message: "DatabaseManager initialized successfully".to_owned(),
-        json_string: None,
+        json_value: None,
       };
       Ok(result.to_string().expect("Failed to convert to JSON"))
     }
-    Err(_) => Err("DatabaseManager already initialized".to_owned()),
+    Err(_) => {
+      let result = TimonResult {
+        status: 400,
+        message: "DatabaseManager already initialized".to_owned(),
+        json_value: None,
+      };
+      Err(result.to_string().expect("Failed to convert to JSON"))
+    }
   }
 }
 
@@ -64,11 +68,18 @@ pub fn create_database(db_name: &str) -> Result<String, String> {
       let result = TimonResult {
         status: 200,
         message: format!("'{}' database created successfully", db_name),
-        json_string: None,
+        json_value: None,
       };
       Ok(result.to_string().expect("Failed to convert to JSON"))
     }
-    Err(err) => Err(format!("Failed to create database: {}", err)),
+    Err(err) => {
+      let result = TimonResult {
+        status: 400,
+        message: err.to_string(),
+        json_value: None,
+      };
+      Err(result.to_string().expect("Failed to convert to JSON"))
+    }
   }
 }
 
@@ -80,11 +91,18 @@ pub fn create_table(db_name: &str, table_name: &str) -> Result<String, String> {
       let result = TimonResult {
         status: 200,
         message: format!("'{}.{}' table created successfully", db_name, table_name),
-        json_string: None,
+        json_value: None,
       };
       Ok(result.to_string().expect("Failed to convert to JSON"))
     }
-    Err(err) => Err(format!("Failed to create table: {}", err)),
+    Err(err) => {
+      let result = TimonResult {
+        status: 400,
+        message: err.to_string(),
+        json_value: None,
+      };
+      Err(result.to_string().expect("Failed to convert to JSON"))
+    }
   }
 }
 
@@ -93,14 +111,22 @@ pub fn list_databases() -> Result<String, String> {
   let mut database_manager = get_database_manager().clone();
   match database_manager.list_databases() {
     Ok(databases_list) => {
+      let json_value = serde_json::to_value(databases_list).map_err(|e| e.to_string())?;
       let result = TimonResult {
         status: 200,
-        message: format!("success fetching all databases"),
-        json_string: Some(vec_to_json_string(databases_list)),
+        message: "success fetching all databases".to_string(),
+        json_value: Some(json_value),
       };
-      Ok(result.to_string().expect("Failed to convert to JSON"))
+      serde_json::to_string(&result).map_err(|e| e.to_string())
     }
-    Err(err) => Err(format!("Failed to list databases: {}", err)),
+    Err(err) => {
+      let result = TimonResult {
+        status: 400,
+        message: err.to_string(),
+        json_value: None,
+      };
+      serde_json::to_string(&result).map_err(|e| e.to_string())
+    }
   }
 }
 
@@ -109,14 +135,22 @@ pub fn list_tables(db_name: &str) -> Result<String, String> {
   let mut database_manager = get_database_manager().clone();
   match database_manager.list_tables(db_name) {
     Ok(tables_list) => {
+      let json_value = serde_json::to_value(&tables_list).map_err(|e| e.to_string())?;
       let result = TimonResult {
         status: 200,
         message: format!("success fetching '{}' tables", db_name),
-        json_string: Some(vec_to_json_string(tables_list)),
+        json_value: Some(json_value),
       };
       Ok(result.to_string().expect("Failed to convert to JSON"))
     }
-    Err(err) => Err(format!("Failed to list tables: {}", err)),
+    Err(err) => {
+      let result = TimonResult {
+        status: 400,
+        message: err.to_string(),
+        json_value: None,
+      };
+      Err(result.to_string().expect("Failed to convert to JSON"))
+    }
   }
 }
 
@@ -128,11 +162,18 @@ pub fn delete_database(db_name: &str) -> Result<String, String> {
       let result = TimonResult {
         status: 200,
         message: format!("Database '{}' was deleted!", db_name),
-        json_string: None,
+        json_value: None,
       };
       Ok(result.to_string().expect("Failed to convert to JSON"))
     }
-    Err(err) => Err(format!("Failed to delete database: {}", err)),
+    Err(err) => {
+      let result = TimonResult {
+        status: 400,
+        message: err.to_string(),
+        json_value: None,
+      };
+      Err(result.to_string().expect("Failed to convert to JSON"))
+    }
   }
 }
 
@@ -144,11 +185,18 @@ pub fn delete_table(db_name: &str, table_name: &str) -> Result<String, String> {
       let result = TimonResult {
         status: 200,
         message: format!("Table '{}.{}' was deleted!", db_name, table_name),
-        json_string: None,
+        json_value: None,
       };
       Ok(result.to_string().expect("Failed to convert to JSON"))
     }
-    Err(err) => Err(format!("Failed to delete table: {}", err)),
+    Err(err) => {
+      let result = TimonResult {
+        status: 400,
+        message: err.to_string(),
+        json_value: None,
+      };
+      Err(result.to_string().expect("Failed to convert to JSON"))
+    }
   }
 }
 
@@ -160,11 +208,18 @@ pub fn insert(db_name: &str, table_name: &str, json_data: &str) -> Result<String
       let result = TimonResult {
         status: 200,
         message,
-        json_string: None,
+        json_value: None,
       };
       Ok(result.to_string().expect("Failed to convert to JSON"))
     }
-    Err(err) => Err(format!("Failed to insert data: {}", err)),
+    Err(err) => {
+      let result = TimonResult {
+        status: 400,
+        message: err.to_string(),
+        json_value: None,
+      };
+      Err(result.to_string().expect("Failed to convert to JSON"))
+    }
   }
 }
 
@@ -172,16 +227,24 @@ pub fn insert(db_name: &str, table_name: &str, json_data: &str) -> Result<String
 pub async fn query(db_name: &str, date_range: HashMap<&str, &str>, sql_query: &str) -> Result<String, String> {
   let database_manager = get_database_manager();
   match database_manager.query(db_name, date_range, sql_query, true).await {
-    Ok(cloud_sync::DataFusionOutput::Json(data)) => {
+    Ok(db_manager::DataFusionOutput::Json(data)) => {
+      let json_value = serde_json::to_value(&data).map_err(|e| e.to_string())?;
       let res = TimonResult {
         status: 200,
         message: format!("query data with success from '{}' with '{}'", db_name, sql_query),
-        json_string: Some(data),
+        json_value: Some(json_value),
       };
       Ok(res.to_string().expect("Failed to convert to JSON"))
     }
-    Ok(cloud_sync::DataFusionOutput::DataFrame(_df)) => Err("DataFrame output is not directly convertible to string".to_owned()),
-    Err(error) => Err(format!("Error: {:?}", error)),
+    Ok(db_manager::DataFusionOutput::DataFrame(_df)) => Err("DataFrame output is not directly convertible to string".to_owned()),
+    Err(err) => {
+      let result = TimonResult {
+        status: 400,
+        message: err.to_string(),
+        json_value: None,
+      };
+      Err(result.to_string().expect("Failed to convert to JSON"))
+    }
   }
 }
 
@@ -207,8 +270,22 @@ pub fn init_bucket(bucket_endpoint: &str, bucket_name: &str, access_key_id: &str
   );
 
   match CLOUD_STORAGE_MANAGER.set(cloud_storage_manager) {
-    Ok(_) => Ok("CloudStorageManager initialized successfully".to_owned()),
-    Err(_) => Err("CloudStorageManager already initialized".to_string()),
+    Ok(_) => {
+      let result = TimonResult {
+        status: 200,
+        message: "CloudStorageManager initialized successfully".to_owned(),
+        json_value: None,
+      };
+      Ok(result.to_string().expect("Failed to convert to JSON"))
+    }
+    Err(_) => {
+      let result = TimonResult {
+        status: 400,
+        message: "CloudStorageManager already initialized".to_string(),
+        json_value: None,
+      };
+      Err(result.to_string().expect("Failed to convert to JSON"))
+    }
   }
 }
 
@@ -216,19 +293,34 @@ pub fn init_bucket(bucket_endpoint: &str, bucket_name: &str, access_key_id: &str
 pub async fn query_bucket(date_range: HashMap<&str, &str>, sql_query: &str) -> Result<String, String> {
   let cloud_storage_manager = get_cloud_storage_manager();
   match cloud_storage_manager.query_bucket(date_range, &sql_query, true).await {
-    Ok(cloud_sync::DataFusionOutput::Json(data)) => {
-      let res = TimonResult {
+    Ok(db_manager::DataFusionOutput::Json(data)) => {
+      let json_value = serde_json::to_value(&data).map_err(|e| e.to_string())?;
+      let result = TimonResult {
         status: 200,
         message: format!(
           "query data with success from '{}' with '{}'",
           cloud_storage_manager.bucket_name, sql_query
         ),
-        json_string: Some(data),
+        json_value: Some(json_value),
       };
-      Ok(res.to_string().expect("Failed to convert to JSON"))
+      Ok(result.to_string().expect("Failed to convert to JSON"))
     }
-    Ok(cloud_sync::DataFusionOutput::DataFrame(_df)) => Err("DataFrame output is not directly convertible to string".to_owned()),
-    Err(error) => Err(format!("Error: {:?}", error)),
+    Ok(db_manager::DataFusionOutput::DataFrame(_df)) => {
+      let result = TimonResult {
+        status: 400,
+        message: "DataFrame output is not directly convertible to string".to_owned(),
+        json_value: None,
+      };
+      Err(result.to_string().expect("Failed to convert to JSON"))
+    }
+    Err(err) => {
+      let result = TimonResult {
+        status: 400,
+        message: err.to_string(),
+        json_value: None,
+      };
+      Err(result.to_string().expect("Failed to convert to JSON"))
+    }
   }
 }
 
@@ -237,16 +329,23 @@ pub async fn sink_monthly_parquet(db_name: &str, table_name: &str) -> Result<Str
   let cloud_storage_manager = get_cloud_storage_manager();
   match cloud_storage_manager.sink_monthly_parquet(db_name, table_name).await {
     Ok(_) => {
-      let res = TimonResult {
+      let result = TimonResult {
         status: 200,
         message: format!(
           "successfully uploaded '{}.{}' table data to '{}' bucket",
           db_name, table_name, cloud_storage_manager.bucket_name
         ),
-        json_string: None,
+        json_value: None,
       };
-      Ok(res.to_string().expect("Failed to convert to JSON"))
+      Ok(result.to_string().expect("Failed to convert to JSON"))
     }
-    Err(error) => Err(format!("Error {:?}", error)),
+    Err(err) => {
+      let result = TimonResult {
+        status: 400,
+        message: err.to_string(),
+        json_value: None,
+      };
+      Err(result.to_string().expect("Failed to convert to JSON"))
+    }
   }
 }

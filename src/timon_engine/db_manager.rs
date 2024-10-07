@@ -1,7 +1,8 @@
 use arrow::record_batch::RecordBatch;
 use chrono::Utc;
+use datafusion::dataframe::DataFrame;
 use datafusion::datasource::MemTable;
-use datafusion::error::Result as DataFusionResult;
+use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::prelude::*;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
@@ -10,13 +11,33 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::error::Error;
-use std::fs;
 use std::path::Path;
 use std::sync::Arc;
+use std::{fmt, fs};
 use tokio::io::Result as TokioResult;
 
-use super::cloud_sync::DataFusionOutput;
 use super::helpers::{extract_table_name, generate_paths, json_to_arrow, record_batches_to_json, row_to_json, Granularity};
+
+pub enum DataFusionOutput {
+  Json(Value),
+  DataFrame(DataFrame),
+}
+
+impl fmt::Debug for DataFusionOutput {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      DataFusionOutput::Json(s) => write!(f, "Json({})", s),
+      DataFusionOutput::DataFrame(df) => {
+        let runtime = tokio::runtime::Runtime::new().expect("Failed to create runtime");
+        let result = runtime.block_on(async { df.clone().collect().await.expect("Failed to collect DataFrame results") });
+        for batch in result {
+          writeln!(f, "{:?}", batch)?;
+        }
+        Ok(())
+      }
+    }
+  }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Metadata {
@@ -78,20 +99,17 @@ impl DatabaseManager {
     }
   }
 
-  pub fn create_database(&mut self, db_name: &str) -> Result<(), datafusion::error::DataFusionError> {
+  pub fn create_database(&mut self, db_name: &str) -> Result<(), DataFusionError> {
     // Reload the metadata to ensure it's up to date
     self.metadata = self
       .read_metadata()
-      .map_err(|e| datafusion::error::DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))?;
+      .map_err(|e| DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))?;
 
     let db_data_path = format!("{}/{}", self.data_path, db_name);
 
     // Create a new directory for the database if it doesn't exist
     if let Err(e) = fs::create_dir(&db_data_path) {
-      return Err(datafusion::error::DataFusionError::Execution(format!(
-        "Error creating data directory {}: {}",
-        db_name, e
-      )));
+      return Err(DataFusionError::Execution(format!("Error creating data directory {}: {}", db_name, e)));
     }
 
     // Insert the new database into the metadata
@@ -104,23 +122,23 @@ impl DatabaseManager {
     // Save the updated metadata to metadata.json
     self
       .save_metadata()
-      .map_err(|e| datafusion::error::DataFusionError::Execution(format!("Failed to save metadata: {}", e)))?;
+      .map_err(|e| DataFusionError::Execution(format!("Failed to save metadata: {}", e)))?;
 
     Ok(())
   }
 
-  pub fn create_table(&mut self, db_name: &str, table_name: &str) -> Result<(), datafusion::error::DataFusionError> {
+  pub fn create_table(&mut self, db_name: &str, table_name: &str) -> Result<(), DataFusionError> {
     // Reload the metadata to ensure it's up to date
     self.metadata = self
       .read_metadata()
-      .map_err(|e| datafusion::error::DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))?;
+      .map_err(|e| DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))?;
 
     let table_path = format!("{}/{}/{}", self.data_path, db_name, table_name);
     let table_dir = Path::new(&table_path);
 
     // Create the directory if it does not exist
     if let Err(e) = fs::create_dir(table_dir) {
-      return Err(datafusion::error::DataFusionError::Execution(format!(
+      return Err(DataFusionError::Execution(format!(
         "Failed to create directory {}: {}",
         table_dir.display(),
         e
@@ -137,7 +155,7 @@ impl DatabaseManager {
         },
       );
     } else {
-      return Err(datafusion::error::DataFusionError::Plan(format!("Database {} not found", db_name)));
+      return Err(DataFusionError::Plan(format!("Database {} not found", db_name)));
     }
 
     // Save updated metadata
@@ -146,12 +164,11 @@ impl DatabaseManager {
     Ok(())
   }
 
-  pub fn list_databases(&mut self) -> Result<Vec<String>, String> {
+  pub fn list_databases(&mut self) -> Result<Vec<String>, DataFusionError> {
     // Reload the metadata to ensure it's up to date
     self.metadata = self
       .read_metadata()
-      .map_err(|e| datafusion::error::DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))
-      .unwrap();
+      .map_err(|e| DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))?;
 
     // Read metadata file
     let file_content = fs::read_to_string(&self.metadata_path).unwrap();
@@ -161,12 +178,11 @@ impl DatabaseManager {
     Ok(databases_list)
   }
 
-  pub fn list_tables(&mut self, db_name: &str) -> Result<Vec<String>, String> {
+  pub fn list_tables(&mut self, db_name: &str) -> Result<Vec<String>, DataFusionError> {
     // Reload the metadata to ensure it's up to date
     self.metadata = self
       .read_metadata()
-      .map_err(|e| datafusion::error::DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))
-      .unwrap();
+      .map_err(|e| DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))?;
 
     // Check if the database exists in the metadata
     if let Some(database) = self.metadata.databases.get(db_name) {
@@ -174,38 +190,37 @@ impl DatabaseManager {
 
       Ok(tables_list)
     } else {
-      Err(format!("Database '{}' not found", db_name))
+      Err(DataFusionError::Plan(format!("Database '{}' not found", db_name)))
     }
   }
 
-  pub fn delete_database(&mut self, db_name: &str) -> Result<(), String> {
+  pub fn delete_database(&mut self, db_name: &str) -> Result<(), DataFusionError> {
     // Reload the metadata to ensure it's up to date
     self.metadata = self
       .read_metadata()
-      .map_err(|e| datafusion::error::DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))
-      .unwrap();
+      .map_err(|e| DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))?;
 
     // Remove the database from metadata and save changes
     if self.metadata.databases.remove(db_name).is_some() {
-      self.save_metadata().map_err(|e| e.to_string())?;
+      self.save_metadata().map_err(|e| e.to_string()).unwrap();
     } else {
-      return Err(format!("Failed to remove database '{}' from metadata", db_name));
+      return Err(DataFusionError::Plan(format!("Failed to remove database '{}' from metadata", db_name)));
     }
 
     // Remove database's directory from filesystem
     let db_path = format!("{}/{}", self.data_path, db_name);
     if fs::remove_dir_all(db_path).is_err() {
-      return Err(format!("Failed to remove database directory '{}'", db_name));
+      return Err(DataFusionError::Plan(format!("Failed to remove database directory '{}'", db_name)));
     }
 
     Ok(())
   }
 
-  pub fn delete_table(&mut self, db_name: &str, table_name: &str) -> Result<(), String> {
+  pub fn delete_table(&mut self, db_name: &str, table_name: &str) -> Result<(), DataFusionError> {
     // Reload the metadata to ensure it's up to date
     self.metadata = self
       .read_metadata()
-      .map_err(|e| datafusion::error::DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))
+      .map_err(|e| DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))
       .unwrap();
 
     // Check if the database exists
@@ -213,20 +228,23 @@ impl DatabaseManager {
       // Check if the table exists and remove it
       if db.tables.remove(table_name).is_some() {
         // Save the updated metadata
-        self.save_metadata().map_err(|e| e.to_string())?;
+        self.save_metadata().map_err(|e| e.to_string()).unwrap();
 
         // Remove table's directory from filesystem
         let table_path = format!("{}/{}/{}", self.data_path, db_name, table_name);
         if fs::remove_dir_all(table_path).is_err() {
-          return Err(format!("Failed to remove table directory '{}'", table_name));
+          return Err(DataFusionError::Plan(format!("Failed to remove table directory '{}'", table_name)));
         }
 
         Ok(())
       } else {
-        Err(format!("Table '{}' not found in database '{}'", table_name, db_name))
+        Err(DataFusionError::Plan(format!(
+          "Table '{}' not found in database '{}'",
+          table_name, db_name
+        )))
       }
     } else {
-      Err(format!("Database '{}' not found", db_name))
+      Err(DataFusionError::Plan(format!("Database '{}' not found", db_name)))
     }
   }
 
@@ -358,7 +376,7 @@ impl DatabaseManager {
     }
 
     if table_names.is_empty() {
-      return Err(datafusion::error::DataFusionError::Plan("No valid tables found to query.".to_string()));
+      return Err(DataFusionError::Plan("No valid tables found to query.".to_string()));
     }
 
     // Combine all tables into a single SQL query using UNION ALL

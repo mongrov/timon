@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub fn record_batches_to_json(batches: &[RecordBatch]) -> Result<String, serde_json::Error> {
+pub fn record_batches_to_json(batches: &[RecordBatch]) -> Result<Value, serde_json::Error> {
   let mut rows = Vec::new();
 
   for batch in batches {
@@ -30,7 +30,7 @@ pub fn record_batches_to_json(batches: &[RecordBatch]) -> Result<String, serde_j
     }
   }
 
-  serde_json::to_string(&rows)
+  serde_json::to_value(&rows)
 }
 
 fn array_value_to_json(array: &ArrayRef, row_index: usize) -> serde_json::Value {

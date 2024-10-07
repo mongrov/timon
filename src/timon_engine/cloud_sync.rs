@@ -1,6 +1,5 @@
 use crate::timon_engine::helpers;
 use chrono::Utc;
-use datafusion::dataframe::DataFrame;
 use datafusion::datasource::listing::{ListingTable, ListingTableConfig, ListingTableUrl};
 use datafusion::datasource::MemTable;
 use datafusion::error::Result as DataFusionResult;
@@ -16,37 +15,14 @@ use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use parquet::file::reader::SerializedFileReader;
 use regex::Regex;
-use std::fmt;
-use std::fs;
-use std::fs::File;
+use std::fs::{self, File};
 use std::path::Path;
 use std::{collections::HashMap, sync::Arc};
 use tokio::io::AsyncReadExt;
 use url::Url;
 
-use super::db_manager::DatabaseManager;
+use super::db_manager::{DataFusionOutput, DatabaseManager};
 use super::helpers::extract_table_name;
-
-pub enum DataFusionOutput {
-  Json(String),
-  DataFrame(DataFrame),
-}
-
-impl fmt::Debug for DataFusionOutput {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    match self {
-      DataFusionOutput::Json(s) => write!(f, "Json({})", s),
-      DataFusionOutput::DataFrame(df) => {
-        let runtime = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-        let result = runtime.block_on(async { df.clone().collect().await.expect("Failed to collect DataFrame results") });
-        for batch in result {
-          writeln!(f, "{:?}", batch)?;
-        }
-        Ok(())
-      }
-    }
-  }
-}
 
 pub struct CloudStorageManager {
   s3_store: Arc<AmazonS3>,
