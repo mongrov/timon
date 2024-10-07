@@ -90,7 +90,7 @@ pub fn create_table(db_name: &str, table_name: &str) -> Result<String, String> {
 
 #[allow(dead_code)]
 pub fn list_databases() -> Result<String, String> {
-  let database_manager = get_database_manager();
+  let mut database_manager = get_database_manager().clone();
   match database_manager.list_databases() {
     Ok(databases_list) => {
       let result = TimonResult {
@@ -106,7 +106,7 @@ pub fn list_databases() -> Result<String, String> {
 
 #[allow(dead_code)]
 pub fn list_tables(db_name: &str) -> Result<String, String> {
-  let database_manager = get_database_manager();
+  let mut database_manager = get_database_manager().clone();
   match database_manager.list_tables(db_name) {
     Ok(tables_list) => {
       let result = TimonResult {
