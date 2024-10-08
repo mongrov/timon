@@ -19,8 +19,9 @@ pub mod android {
     let rust_storage_path: String = env.get_string(&storage_path).expect("Couldn't get java string!").into();
 
     match init_timon(&rust_storage_path) {
-      Ok(success_message) => {
-        let output = env.new_string(success_message).expect("Couldn't create success string!");
+      Ok(result) => {
+        let json_string = result.to_string();
+        let output = env.new_string(json_string).expect("Couldn't create success string!");
         output.into_raw()
       }
       Err(err) => {
@@ -37,7 +38,8 @@ pub mod android {
 
     match create_database(&rust_db_name) {
       Ok(result) => {
-        let output = env.new_string(result).expect("Couldn't create success string!");
+        let json_string = result.to_string();
+        let output = env.new_string(json_string).expect("Couldn't create success string!");
         output.into_raw()
       }
       Err(err) => {
@@ -60,7 +62,8 @@ pub mod android {
 
     match create_table(&rust_db_name, &rust_table_name) {
       Ok(result) => {
-        let output = env.new_string(result).expect("Couldn't create success string!");
+        let json_string = result.to_string();
+        let output = env.new_string(json_string).expect("Couldn't create success string!");
         output.into_raw()
       }
       Err(err) => {
@@ -75,7 +78,8 @@ pub mod android {
   pub unsafe extern "C" fn Java_com_rustexample_TimonModule_listDatabases(env: JNIEnv, _class: JClass) -> jstring {
     match list_databases() {
       Ok(result) => {
-        let output = env.new_string(result).expect("Couldn't create success string!");
+        let json_string = result.to_string();
+        let output = env.new_string(json_string).expect("Couldn't create success string!");
         output.into_raw()
       }
       Err(err) => {
@@ -92,7 +96,8 @@ pub mod android {
 
     match list_tables(&rust_db_name) {
       Ok(result) => {
-        let output = env.new_string(result).expect("Couldn't create success string!");
+        let json_string = result.to_string();
+        let output = env.new_string(json_string).expect("Couldn't create success string!");
         output.into_raw()
       }
       Err(err) => {
@@ -109,7 +114,8 @@ pub mod android {
 
     match delete_database(&rust_db_name) {
       Ok(result) => {
-        let output = env.new_string(result).expect("Couldn't create success string!");
+        let json_string = result.to_string();
+        let output = env.new_string(json_string).expect("Couldn't create success string!");
         output.into_raw()
       }
       Err(err) => {
@@ -132,7 +138,8 @@ pub mod android {
 
     match delete_table(&rust_db_name, &rust_table_name) {
       Ok(result) => {
-        let output = env.new_string(result).expect("Couldn't create success string!");
+        let json_string = result.to_string();
+        let output = env.new_string(json_string).expect("Couldn't create success string!");
         output.into_raw()
       }
       Err(err) => {
@@ -156,8 +163,9 @@ pub mod android {
     let rust_json_data: String = env.get_string(&json_data).expect("Couldn't get java string!").into();
 
     match insert(&rust_db_name, &rust_table_name, &rust_json_data) {
-      Ok(success_message) => {
-        let output = env.new_string(success_message).expect("Couldn't create success string!");
+      Ok(result) => {
+        let json_string = result.to_string();
+        let output = env.new_string(json_string).expect("Couldn't create success string!");
         output.into_raw()
       }
       Err(e) => {
@@ -220,9 +228,10 @@ pub mod android {
     rust_date_range.insert("end_date", &rust_end);
 
     match Runtime::new().unwrap().block_on(query(&rust_db_name, rust_date_range, &rust_sql_query)) {
-      Ok(output) => {
-        let java_string = env.new_string(output).expect("Couldn't create java string!");
-        java_string.into_raw()
+      Ok(result) => {
+        let json_string = result.to_string();
+        let output = env.new_string(json_string).expect("Couldn't create success string!");
+        output.into_raw()
       }
       Err(e) => {
         let error_message = env
@@ -249,8 +258,9 @@ pub mod android {
     let rust_secret_access_key: String = env.get_string(&secret_access_key).expect("Couldn't get java string!").into();
 
     match init_bucket(&rust_bucket_endpoint, &rust_bucket_name, &rust_access_key_id, &rust_secret_access_key) {
-      Ok(success_message) => {
-        let output = env.new_string(success_message).expect("Couldn't create success string!");
+      Ok(result) => {
+        let json_string = result.to_string();
+        let output = env.new_string(json_string).expect("Couldn't create success string!");
         output.into_raw()
       }
       Err(err) => {
@@ -278,9 +288,10 @@ pub mod android {
     rust_date_range.insert("end_date", &rust_end);
 
     match Runtime::new().unwrap().block_on(query_bucket(rust_date_range, &rust_sql_query)) {
-      Ok(output) => {
-        let java_string = env.new_string(output).expect("Couldn't create java string!");
-        java_string.into_raw()
+      Ok(result) => {
+        let json_string = result.to_string();
+        let output = env.new_string(json_string).expect("Couldn't create success string!");
+        output.into_raw()
       }
       Err(e) => {
         let error_message = env
@@ -302,8 +313,9 @@ pub mod android {
     let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
 
     match Runtime::new().unwrap().block_on(sink_monthly_parquet(&rust_db_name, &rust_table_name)) {
-      Ok(success_message) => {
-        let output = env.new_string(success_message).expect("Couldn't create success string!");
+      Ok(result) => {
+        let json_string = result.to_string();
+        let output = env.new_string(json_string).expect("Couldn't create success string!");
         output.into_raw()
       }
       Err(err) => {
