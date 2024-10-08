@@ -31,9 +31,8 @@ fn get_database_manager() -> &'static DatabaseManager {
   DATABASE_MANAGER.get().expect("DatabaseManager is not initialized")
 }
 
-#[allow(improper_ctypes_definitions)]
-#[no_mangle]
-pub extern "C" fn init_timon(storage_path: &str) -> Result<Value, String> {
+#[allow(dead_code)]
+pub fn init_timon(storage_path: &str) -> Result<Value, String> {
   let db_manager = DatabaseManager::new(storage_path);
   match DATABASE_MANAGER.set(db_manager) {
     Ok(_) => {
@@ -55,9 +54,8 @@ pub extern "C" fn init_timon(storage_path: &str) -> Result<Value, String> {
   }
 }
 
-#[allow(improper_ctypes_definitions)]
-#[no_mangle]
-pub extern "C" fn create_database(db_name: &str) -> Result<Value, String> {
+#[allow(dead_code)]
+pub fn create_database(db_name: &str) -> Result<Value, String> {
   let database_manager = get_database_manager();
   match database_manager.clone().create_database(db_name) {
     Ok(_) => {
@@ -79,9 +77,8 @@ pub extern "C" fn create_database(db_name: &str) -> Result<Value, String> {
   }
 }
 
-#[allow(improper_ctypes_definitions)]
-#[no_mangle]
-pub extern "C" fn create_table(db_name: &str, table_name: &str) -> Result<Value, String> {
+#[allow(dead_code)]
+pub fn create_table(db_name: &str, table_name: &str) -> Result<Value, String> {
   let database_manager = get_database_manager();
   match database_manager.clone().create_table(db_name, table_name) {
     Ok(_) => {
@@ -103,9 +100,8 @@ pub extern "C" fn create_table(db_name: &str, table_name: &str) -> Result<Value,
   }
 }
 
-#[allow(improper_ctypes_definitions)]
-#[no_mangle]
-pub extern "C" fn list_databases() -> Result<Value, String> {
+#[allow(dead_code)]
+pub fn list_databases() -> Result<Value, String> {
   let mut database_manager = get_database_manager().clone();
   match database_manager.list_databases() {
     Ok(databases_list) => {
@@ -128,9 +124,8 @@ pub extern "C" fn list_databases() -> Result<Value, String> {
   }
 }
 
-#[allow(improper_ctypes_definitions)]
-#[no_mangle]
-pub extern "C" fn list_tables(db_name: &str) -> Result<Value, String> {
+#[allow(dead_code)]
+pub fn list_tables(db_name: &str) -> Result<Value, String> {
   let mut database_manager = get_database_manager().clone();
   match database_manager.list_tables(db_name) {
     Ok(tables_list) => {
@@ -153,9 +148,8 @@ pub extern "C" fn list_tables(db_name: &str) -> Result<Value, String> {
   }
 }
 
-#[allow(improper_ctypes_definitions)]
-#[no_mangle]
-pub extern "C" fn delete_database(db_name: &str) -> Result<Value, String> {
+#[allow(dead_code)]
+pub fn delete_database(db_name: &str) -> Result<Value, String> {
   let database_manager = get_database_manager();
   match database_manager.clone().delete_database(db_name) {
     Ok(_) => {
@@ -177,9 +171,8 @@ pub extern "C" fn delete_database(db_name: &str) -> Result<Value, String> {
   }
 }
 
-#[allow(improper_ctypes_definitions)]
-#[no_mangle]
-pub extern "C" fn delete_table(db_name: &str, table_name: &str) -> Result<Value, String> {
+#[allow(dead_code)]
+pub fn delete_table(db_name: &str, table_name: &str) -> Result<Value, String> {
   let database_manager = get_database_manager();
   match database_manager.clone().delete_table(db_name, table_name) {
     Ok(_) => {
@@ -201,9 +194,8 @@ pub extern "C" fn delete_table(db_name: &str, table_name: &str) -> Result<Value,
   }
 }
 
-#[allow(improper_ctypes_definitions)]
-#[no_mangle]
-pub extern "C" fn insert(db_name: &str, table_name: &str, json_data: &str) -> Result<Value, String> {
+#[allow(dead_code)]
+pub fn insert(db_name: &str, table_name: &str, json_data: &str) -> Result<Value, String> {
   let database_manager = get_database_manager();
   match database_manager.insert(db_name, table_name, json_data) {
     Ok(message) => {
@@ -225,8 +217,7 @@ pub extern "C" fn insert(db_name: &str, table_name: &str, json_data: &str) -> Re
   }
 }
 
-#[allow(improper_ctypes_definitions)]
-#[no_mangle]
+#[allow(dead_code)]
 pub async fn query(db_name: &str, date_range: HashMap<&str, &str>, sql_query: &str) -> Result<Value, String> {
   let database_manager = get_database_manager();
   match database_manager.query(db_name, date_range, sql_query, true).await {
@@ -262,9 +253,8 @@ fn get_cloud_storage_manager() -> &'static CloudStorageManager {
   CLOUD_STORAGE_MANAGER.get().expect("CloudStorageManager is not initialized")
 }
 
-#[allow(improper_ctypes_definitions)]
-#[no_mangle]
-pub extern "C" fn init_bucket(bucket_endpoint: &str, bucket_name: &str, access_key_id: &str, secret_access_key: &str) -> Result<Value, String> {
+#[allow(dead_code)]
+pub fn init_bucket(bucket_endpoint: &str, bucket_name: &str, access_key_id: &str, secret_access_key: &str) -> Result<Value, String> {
   let cloud_storage_manager = cloud_sync::CloudStorageManager::new(
     get_database_manager().clone(),
     Some(bucket_endpoint),
@@ -293,8 +283,7 @@ pub extern "C" fn init_bucket(bucket_endpoint: &str, bucket_name: &str, access_k
   }
 }
 
-#[allow(improper_ctypes_definitions)]
-#[no_mangle]
+#[allow(dead_code)]
 pub async fn query_bucket(date_range: HashMap<&str, &str>, sql_query: &str) -> Result<Value, String> {
   let cloud_storage_manager = get_cloud_storage_manager();
   match cloud_storage_manager.query_bucket(date_range, &sql_query, true).await {
@@ -329,8 +318,7 @@ pub async fn query_bucket(date_range: HashMap<&str, &str>, sql_query: &str) -> R
   }
 }
 
-#[allow(improper_ctypes_definitions)]
-#[no_mangle]
+#[allow(dead_code)]
 pub async fn sink_monthly_parquet(db_name: &str, table_name: &str) -> Result<Value, String> {
   let cloud_storage_manager = get_cloud_storage_manager();
   match cloud_storage_manager.sink_monthly_parquet(db_name, table_name).await {

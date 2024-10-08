@@ -1,6 +1,5 @@
 mod timon_engine;
 
-/// cbindgen:ignore
 #[cfg(target_os = "android")]
 pub mod android {
   use crate::timon_engine::{
@@ -322,6 +321,343 @@ pub mod android {
         let err_message = format!("Failed sink monthly parquet files: {:?}", err);
         let output = env.new_string(err_message).expect("Couldn't create error string!");
         output.into_raw()
+      }
+    }
+  }
+}
+
+#[cfg(target_os = "ios")]
+pub mod ios {
+  use crate::timon_engine::{
+    create_database, create_table, delete_database, delete_table, init_bucket, init_timon, insert, list_databases, list_tables, query, query_bucket,
+    sink_monthly_parquet,
+  };
+  use libc::c_char;
+  use std::collections::HashMap;
+  use std::ffi::{CStr, CString};
+  use tokio::runtime::Runtime;
+
+  // Helper function to convert C strings to Rust strings
+  unsafe fn c_str_to_string(c_str: *const c_char) -> Result<String, String> {
+    if c_str.is_null() {
+      Err("Null pointer received".to_string())
+    } else {
+      CStr::from_ptr(c_str)
+        .to_str()
+        .map(|s| s.to_string())
+        .map_err(|e| format!("Failed to convert C string to Rust string: {:?}", e))
+    }
+  }
+
+  // Helper function to convert Rust strings to C strings
+  fn string_to_c_str(s: String) -> *mut c_char {
+    CString::new(s).unwrap().into_raw()
+  }
+
+  #[no_mangle]
+  pub extern "C" fn rust_string_free(s: *mut c_char) {
+    if !s.is_null() {
+      unsafe {
+        CString::from_raw(s);
+      }
+    }
+  }
+  #[no_mangle]
+  pub extern "C" fn Java_com_rustexample_TimonModule_initTimon(storage_path: *const c_char) -> *mut c_char {
+    unsafe {
+      match c_str_to_string(storage_path) {
+        Ok(rust_storage_path) => match init_timon(&rust_storage_path) {
+          Ok(result) => {
+            let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
+            string_to_c_str(json_string)
+          }
+          Err(err) => {
+            let err_message = serde_json::json!({ "error": format!("Failed to initialize Timon: {:?}", err) }).to_string();
+            string_to_c_str(err_message)
+          }
+        },
+        Err(err) => {
+          let err_message = serde_json::json!({ "error": err }).to_string();
+          string_to_c_str(err_message)
+        }
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub extern "C" fn Java_com_rustexample_TimonModule_createDatabase(db_name: *const c_char) -> *mut c_char {
+    unsafe {
+      match c_str_to_string(db_name) {
+        Ok(rust_db_name) => match create_database(&rust_db_name) {
+          Ok(result) => {
+            let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
+            string_to_c_str(json_string)
+          }
+          Err(err) => {
+            let err_message = serde_json::json!({ "error": format!("Failed to create database: {:?}", err) }).to_string();
+            string_to_c_str(err_message)
+          }
+        },
+        Err(err) => {
+          let err_message = serde_json::json!({ "error": err }).to_string();
+          string_to_c_str(err_message)
+        }
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub extern "C" fn Java_com_rustexample_TimonModule_createTable(db_name: *const c_char, table_name: *const c_char) -> *mut c_char {
+    unsafe {
+      match (c_str_to_string(db_name), c_str_to_string(table_name)) {
+        (Ok(rust_db_name), Ok(rust_table_name)) => match create_table(&rust_db_name, &rust_table_name) {
+          Ok(result) => {
+            let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
+            string_to_c_str(json_string)
+          }
+          Err(err) => {
+            let err_message = serde_json::json!({ "error": format!("Failed to create table: {:?}", err) }).to_string();
+            string_to_c_str(err_message)
+          }
+        },
+        (Err(e), _) | (_, Err(e)) => {
+          let err_message = serde_json::json!({ "error": e }).to_string();
+          string_to_c_str(err_message)
+        }
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub extern "C" fn Java_com_rustexample_TimonModule_listDatabases() -> *mut c_char {
+    match list_databases() {
+      Ok(result) => {
+        let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "[]".to_string());
+        string_to_c_str(json_string)
+      }
+      Err(err) => {
+        let err_message = serde_json::json!({ "error": format!("Failed to list databases: {:?}", err) }).to_string();
+        string_to_c_str(err_message)
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub extern "C" fn Java_com_rustexample_TimonModule_listTables(db_name: *const c_char) -> *mut c_char {
+    unsafe {
+      match c_str_to_string(db_name) {
+        Ok(rust_db_name) => match list_tables(&rust_db_name) {
+          Ok(result) => {
+            let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "[]".to_string());
+            string_to_c_str(json_string)
+          }
+          Err(err) => {
+            let err_message = serde_json::json!({ "error": format!("Failed to list tables: {:?}", err) }).to_string();
+            string_to_c_str(err_message)
+          }
+        },
+        Err(err) => {
+          let err_message = serde_json::json!({ "error": err }).to_string();
+          string_to_c_str(err_message)
+        }
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub extern "C" fn Java_com_rustexample_TimonModule_deleteDatabase(db_name: *const c_char) -> *mut c_char {
+    unsafe {
+      match c_str_to_string(db_name) {
+        Ok(rust_db_name) => match delete_database(&rust_db_name) {
+          Ok(result) => {
+            let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
+            string_to_c_str(json_string)
+          }
+          Err(err) => {
+            let err_message = serde_json::json!({ "error": format!("Failed to delete database: {:?}", err) }).to_string();
+            string_to_c_str(err_message)
+          }
+        },
+        Err(err) => {
+          let err_message = serde_json::json!({ "error": err }).to_string();
+          string_to_c_str(err_message)
+        }
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub extern "C" fn Java_com_rustexample_TimonModule_deleteTable(db_name: *const c_char, table_name: *const c_char) -> *mut c_char {
+    unsafe {
+      match (c_str_to_string(db_name), c_str_to_string(table_name)) {
+        (Ok(rust_db_name), Ok(rust_table_name)) => match delete_table(&rust_db_name, &rust_table_name) {
+          Ok(result) => {
+            let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
+            string_to_c_str(json_string)
+          }
+          Err(err) => {
+            let err_message = serde_json::json!({ "error": format!("Failed to delete table: {:?}", err) }).to_string();
+            string_to_c_str(err_message)
+          }
+        },
+        (Err(e), _) | (_, Err(e)) => {
+          let err_message = serde_json::json!({ "error": e }).to_string();
+          string_to_c_str(err_message)
+        }
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub extern "C" fn Java_com_rustexample_TimonModule_insert(
+    db_name: *const c_char,
+    table_name: *const c_char,
+    json_data: *const c_char,
+  ) -> *mut c_char {
+    unsafe {
+      match (c_str_to_string(db_name), c_str_to_string(table_name), c_str_to_string(json_data)) {
+        (Ok(rust_db_name), Ok(rust_table_name), Ok(rust_json_data)) => match insert(&rust_db_name, &rust_table_name, &rust_json_data) {
+          Ok(result) => {
+            let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
+            string_to_c_str(json_string)
+          }
+          Err(err) => {
+            let err_message = serde_json::json!({ "error": format!("Error writing JSON data to Parquet file: {:?}", err) }).to_string();
+            string_to_c_str(err_message)
+          }
+        },
+        _ => {
+          let err_message = serde_json::json!({ "error": "Invalid arguments" }).to_string();
+          string_to_c_str(err_message)
+        }
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub extern "C" fn Java_com_rustexample_TimonModule_query(
+    db_name: *const c_char,
+    date_range_json: *const c_char,
+    sql_query: *const c_char,
+  ) -> *mut c_char {
+    unsafe {
+      match (c_str_to_string(db_name), c_str_to_string(date_range_json), c_str_to_string(sql_query)) {
+        (Ok(rust_db_name), Ok(rust_date_range_json), Ok(rust_sql_query)) => {
+          // Parse date_range_json into HashMap
+          let rust_date_range: HashMap<String, String> = serde_json::from_str(&rust_date_range_json).unwrap_or_default();
+          let start_date = rust_date_range.get("start").cloned().unwrap_or_else(|| "1970-01-01".to_string());
+          let end_date = rust_date_range.get("end").cloned().unwrap_or_else(|| "1970-01-02".to_string());
+
+          let mut date_range_map = HashMap::new();
+          date_range_map.insert("start_date", start_date.as_str());
+          date_range_map.insert("end_date", end_date.as_str());
+
+          match Runtime::new().unwrap().block_on(query(&rust_db_name, date_range_map, &rust_sql_query)) {
+            Ok(result) => {
+              let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "[]".to_string());
+              string_to_c_str(json_string)
+            }
+            Err(err) => {
+              let err_message = serde_json::json!({ "error": format!("Error querying Parquet files: {:?}", err) }).to_string();
+              string_to_c_str(err_message)
+            }
+          }
+        }
+        _ => {
+          let err_message = serde_json::json!({ "error": "Invalid arguments" }).to_string();
+          string_to_c_str(err_message)
+        }
+      }
+    }
+  }
+
+  // ******************************** S3 Compatible Storage ********************************
+
+  #[no_mangle]
+  pub extern "C" fn Java_com_rustexample_TimonModule_initBucket(
+    bucket_endpoint: *const c_char,
+    bucket_name: *const c_char,
+    access_key_id: *const c_char,
+    secret_access_key: *const c_char,
+  ) -> *mut c_char {
+    unsafe {
+      match (
+        c_str_to_string(bucket_endpoint),
+        c_str_to_string(bucket_name),
+        c_str_to_string(access_key_id),
+        c_str_to_string(secret_access_key),
+      ) {
+        (Ok(rust_bucket_endpoint), Ok(rust_bucket_name), Ok(rust_access_key_id), Ok(rust_secret_access_key)) => {
+          match init_bucket(&rust_bucket_endpoint, &rust_bucket_name, &rust_access_key_id, &rust_secret_access_key) {
+            Ok(result) => {
+              let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
+              string_to_c_str(json_string)
+            }
+            Err(err) => {
+              let err_message = serde_json::json!({ "error": format!("Failed to initialize S3 bucket: {:?}", err) }).to_string();
+              string_to_c_str(err_message)
+            }
+          }
+        }
+        _ => {
+          let err_message = serde_json::json!({ "error": "Invalid arguments" }).to_string();
+          string_to_c_str(err_message)
+        }
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub extern "C" fn Java_com_rustexample_TimonModule_queryBucket(date_range_json: *const c_char, sql_query: *const c_char) -> *mut c_char {
+    unsafe {
+      match (c_str_to_string(date_range_json), c_str_to_string(sql_query)) {
+        (Ok(rust_date_range_json), Ok(rust_sql_query)) => {
+          // Parse date_range_json into HashMap
+          let rust_date_range: HashMap<String, String> = serde_json::from_str(&rust_date_range_json).unwrap_or_default();
+          let start_date = rust_date_range.get("start").cloned().unwrap_or_else(|| "1970-01-01".to_string());
+          let end_date = rust_date_range.get("end").cloned().unwrap_or_else(|| "1970-01-02".to_string());
+
+          let mut date_range_map = HashMap::new();
+          date_range_map.insert("start_date", start_date.as_str());
+          date_range_map.insert("end_date", end_date.as_str());
+
+          match Runtime::new().unwrap().block_on(query_bucket(date_range_map, &rust_sql_query)) {
+            Ok(result) => {
+              let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "[]".to_string());
+              string_to_c_str(json_string)
+            }
+            Err(err) => {
+              let err_message = serde_json::json!({ "error": format!("Error querying bucket: {:?}", err) }).to_string();
+              string_to_c_str(err_message)
+            }
+          }
+        }
+        _ => {
+          let err_message = serde_json::json!({ "error": "Invalid arguments" }).to_string();
+          string_to_c_str(err_message)
+        }
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub extern "C" fn Java_com_rustexample_TimonModule_sinkMonthlyParquet(db_name: *const c_char, table_name: *const c_char) -> *mut c_char {
+    unsafe {
+      match (c_str_to_string(db_name), c_str_to_string(table_name)) {
+        (Ok(rust_db_name), Ok(rust_table_name)) => match Runtime::new().unwrap().block_on(sink_monthly_parquet(&rust_db_name, &rust_table_name)) {
+          Ok(result) => {
+            let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
+            string_to_c_str(json_string)
+          }
+          Err(err) => {
+            let err_message = serde_json::json!({ "error": format!("Failed to sink monthly Parquet files: {:?}", err) }).to_string();
+            string_to_c_str(err_message)
+          }
+        },
+        _ => {
+          let err_message = serde_json::json!({ "error": "Invalid arguments" }).to_string();
+          string_to_c_str(err_message)
+        }
       }
     }
   }
