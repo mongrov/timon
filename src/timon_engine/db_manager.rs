@@ -76,10 +76,19 @@ impl DatabaseManager {
     if let Err(e) = fs::create_dir_all(&data_path) {
       eprintln!("Error creating data directory {}: {}", data_path, e);
     }
-    // Create the metadata file if it doesn't exist
+
+    // Check if the metadata file exists
     if !Path::new(&metadata_path).exists() {
-      if let Err(e) = fs::File::create(&metadata_path) {
-        eprintln!("Error creating metadata file: {}", e);
+      // Create the metadata file if it doesn't exist
+      match fs::File::create(&metadata_path) {
+        Ok(_) => {
+          // Write the initial metadata structure `{"databases":{}}` into the file
+          let initial_metadata = Metadata { databases: HashMap::new() };
+          if let Err(e) = fs::write(&metadata_path, serde_json::to_string(&initial_metadata).unwrap()) {
+            eprintln!("Error writing initial metadata to file: {}", e);
+          }
+        }
+        Err(e) => eprintln!("Error creating metadata file: {}", e),
       }
     }
 
@@ -170,9 +179,18 @@ impl DatabaseManager {
       .read_metadata()
       .map_err(|e| DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))?;
 
-    // Read metadata file
-    let file_content = fs::read_to_string(&self.metadata_path).unwrap();
-    let metadata: Metadata = serde_json::from_str(&file_content).unwrap();
+    // Attempt to read metadata file and handle potential errors
+    let file_content = match fs::read_to_string(&self.metadata_path) {
+      Ok(content) => content,
+      Err(e) => return Err(DataFusionError::Execution(format!("Failed to read metadata file: {}", e))),
+    };
+
+    // Attempt to parse the metadata and handle potential errors
+    let metadata: Metadata = match serde_json::from_str(&file_content) {
+      Ok(m) => m,
+      Err(e) => return Err(DataFusionError::Execution(format!("Failed to parse metadata: {}", e))),
+    };
+
     let databases_list = metadata.databases.keys().cloned().collect::<Vec<String>>();
 
     Ok(databases_list)

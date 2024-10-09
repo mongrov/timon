@@ -5,3 +5,4 @@ jniLibs
 
 # local env files
 .env*.local
+*.log
