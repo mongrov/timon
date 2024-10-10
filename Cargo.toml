@@ -1,6 +1,6 @@
 [package]
 name = "tsdb_timon"
-version = "1.0.1"
+version = "1.0.7"
 edition = "2021"
 authors = ["Ahmed Boutaraa <ahmed@mongrov.com>"]
 description = "Efficient local storage and Amazon S3-compatible data synchronization for time-series data, leveraging Parquet for storage and DataFusion for querying, all wrapped in a simple and intuitive API."
@@ -26,11 +26,7 @@ chrono = "0.4.38"
 
 [lib]
 name = "tsdb_timon"
-crate-type = ["staticlib", "cdylib"]
-
-[[bin]]
-name = "native_rust_lib"
-path = "src/main.rs"
+crate-type = ["staticlib", "cdylib", "lib"]
 
 [profile.release]
 debug = 0
