@@ -170,15 +170,7 @@ pub fn json_to_arrow(json_values: &[Value]) -> Result<(Vec<ArrayRef>, Schema), B
   Ok((arrays, schema))
 }
 
-pub fn extract_year_month(file_path: &str) -> Option<String> {
-  // Regex to capture the YYYY-MM part of the filename
-  let re = Regex::new(r"(\d{4}-\d{2})").unwrap();
-  if let Some(caps) = re.captures(file_path) {
-    return Some(caps[1].to_string());
-  }
-  None
-}
-
+#[allow(dead_code)]
 pub enum Granularity {
   Month,
   Day,

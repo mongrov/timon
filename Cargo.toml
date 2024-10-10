@@ -1,9 +1,9 @@
 [package]
 name = "tsdb_timon"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 authors = ["Ahmed Boutaraa <ahmed@mongrov.com>"]
-description = "Efficient local storage and Amazon S3-compatible data synchronization for time-series data,leveraging Parquet for storage and DataFusion for querying, all wrapped in a simple and intuitive API."
+description = "Efficient local storage and Amazon S3-compatible data synchronization for time-series data, leveraging Parquet for storage and DataFusion for querying, all wrapped in a simple and intuitive API."
 license = "Apache-2.0"
 repository = "https://github.com/mongrov/timon"
 keywords = ["parquet", "datafusion", "apache-arrow", "tsdb", "S3-storage-sync"]
@@ -20,8 +20,8 @@ libc = "0.2.155"
 datafusion = "39.0"
 tokio = { version = "1", features = ["full"] }
 regex = "1.10.6"
-object_store = { version = '0.10.2', features = ["aws"] }
-url = "2.5.2"
+object_store = { version = "0.10.2", features = ["aws"], optional = true }
+url = { version = "2.5.2", optional = true }
 chrono = "0.4.38"
 
 [lib]
@@ -34,8 +34,12 @@ path = "src/main.rs"
 
 [profile.release]
 debug = 0
-lto = true
+lto = "fat"
 opt-level = 'z'
 split-debuginfo = "off"
 codegen-units = 1
-strip = true
+strip = "symbols"
+panic = "abort"
+
+[features]
+s3_sync = ["object_store", "url"]

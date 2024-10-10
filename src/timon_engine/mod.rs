@@ -1,7 +1,9 @@
+#[cfg(feature = "s3_sync")]
 pub mod cloud_sync;
 pub mod db_manager;
 pub mod helpers;
 
+#[cfg(feature = "s3_sync")]
 use cloud_sync::CloudStorageManager;
 use db_manager::DatabaseManager;
 use serde::Serialize;
@@ -247,13 +249,15 @@ pub async fn query(db_name: &str, date_range: HashMap<&str, &str>, sql_query: &s
 * @ query_bucket(bucket_name, date_range, sql_query)
 * @ sink_monthly_parquet(db_name, table_name)
  */
+#[cfg(feature = "s3_sync")]
 static CLOUD_STORAGE_MANAGER: OnceLock<CloudStorageManager> = OnceLock::new();
 
+#[cfg(feature = "s3_sync")]
 fn get_cloud_storage_manager() -> &'static CloudStorageManager {
   CLOUD_STORAGE_MANAGER.get().expect("CloudStorageManager is not initialized")
 }
 
-#[allow(dead_code)]
+#[cfg(feature = "s3_sync")]
 pub fn init_bucket(bucket_endpoint: &str, bucket_name: &str, access_key_id: &str, secret_access_key: &str) -> Result<Value, String> {
   let cloud_storage_manager = cloud_sync::CloudStorageManager::new(
     get_database_manager().clone(),
@@ -283,7 +287,7 @@ pub fn init_bucket(bucket_endpoint: &str, bucket_name: &str, access_key_id: &str
   }
 }
 
-#[allow(dead_code)]
+#[cfg(feature = "s3_sync")]
 pub async fn query_bucket(date_range: HashMap<&str, &str>, sql_query: &str) -> Result<Value, String> {
   let cloud_storage_manager = get_cloud_storage_manager();
   match cloud_storage_manager.query_bucket(date_range, &sql_query, true).await {
@@ -318,7 +322,7 @@ pub async fn query_bucket(date_range: HashMap<&str, &str>, sql_query: &str) -> R
   }
 }
 
-#[allow(dead_code)]
+#[cfg(feature = "s3_sync")]
 pub async fn sink_monthly_parquet(db_name: &str, table_name: &str) -> Result<Value, String> {
   let cloud_storage_manager = get_cloud_storage_manager();
   match cloud_storage_manager.sink_monthly_parquet(db_name, table_name).await {

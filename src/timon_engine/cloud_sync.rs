@@ -4,7 +4,6 @@ use datafusion::datasource::listing::{ListingTable, ListingTableConfig, ListingT
 use datafusion::datasource::MemTable;
 use datafusion::error::Result as DataFusionResult;
 use datafusion::prelude::*;
-use helpers::extract_year_month;
 use helpers::{generate_paths, record_batches_to_json, Granularity};
 use object_store::{
   aws::{AmazonS3, AmazonS3Builder},
@@ -23,6 +22,15 @@ use url::Url;
 
 use super::db_manager::{DataFusionOutput, DatabaseManager};
 use super::helpers::extract_table_name;
+
+pub fn extract_year_month(file_path: &str) -> Option<String> {
+  // Regex to capture the YYYY-MM part of the filename
+  let re = Regex::new(r"(\d{4}-\d{2})").unwrap();
+  if let Some(caps) = re.captures(file_path) {
+    return Some(caps[1].to_string());
+  }
+  None
+}
 
 pub struct CloudStorageManager {
   s3_store: Arc<AmazonS3>,
