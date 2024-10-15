@@ -2743,6 +2743,7 @@ dependencies = [
  "base64",
  "chrono",
  "datafusion",
+ "hex",
  "jni",
  "libc",
  "object_store",

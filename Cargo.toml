@@ -23,6 +23,7 @@ regex = "1.10.6"
 object_store = { version = "0.10.2", features = ["aws"], optional = true }
 url = { version = "2.5.2", optional = true }
 chrono = "0.4.38"
+hex = "0.4.3"
 
 [lib]
 name = "tsdb_timon"
