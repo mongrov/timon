@@ -1,4 +1,4 @@
-use arrow::array::{ArrayRef, Int64Array, StringArray};
+use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field as ArrowField, Schema, TimeUnit};
 use base64::{engine::general_purpose, Engine as _};
 use chrono::{Datelike, NaiveDate, ParseError};
@@ -137,8 +137,14 @@ pub fn json_to_arrow(json_values: &[Value]) -> Result<(Vec<ArrayRef>, Schema), B
 
   for (key, value) in first_obj {
     let field = match value {
-      Value::Number(_) => ArrowField::new(key, DataType::Int64, false),
-      Value::String(_) => ArrowField::new(key, DataType::Utf8, false),
+      Value::Number(num) => {
+        if num.is_f64() {
+          ArrowField::new(key, DataType::Float64, false) // Handle floating-point numbers
+        } else {
+          ArrowField::new(key, DataType::Int64, false) // Handle integers
+        }
+      }
+      Value::String(_) => ArrowField::new(key, DataType::Utf8, false), // Handle strings
       _ => return Err(format!("Unsupported JSON value type for key {}", key).into()),
     };
     fields.push(field);
@@ -146,6 +152,7 @@ pub fn json_to_arrow(json_values: &[Value]) -> Result<(Vec<ArrayRef>, Schema), B
 
   let schema = Schema::new(fields);
 
+  // Convert JSON values into corresponding Arrow arrays
   for field in schema.fields() {
     let array = match field.data_type() {
       DataType::Int64 => {
@@ -154,6 +161,13 @@ pub fn json_to_arrow(json_values: &[Value]) -> Result<(Vec<ArrayRef>, Schema), B
           .map(|v| v.get(&field.name()).and_then(Value::as_i64).unwrap_or_default())
           .collect();
         Arc::new(Int64Array::from(values)) as ArrayRef
+      }
+      DataType::Float64 => {
+        let values: Vec<f64> = json_values
+          .iter()
+          .map(|v| v.get(&field.name()).and_then(Value::as_f64).unwrap_or_default())
+          .collect();
+        Arc::new(Float64Array::from(values)) as ArrayRef
       }
       DataType::Utf8 => {
         let values: Vec<String> = json_values

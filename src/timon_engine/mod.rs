@@ -80,9 +80,9 @@ pub fn create_database(db_name: &str) -> Result<Value, String> {
 }
 
 #[allow(dead_code)]
-pub fn create_table(db_name: &str, table_name: &str) -> Result<Value, String> {
+pub fn create_table(db_name: &str, table_name: &str, schema: &str) -> Result<Value, String> {
   let database_manager = get_database_manager();
-  match database_manager.clone().create_table(db_name, table_name) {
+  match database_manager.clone().create_table(db_name, table_name, schema) {
     Ok(_) => {
       let result = TimonResult {
         status: 200,
@@ -199,7 +199,7 @@ pub fn delete_table(db_name: &str, table_name: &str) -> Result<Value, String> {
 #[allow(dead_code)]
 pub fn insert(db_name: &str, table_name: &str, json_data: &str) -> Result<Value, String> {
   let database_manager = get_database_manager();
-  match database_manager.insert(db_name, table_name, json_data) {
+  match database_manager.clone().insert(db_name, table_name, json_data) {
     Ok(message) => {
       let result = TimonResult {
         status: 200,

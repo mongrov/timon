@@ -136,41 +136,58 @@ impl DatabaseManager {
     Ok(())
   }
 
-  pub fn create_table(&mut self, db_name: &str, table_name: &str) -> Result<(), DataFusionError> {
+  pub fn create_table(&mut self, db_name: &str, table_name: &str, schema_json: &str) -> Result<String, Box<dyn Error>> {
     // Reload the metadata to ensure it's up to date
     self.metadata = self
       .read_metadata()
       .map_err(|e| DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))?;
 
-    let table_path = format!("{}/{}/{}", self.data_path, db_name, table_name);
-    let table_dir = Path::new(&table_path);
-
-    // Create the directory if it does not exist
-    if let Err(e) = fs::create_dir(table_dir) {
-      return Err(DataFusionError::Execution(format!(
-        "Failed to create directory {}: {}",
-        table_dir.display(),
-        e
-      )));
+    // Parse the schema JSON
+    let schema: Value = serde_json::from_str(schema_json)?;
+    // First, we take the database path and validate the schema without borrowing `self` mutably.
+    let db_path = self.metadata.databases.get_mut(db_name);
+    if db_path.is_none() {
+      return Err(format!("Database '{}' does not exist.", db_name).into());
     }
 
-    // Insert the table and path into the metadata
-    if let Some(database) = self.metadata.databases.get_mut(db_name) {
-      database.tables.insert(
-        table_name.to_string(),
-        Table {
-          path: table_path.clone(),
-          schema: serde_json::json!({}), // Placeholder for schema; update as needed
-        },
-      );
+    // Validate the schema structure before doing any mutable operations
+    self.validate_schema_structure(&schema)?;
+
+    // Now perform mutable borrow only once after the immutable operations are done
+    let database = self
+      .metadata
+      .databases
+      .get_mut(db_name)
+      .ok_or_else(|| format!("Database '{}' does not exist.", db_name))?;
+
+    // Check if the table already exists
+    if database.tables.contains_key(table_name) {
+      return Err(format!("Table '{}' already exists in database '{}'.", table_name, db_name).into());
+    }
+
+    // Automatically add a 'timestamp' field to the schema
+    let mut schema_with_timestamp = schema.clone();
+    if let Some(schema_obj) = schema_with_timestamp.as_object_mut() {
+      schema_obj.insert("timestamp".to_string(), serde_json::json!({ "type": "int", "required": true }));
     } else {
-      return Err(DataFusionError::Plan(format!("Database {} not found", db_name)));
+      return Err("Invalid schema format. Expected a JSON object.".into());
     }
 
-    // Save updated metadata
-    self.save_metadata().expect("Failed to save metadata");
+    // Create the table directory
+    let table_path = format!("{}/{}/{}", self.data_path, db_name, table_name);
+    fs::create_dir_all(&table_path)?;
 
-    Ok(())
+    // Store the schema for future validation during inserts
+    let table = Table {
+      schema: schema_with_timestamp.clone(),
+      path: table_path.clone(),
+    };
+    database.tables.insert(table_name.to_string(), table);
+
+    // Persist the metadata to disk (e.g., in a metadata.json or similar)
+    self.save_metadata()?;
+
+    Ok(format!("Table '{}' was successfully created in database '{}'.", table_name, db_name))
   }
 
   pub fn list_databases(&mut self) -> Result<Vec<String>, DataFusionError> {
@@ -273,7 +290,13 @@ impl DatabaseManager {
     Ok(())
   }
 
-  pub fn insert(&self, db_name: &str, table_name: &str, json_data: &str) -> Result<String, Box<dyn Error>> {
+  pub fn insert(&mut self, db_name: &str, table_name: &str, json_data: &str) -> Result<String, Box<dyn Error>> {
+    // Reload the metadata to ensure it's up to date
+    self.metadata = self
+      .read_metadata()
+      .map_err(|e| DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))
+      .unwrap();
+
     // Parse the JSON data
     let json_values: Vec<Value> = serde_json::from_str(json_data)?;
 
@@ -282,6 +305,12 @@ impl DatabaseManager {
     if table_path.is_none() {
       return Err(format!("Database '{}' or Table '{}' does not exist.", db_name, table_name).into());
     }
+
+    let table_schema = self.get_table_schema(db_name, table_name)?;
+    for json_value in &json_values {
+      self.validate_data_against_schema(&table_schema, json_value)?;
+    }
+
     let current_date = Utc::now().format("%Y-%m-%d").to_string();
     let file_path = format!("{}/{}_{}.parquet", table_path.unwrap(), table_name, current_date);
 
@@ -323,6 +352,97 @@ impl DatabaseManager {
     }
 
     Ok(format!("Data was successfully written to '{}'", file_path))
+  }
+
+  fn validate_schema_structure(&self, schema: &Value) -> Result<(), Box<dyn Error>> {
+    let schema_obj = schema.as_object().ok_or("Schema should be a JSON object")?;
+
+    for (field_name, field_rules) in schema_obj {
+      let field_rules_obj = field_rules
+        .as_object()
+        .ok_or(format!("Invalid validation rules for field '{}'", field_name))?;
+
+      // Ensure that the schema contains the required "type" field
+      if !field_rules_obj.contains_key("type") {
+        return Err(format!("Field '{}' is missing a 'type' definition.", field_name).into());
+      }
+
+      // Check if "required" is a boolean (optional, defaults to false)
+      if let Some(required) = field_rules_obj.get("required") {
+        if !required.is_boolean() {
+          return Err(format!("Field '{}' has an invalid 'required' value. Must be true or false.", field_name).into());
+        }
+      }
+    }
+
+    Ok(())
+  }
+
+  fn get_table_schema(&self, db_name: &str, table_name: &str) -> Result<serde_json::Value, Box<dyn Error>> {
+    // Look up the schema from the metadata or wherever it is stored
+    let database = self.metadata.databases.get(db_name).ok_or("Database not found")?;
+    let table = database.tables.get(table_name).ok_or("Table not found")?;
+    Ok(table.schema.clone())
+  }
+
+  fn validate_data_against_schema(&self, schema: &serde_json::Value, json_data: &serde_json::Value) -> Result<(), Box<dyn Error>> {
+    let schema_obj = schema.as_object().ok_or("Schema should be a JSON object")?;
+    let data_obj = json_data.as_object().ok_or("Data should be a JSON object")?;
+
+    // Check for unexpected fields (fields in JSON data that are not in the schema)
+    for (key, _value) in data_obj {
+      if !schema_obj.contains_key(key) {
+        return Err(format!("Unexpected field: '{}' is not defined in the schema!", key).into());
+      }
+    }
+
+    // Validate each field in the schema
+    for (field_name, field_rules) in schema_obj {
+      let field_rules_obj = field_rules
+        .as_object()
+        .ok_or(format!("Invalid validation rules for field '{}'", field_name))?;
+
+      // Check if the field is required and if it's missing from the data
+      if field_rules_obj.get("required").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if !data_obj.contains_key(field_name) {
+          return Err(format!("Missing required field '{}'", field_name).into());
+        }
+      }
+
+      // Check the field type if the field exists in the data
+      if let Some(value) = data_obj.get(field_name) {
+        let field_type = field_rules_obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        self.validate_field_type(field_name, field_type, value)?;
+      }
+    }
+
+    Ok(())
+  }
+
+  // Validate the type of each field in the JSON data
+  fn validate_field_type(&self, field_name: &str, field_type: &str, value: &serde_json::Value) -> Result<(), Box<dyn Error>> {
+    fn get_value_type(value: &Value) -> &str {
+      if value.is_f64() {
+        "float"
+      } else if value.is_i64() {
+        "int"
+      } else if value.is_string() {
+        "string"
+      } else if value.is_boolean() {
+        "bool"
+      } else {
+        "unknown"
+      }
+    }
+    let received_type = get_value_type(value);
+
+    match field_type {
+      "float" if value.is_f64() => Ok(()),
+      "int" if value.is_i64() => Ok(()),
+      "string" if value.is_string() => Ok(()),
+      "bool" if value.is_boolean() => Ok(()),
+      _ => Err(format!("Field '{}' expected typeof '{}' but got '{}'", field_name, field_type, received_type).into()),
+    }
   }
 
   fn read_parquet_file(&self, file_path: &str) -> Result<Vec<Value>, Box<dyn std::error::Error>> {

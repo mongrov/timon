@@ -54,11 +54,13 @@ pub mod android {
     _class: JClass,
     db_name: JString,
     table_name: JString,
+    schema: JString,
   ) -> jstring {
     let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
     let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
+    let rust_schema: String = env.get_string(&schema).expect("Couldn't get java string!").into();
 
-    match create_table(&rust_db_name, &rust_table_name) {
+    match create_table(&rust_db_name, &rust_table_name, &rust_schema) {
       Ok(result) => {
         let json_string = result.to_string();
         let output = env.new_string(json_string).expect("Couldn't create success string!");
@@ -408,10 +410,14 @@ pub mod ios {
   }
 
   #[no_mangle]
-  pub extern "C" fn Java_com_rustexample_TimonModule_createTable(db_name: *const c_char, table_name: *const c_char) -> *mut c_char {
+  pub extern "C" fn Java_com_rustexample_TimonModule_createTable(
+    db_name: *const c_char,
+    table_name: *const c_char,
+    schema: *const c_char,
+  ) -> *mut c_char {
     unsafe {
-      match (c_str_to_string(db_name), c_str_to_string(table_name)) {
-        (Ok(rust_db_name), Ok(rust_table_name)) => match create_table(&rust_db_name, &rust_table_name) {
+      match (c_str_to_string(db_name), c_str_to_string(table_name), c_str_to_string(schema)) {
+        (Ok(rust_db_name), Ok(rust_table_name), Ok(rust_schema)) => match create_table(&rust_db_name, &rust_table_name, &rust_schema) {
           Ok(result) => {
             let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
             string_to_c_str(json_string)
