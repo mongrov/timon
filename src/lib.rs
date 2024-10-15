@@ -1,5 +1,6 @@
 pub mod timon_engine;
 
+// cbindgen:ignore
 #[cfg(target_os = "android")]
 pub mod android {
   use crate::timon_engine::{create_database, create_table, delete_database, delete_table, init_timon, insert, list_databases, list_tables, query};
