@@ -4,7 +4,6 @@ pub mod timon_engine;
 #[cfg(target_os = "android")]
 pub mod android {
   use crate::timon_engine::{create_database, create_table, delete_database, delete_table, init_timon, insert, list_databases, list_tables, query};
-  #[cfg(feature = "s3_sync")]
   use crate::timon_engine::{init_bucket, query_bucket, sink_monthly_parquet};
   use jni::objects::{JClass, JObject, JString, JValue};
   use jni::sys::jstring;
@@ -245,7 +244,6 @@ pub mod android {
 
   // ******************************** S3 Compatible Storage ********************************
   #[no_mangle]
-  #[cfg(feature = "s3_sync")]
   pub unsafe extern "C" fn Java_com_rustexample_TimonModule_initBucket(
     mut env: JNIEnv,
     _class: JClass,
@@ -274,7 +272,6 @@ pub mod android {
   }
 
   #[no_mangle]
-  #[cfg(feature = "s3_sync")]
   pub unsafe extern "C" fn Java_com_rustexample_TimonModule_queryBucket(
     mut env: JNIEnv,
     _class: JClass,
@@ -306,7 +303,6 @@ pub mod android {
   }
 
   #[no_mangle]
-  #[cfg(feature = "s3_sync")]
   pub unsafe extern "C" fn Java_com_rustexample_TimonModule_sinkMonthlyParquet(
     mut env: JNIEnv,
     _class: JClass,
@@ -334,7 +330,6 @@ pub mod android {
 #[cfg(target_os = "ios")]
 pub mod ios {
   use crate::timon_engine::{create_database, create_table, delete_database, delete_table, init_timon, insert, list_databases, list_tables, query};
-  #[cfg(feature = "s3_sync")]
   use crate::timon_engine::{init_bucket, query_bucket, sink_monthly_parquet};
   use libc::c_char;
   use std::collections::HashMap;
@@ -581,7 +576,6 @@ pub mod ios {
 
   // ******************************** S3 Compatible Storage ********************************
   #[no_mangle]
-  #[cfg(feature = "s3_sync")]
   pub extern "C" fn Java_com_rustexample_TimonModule_initBucket(
     bucket_endpoint: *const c_char,
     bucket_name: *const c_char,
@@ -616,7 +610,6 @@ pub mod ios {
   }
 
   #[no_mangle]
-  #[cfg(feature = "s3_sync")]
   pub extern "C" fn Java_com_rustexample_TimonModule_queryBucket(date_range_json: *const c_char, sql_query: *const c_char) -> *mut c_char {
     unsafe {
       match (c_str_to_string(date_range_json), c_str_to_string(sql_query)) {
@@ -650,7 +643,6 @@ pub mod ios {
   }
 
   #[no_mangle]
-  #[cfg(feature = "s3_sync")]
   pub extern "C" fn Java_com_rustexample_TimonModule_sinkMonthlyParquet(db_name: *const c_char, table_name: *const c_char) -> *mut c_char {
     unsafe {
       match (c_str_to_string(db_name), c_str_to_string(table_name)) {
