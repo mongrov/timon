@@ -1,5 +1,4 @@
 use crate::timon_engine::helpers;
-use chrono::Utc;
 use datafusion::datasource::listing::{ListingTable, ListingTableConfig, ListingTableUrl};
 use datafusion::datasource::MemTable;
 use datafusion::error::Result as DataFusionResult;
@@ -10,11 +9,8 @@ use object_store::{
   path::Path as StorePath,
   ObjectStore,
 };
-use parquet::arrow::ArrowWriter;
-use parquet::file::properties::WriterProperties;
-use parquet::file::reader::SerializedFileReader;
 use regex::Regex;
-use std::fs::{self, File};
+use std::fs;
 use std::path::Path;
 use std::{collections::HashMap, sync::Arc};
 use tokio::io::AsyncReadExt;
@@ -22,15 +18,6 @@ use url::Url;
 
 use super::db_manager::{DataFusionOutput, DatabaseManager};
 use super::helpers::extract_table_name;
-
-pub fn extract_year_month(file_path: &str) -> Option<String> {
-  // Regex to capture the YYYY-MM part of the filename
-  let re = Regex::new(r"(\d{4}-\d{2})").unwrap();
-  if let Some(caps) = re.captures(file_path) {
-    return Some(caps[1].to_string());
-  }
-  None
-}
 
 pub struct CloudStorageManager {
   s3_store: Arc<AmazonS3>,
@@ -145,102 +132,35 @@ impl CloudStorageManager {
   }
 
   #[allow(dead_code)]
-  pub async fn sink_monthly_parquet(&self, db_name: &str, table_name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let dir_path = &self.db_manager.get_table_path(db_name, table_name).unwrap();
-    let files = fs::read_dir(dir_path)?
+  pub async fn sink_daily_parquet(&self, db_name: &str, table_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let dir_path = &self.db_manager.get_table_path(db_name, table_name);
+    if dir_path.is_none() {
+      return Err(format!("Database '{}' or Table '{}' does not exist.", db_name, table_name).into());
+    }
+
+    // List all parquet files in the directory
+    let files = fs::read_dir(dir_path.clone().unwrap())?
       .filter_map(|entry| entry.ok())
       .filter(|entry| entry.path().is_file() && entry.file_name().to_string_lossy().starts_with(format!("{}_", table_name).as_str()))
       .map(|entry| entry.path().to_string_lossy().to_string())
       .collect::<Vec<_>>();
 
-    let mut files_by_month: HashMap<String, Vec<String>> = HashMap::new();
-    let regx = Regex::new(r"(\d{4}-\d{2})-\d{2}\.parquet$")?; // capture YYYY-MM part of the filename
+    let regx = Regex::new(r"(\d{4})-(\d{2})-(\d{2})\.parquet$")?; // capture YYYY-MM-DD part of the filename
 
     for file in files {
       if let Some(filename) = Path::new(&file).file_name().and_then(|n| n.to_str()) {
         if let Some(caps) = regx.captures(filename) {
-          if let Some(month) = caps.get(1) {
-            files_by_month.entry(month.as_str().to_string()).or_insert_with(Vec::new).push(file);
+          let year = caps.get(1).map_or("", |m| m.as_str());
+          let month = caps.get(2).map_or("", |m| m.as_str());
+          let day_extension = caps.get(0).map_or("", |m| m.as_str()); // Full day_extension string YYYY-MM-DD.parquet
+
+          let source_path = format!("{}/{}_{}", dir_path.clone().unwrap(), table_name, day_extension);
+          let target_path = format!("{}/{}/{}/{}_{}", db_name, year, month, table_name, day_extension);
+          if let Err(e) = self.upload_to_bucket(&source_path, &target_path).await {
+            eprintln!("Failed to upload file {} to S3 path {}: {:?}", source_path, target_path, e);
           }
-        }
-      }
-    }
-
-    for (month, files) in files_by_month {
-      let merged_file_path = format!("{}/{}_{}.parquet", dir_path, table_name, month);
-
-      if files.len() == 1 {
-        // If there's only one file for the month, simply copy it to the merged file name
-        fs::copy(&files[0], &merged_file_path)?;
-      } else {
-        // Merge multiple files into one Parquet file
-        let ctx = SessionContext::new();
-        let mut table_names = Vec::new();
-
-        for (i, file_path) in files.iter().enumerate() {
-          let table_name = format!("table_{}", i);
-
-          match SerializedFileReader::try_from(File::open(file_path)?) {
-            Ok(_) => {
-              ctx.register_parquet(&table_name, file_path, ParquetReadOptions::default()).await?;
-              table_names.push(table_name);
-            }
-            Err(e) => {
-              eprintln!("Skipping file due to error: {} - Error: {:?}", file_path, e);
-              continue;
-            }
-          };
-        }
-
-        if table_names.is_empty() {
-          eprintln!("No valid tables found to merge for month: {}", month);
-          continue;
-        }
-
-        let combined_query = format!(
-          "SELECT * FROM ({}) AS combined_table",
-          table_names
-            .iter()
-            .map(|name| format!("SELECT * FROM {}", name))
-            .collect::<Vec<_>>()
-            .join(" UNION ALL ")
-        );
-
-        let combined_df = ctx.sql(&combined_query).await?;
-        let combined_results = combined_df.collect().await?;
-        let schema = combined_results[0].schema();
-        let mem_table = MemTable::try_new(schema.clone(), vec![combined_results])?;
-
-        let combined_table = ctx.read_table(Arc::new(mem_table))?.collect().await?;
-        let output_file = File::create(&merged_file_path)?;
-        let props = WriterProperties::builder().build();
-        let mut writer = ArrowWriter::try_new(output_file, schema.clone(), Some(props))?;
-
-        for batch in combined_table {
-          writer.write(&batch)?;
-        }
-        writer.close()?;
-      }
-
-      // upload the merged monthly parquet files to S3 storage
-      let target_path = format!("{}_{}.parquet", table_name, month);
-      if let Err(e) = self.upload_to_bucket(&merged_file_path, &target_path).await {
-        eprintln!("Failed to upload to S3: {:?}", e);
-      }
-
-      // clean old files(less than a month)
-      let current_year_month = Utc::now().format("%Y-%m").to_string();
-      for file in files {
-        if let Some(path_year_month) = extract_year_month(&file) {
-          if path_year_month < current_year_month {
-            // Remove the old file
-            fs::remove_file(&file)?;
-            // Remove the corresponding merged file for the current month if it exists
-            let merged_file_path = format!("{}/{}_{}.parquet", dir_path, table_name, path_year_month);
-            if Path::new(&merged_file_path).exists() {
-              fs::remove_file(merged_file_path)?;
-            }
-          }
+          // Optional: Clean up the local file after upload
+          fs::remove_file(&source_path)?;
         }
       }
     }

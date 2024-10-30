@@ -45,7 +45,7 @@ external fun query(dbName: String, dateRange: Map<String, String>, sqlQuery: Str
 
 ## S3-Compatible Storage Functions
 
-These functions manage data stored in an S3-compatible bucket, allowing for querying and saving monthly data as Parquet files.
+These functions manage data stored in an S3-compatible bucket, allowing for querying and saving daily data as Parquet files.
 
 ```kotlin
 // Initialize S3-compatible storage with endpoint and credentials
@@ -54,8 +54,8 @@ external fun initBucket(bucket_endpoint: String, bucket_name: String, access_key
 // Query the bucket with a date range and SQL query
 external fun queryBucket(dateRange: Map<String, String>, sqlQuery: String): String
 
-// Sink monthly data to Parquet format in the bucket
-external fun sinkMonthlyParquet(dbName: String, tableName: String): String
+// Sink dayly data to Parquet format in the bucket
+external fun sinkDailyParquet(dbName: String, tableName: String): String
 ```
 
 ## Function Descriptions
@@ -93,5 +93,5 @@ Initializes an S3-compatible bucket for data storage.
 - **queryBucket(dateRange: Map<String, String>, sqlQuery: String)**
 Queries data in the S3 bucket based on the given date range and SQL query.
 
-- **sinkMonthlyParquet(dbName: String, tableName: String)**
-Upload data from the specified database and table as Parquet files, organized by month into S3-compatible bucket.
+- **sinkDailyParquet(dbName: String, tableName: String)**
+Upload data from the specified database and table as Parquet files, organized by day into S3-compatible bucket.

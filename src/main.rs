@@ -1,5 +1,5 @@
 mod timon_engine;
-use crate::timon_engine::{init_bucket, query_bucket, sink_monthly_parquet};
+use crate::timon_engine::{init_bucket, query_bucket, sink_daily_parquet};
 pub use timon_engine::{create_database, create_table, delete_database, delete_table, init_timon, insert, list_databases, list_tables, query};
 
 #[allow(dead_code)]
@@ -68,8 +68,8 @@ async fn test_s3_sync() {
   let df_result = query_bucket(range, &sql_query).await.unwrap();
   println!("query_bucket {:?}", df_result);
 
-  let sink_monthly_parquet_result = sink_monthly_parquet("test", "temperature").await;
-  println!("{}", sink_monthly_parquet_result.unwrap());
+  let sink_daily_parquet_result = sink_daily_parquet("test", "temperature").await;
+  println!("{}", sink_daily_parquet_result.unwrap());
 }
 
 fn main() {

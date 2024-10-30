@@ -245,7 +245,7 @@ pub async fn query(db_name: &str, date_range: HashMap<&str, &str>, sql_query: &s
 /* ******************************** S3 Compatible Storage ********************************
 * @ init_bucket(bucket_endpoint, bucket_name, access_key_id, secret_access_key)
 * @ query_bucket(bucket_name, date_range, sql_query)
-* @ sink_monthly_parquet(db_name, table_name)
+* @ sink_daily_parquet(db_name, table_name)
  */
 
 static CLOUD_STORAGE_MANAGER: OnceLock<CloudStorageManager> = OnceLock::new();
@@ -317,9 +317,9 @@ pub async fn query_bucket(date_range: HashMap<&str, &str>, sql_query: &str) -> R
   }
 }
 
-pub async fn sink_monthly_parquet(db_name: &str, table_name: &str) -> Result<Value, String> {
+pub async fn sink_daily_parquet(db_name: &str, table_name: &str) -> Result<Value, String> {
   let cloud_storage_manager = get_cloud_storage_manager();
-  match cloud_storage_manager.sink_monthly_parquet(db_name, table_name).await {
+  match cloud_storage_manager.sink_daily_parquet(db_name, table_name).await {
     Ok(_) => {
       let result = TimonResult {
         status: 200,

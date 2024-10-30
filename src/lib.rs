@@ -4,7 +4,7 @@ pub mod timon_engine;
 #[cfg(target_os = "android")]
 pub mod android {
   use crate::timon_engine::{create_database, create_table, delete_database, delete_table, init_timon, insert, list_databases, list_tables, query};
-  use crate::timon_engine::{init_bucket, query_bucket, sink_monthly_parquet};
+  use crate::timon_engine::{init_bucket, query_bucket, sink_daily_parquet};
   use jni::objects::{JClass, JObject, JString, JValue};
   use jni::sys::jstring;
   use jni::JNIEnv;
@@ -312,7 +312,7 @@ pub mod android {
     let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
     let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
 
-    match Runtime::new().unwrap().block_on(sink_monthly_parquet(&rust_db_name, &rust_table_name)) {
+    match Runtime::new().unwrap().block_on(sink_daily_parquet(&rust_db_name, &rust_table_name)) {
       Ok(result) => {
         let json_string = result.to_string();
         let output = env.new_string(json_string).expect("Couldn't create success string!");
@@ -330,7 +330,7 @@ pub mod android {
 #[cfg(target_os = "ios")]
 pub mod ios {
   use crate::timon_engine::{create_database, create_table, delete_database, delete_table, init_timon, insert, list_databases, list_tables, query};
-  use crate::timon_engine::{init_bucket, query_bucket, sink_monthly_parquet};
+  use crate::timon_engine::{init_bucket, query_bucket, sink_daily_parquet};
   use libc::c_char;
   use std::collections::HashMap;
   use std::ffi::{CStr, CString};
@@ -646,7 +646,7 @@ pub mod ios {
   pub extern "C" fn Java_com_rustexample_TimonModule_sinkMonthlyParquet(db_name: *const c_char, table_name: *const c_char) -> *mut c_char {
     unsafe {
       match (c_str_to_string(db_name), c_str_to_string(table_name)) {
-        (Ok(rust_db_name), Ok(rust_table_name)) => match Runtime::new().unwrap().block_on(sink_monthly_parquet(&rust_db_name, &rust_table_name)) {
+        (Ok(rust_db_name), Ok(rust_table_name)) => match Runtime::new().unwrap().block_on(sink_daily_parquet(&rust_db_name, &rust_table_name)) {
           Ok(result) => {
             let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
             string_to_c_str(json_string)
