@@ -9,14 +9,14 @@ use parquet::file::properties::WriterProperties;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::path::Path;
 use std::sync::Arc;
 use std::{fmt, fs};
 use tokio::io::Result as TokioResult;
 
-use super::helpers::{extract_table_name, generate_paths, json_to_arrow, record_batches_to_json, row_to_json, Granularity};
+use super::helpers::{extract_table_name, generate_paths, get_unique_fields, json_to_arrow, record_batches_to_json, row_to_json, Granularity};
 
 pub enum DataFusionOutput {
   Json(Value),
@@ -165,23 +165,12 @@ impl DatabaseManager {
       return Err(format!("Table '{}' already exists in database '{}'.", table_name, db_name).into());
     }
 
-    // Automatically add a 'timestamp' field to the schema
-    let mut schema_with_timestamp = schema.clone();
-    if let Some(schema_obj) = schema_with_timestamp.as_object_mut() {
-      schema_obj.insert("timestamp".to_string(), serde_json::json!({ "type": "int", "required": true }));
-    } else {
-      return Err("Invalid schema format. Expected a JSON object.".into());
-    }
-
     // Create the table directory
     let table_path = format!("{}/{}/{}", self.data_path, db_name, table_name);
     fs::create_dir_all(&table_path)?;
 
     // Store the schema for future validation during inserts
-    let table = Table {
-      schema: schema_with_timestamp.clone(),
-      path: table_path.clone(),
-    };
+    let table = Table { schema, path: table_path };
     database.tables.insert(table_name.to_string(), table);
 
     // Persist the metadata to disk (e.g., in a metadata.json or similar)
@@ -322,6 +311,21 @@ impl DatabaseManager {
       let existing_json_values = self.read_parquet_file(&file_path)?;
       let mut combined_json_values = existing_json_values;
       combined_json_values.extend(json_values);
+
+      // check and remove deduplicated field values
+      let unique_fields = get_unique_fields(table_schema)?;
+      if !unique_fields.is_empty() {
+        let mut seen = HashSet::new();
+        combined_json_values.retain(|record| {
+          let key = unique_fields
+            .iter()
+            .map(|field| record.get(field).map(|v| v.to_string()).unwrap_or_default())
+            .collect::<Vec<String>>()
+            .join("-");
+
+          seen.insert(key)
+        });
+      }
 
       // Convert combined data to Arrow arrays
       let (combined_arrays, combined_schema) = json_to_arrow(&combined_json_values)?;

@@ -13,11 +13,12 @@ async fn test_local_storage() {
   println!("create_database -> {}", database_result.unwrap());
 
   let table_schema = r#"
-  {
-  "temperature": { "type": "float", "required": true },
-  "humidity": { "type": "float", "required": true },
-  "status": { "type": "string", "required": false }
-  }
+    {
+      "date": { "type": "string", "required": true, "unique": true },
+      "temperature": { "type": "float", "required": true },
+      "humidity": { "type": "float", "required": true },
+      "status": { "type": "string", "required": false }
+    }
   "#;
   let table_result = create_table(DATABASE_NAME, "temperature", &table_schema);
   println!("create_table -> {}", table_result.unwrap());
@@ -30,10 +31,9 @@ async fn test_local_storage() {
   let json_data: String = r#"
     [
       {
-        "timestamp": 1728908268674,
-        "humidity": 5.0,
-        "temperature": 22.0,
-        "status": "active"
+        "date": "2024.08.18 20:58:30",
+        "humidity": 12.0,
+        "temperature": 22.0
       }
     ]
   "#
@@ -42,7 +42,7 @@ async fn test_local_storage() {
   println!("insertion_result: {}", insertion_result.unwrap());
 
   let range: std::collections::HashMap<&str, &str> = std::collections::HashMap::from([("start_date", "2024-10-10"), ("end_date", "2024-11-11")]);
-  let sql_query = format!("SELECT * FROM temperature ORDER BY timestamp ASC LIMIT 25");
+  let sql_query = format!("SELECT * FROM temperature ORDER BY date ASC LIMIT 25");
   let query_result = query(DATABASE_NAME, range, &sql_query).await;
   println!("query_result: {}", query_result.unwrap());
 

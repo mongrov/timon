@@ -8,6 +8,7 @@ use parquet::record::{Field as ParquetField, Row};
 use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::error::Error;
 use std::sync::Arc;
 
 pub fn record_batches_to_json(batches: &[RecordBatch]) -> Result<Value, serde_json::Error> {
@@ -189,4 +190,20 @@ pub fn extract_table_name(sql_query: &str) -> String {
       eprintln!("No table name found in the SQL query.");
       String::new()
     })
+}
+
+pub fn get_unique_fields(schema: Value) -> Result<Vec<String>, Box<dyn Error>> {
+  let mut unique_fields = Vec::new();
+
+  if let Some(properties) = schema.as_object() {
+    for (field_name, field_properties) in properties {
+      if let Some(unique) = field_properties.get("unique") {
+        if unique.as_bool() == Some(true) {
+          unique_fields.push(field_name.clone());
+        }
+      }
+    }
+  }
+
+  Ok(unique_fields)
 }
