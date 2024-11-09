@@ -17,7 +17,9 @@ async fn test_local_storage() {
       "date": { "type": "string", "required": true, "unique": true },
       "temperature": { "type": "float", "required": true },
       "humidity": { "type": "float", "required": true },
-      "status": { "type": "string", "required": false }
+      "full_counter": { "type": "int", "required": true },
+      "is_cool": { "type": "bool", "required": true },
+      "ring_details": { "type": "array", "required": true }
     }
   "#;
   let table_result = create_table(DATABASE_NAME, "temperature", &table_schema);
@@ -31,9 +33,12 @@ async fn test_local_storage() {
   let json_data: String = r#"
     [
       {
-        "date": "2024.08.18 20:58:30",
+        "date": "2024.08.18 20:58:32",
         "humidity": 12.0,
-        "temperature": 22.0
+        "temperature": 22.0,
+        "full_counter": 10,
+        "is_cool": true,
+        "ring_details": ["Ahmed", "Eyal", "Olive"]
       }
     ]
   "#

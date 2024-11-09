@@ -434,6 +434,8 @@ impl DatabaseManager {
         "string"
       } else if value.is_boolean() {
         "bool"
+      } else if value.is_array() {
+        "array"
       } else {
         "unknown"
       }
@@ -445,6 +447,7 @@ impl DatabaseManager {
       "int" if value.is_i64() => Ok(()),
       "string" if value.is_string() => Ok(()),
       "bool" if value.is_boolean() => Ok(()),
+      "array" if value.is_array() => Ok(()),
       _ => Err(format!("Field '{}' expected typeof '{}' but got '{}'", field_name, field_type, received_type).into()),
     }
   }

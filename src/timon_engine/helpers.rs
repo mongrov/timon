@@ -1,4 +1,7 @@
-use arrow::array::{ArrayRef, Float32Array, Float64Array, Int32Array, Int64Array, StringArray, TimestampMillisecondArray};
+use arrow::array::{
+  Array, ArrayRef, BooleanArray, BooleanBuilder, Float64Array, Float64Builder, Int64Array, Int64Builder, ListArray, ListBuilder, StringArray,
+  StringBuilder, TimestampMillisecondArray,
+};
 use arrow::datatypes::{DataType, Field as ArrowField, Schema, TimeUnit};
 use base64::{engine::general_purpose, Engine as _};
 use chrono::{Datelike, NaiveDate, ParseError};
@@ -14,18 +17,49 @@ use std::sync::Arc;
 pub fn record_batches_to_json(batches: &[RecordBatch]) -> Result<Value, serde_json::Error> {
   fn array_value_to_json(array: &ArrayRef, row_index: usize) -> serde_json::Value {
     match array.data_type() {
-      DataType::Int32 => json!(array.as_any().downcast_ref::<Int32Array>().unwrap().value(row_index)),
       DataType::Int64 => json!(array.as_any().downcast_ref::<Int64Array>().unwrap().value(row_index)),
-      DataType::Float32 => json!(array.as_any().downcast_ref::<Float32Array>().unwrap().value(row_index)),
       DataType::Float64 => json!(array.as_any().downcast_ref::<Float64Array>().unwrap().value(row_index)),
       DataType::Utf8 => json!(array.as_any().downcast_ref::<StringArray>().unwrap().value(row_index)),
-      DataType::Timestamp(TimeUnit::Millisecond, None) => {
-        json!(array.as_any().downcast_ref::<TimestampMillisecondArray>().unwrap().value(row_index))
+      DataType::Boolean => json!(array.as_any().downcast_ref::<BooleanArray>().unwrap().value(row_index)),
+      DataType::Timestamp(TimeUnit::Millisecond, None) => json!(array.as_any().downcast_ref::<TimestampMillisecondArray>().unwrap().value(row_index)),
+      DataType::List(_inner_field) => {
+        let list_array = array.as_any().downcast_ref::<ListArray>().unwrap();
+        let offsets = list_array.value_offsets();
+        let start_idx = offsets[row_index] as usize;
+        let end_idx = offsets[row_index + 1] as usize;
+        let values_array = list_array.values();
+
+        // Recursive function to handle nested lists
+        fn extract_list_values(array: &dyn Array, start_idx: usize, end_idx: usize) -> Vec<serde_json::Value> {
+          match array.data_type() {
+            DataType::Utf8 => {
+              let string_array = array.as_any().downcast_ref::<StringArray>().unwrap();
+              (start_idx..end_idx).map(|i| json!(string_array.value(i))).collect()
+            }
+            DataType::Int64 => {
+              let int_array = array.as_any().downcast_ref::<Int64Array>().unwrap();
+              (start_idx..end_idx).map(|i| json!(int_array.value(i))).collect()
+            }
+            DataType::Float64 => {
+              let float_array = array.as_any().downcast_ref::<Float64Array>().unwrap();
+              (start_idx..end_idx).map(|i| json!(float_array.value(i))).collect()
+            }
+            DataType::Boolean => {
+              let bool_array = array.as_any().downcast_ref::<BooleanArray>().unwrap();
+              (start_idx..end_idx).map(|i| json!(bool_array.value(i))).collect()
+            }
+            _ => Vec::new(),
+          }
+        }
+
+        let values = extract_list_values(values_array.as_ref(), start_idx, end_idx);
+        json!(values)
       }
       _ => json!(null),
     }
   }
 
+  // Convert each row of the record batches into a JSON object
   let rows: Vec<_> = batches
     .iter()
     .flat_map(|batch| {
@@ -56,7 +90,6 @@ pub fn row_to_json(row: &Row) -> serde_json::Value {
     }
 
     match value {
-      ParquetField::Null => serde_json::Value::Null,
       ParquetField::Bool(b) => json!(*b),
       ParquetField::Byte(b) => json!(*b),
       ParquetField::Short(s) => json!(*s),
@@ -69,7 +102,17 @@ pub fn row_to_json(row: &Row) -> serde_json::Value {
       ParquetField::TimestampMicros(t) => json!(t),
       ParquetField::TimestampMillis(t) => json!(t),
       ParquetField::Decimal(d) => json!(decimal_to_string(d)),
-      ParquetField::Group(g) => row_to_json(g),
+      ParquetField::ListInternal(list) => {
+        let json_array: Vec<serde_json::Value> = list.elements().iter().map(|element| parquet_value_to_json(element)).collect();
+        serde_json::Value::Array(json_array)
+      }
+      ParquetField::Group(g) => {
+        let json_object: serde_json::Map<_, _> = g
+          .get_column_iter()
+          .map(|(name, field)| (name.clone(), parquet_value_to_json(field)))
+          .collect();
+        serde_json::Value::Object(json_object)
+      }
       _ => serde_json::Value::Null,
     }
   }
@@ -86,9 +129,9 @@ pub fn json_to_arrow(json_values: &[Value]) -> Result<(Vec<ArrayRef>, Schema), B
   // Extract schema from the first JSON object
   let first_obj = json_values
     .first()
-    .ok_or("No data to write".to_string())? // Convert the error to String
+    .ok_or("No data to write".to_string())?
     .as_object()
-    .ok_or("Expected JSON object".to_string())?; // Convert the error to String
+    .ok_or("Expected JSON object".to_string())?;
 
   // Define fields and handle errors separately
   let mut fields = Vec::new();
@@ -98,7 +141,24 @@ pub fn json_to_arrow(json_values: &[Value]) -> Result<(Vec<ArrayRef>, Schema), B
       Value::Number(num) if num.is_f64() => ArrowField::new(key, DataType::Float64, false),
       Value::Number(_) => ArrowField::new(key, DataType::Int64, false),
       Value::String(_) => ArrowField::new(key, DataType::Utf8, false),
-      _ => return Err(format!("Unsupported JSON value type for key {}", key).into()), // Explicit conversion
+      Value::Bool(_) => ArrowField::new(key, DataType::Boolean, false),
+      Value::Array(values) => {
+        let first_value = values.first().ok_or(format!("Array for key '{}' is empty", key))?;
+        let element_data_type = match first_value {
+          Value::Number(num) if num.is_f64() => DataType::Float64,
+          Value::Number(_) => DataType::Int64,
+          Value::String(_) => DataType::Utf8,
+          Value::Bool(_) => DataType::Boolean,
+          _ => DataType::Null,
+        };
+
+        ArrowField::new(
+          key,
+          DataType::List(Box::new(ArrowField::new("item", element_data_type, true)).into()),
+          false,
+        )
+      }
+      _ => return Err(format!("Unsupported JSON value type for key '{}' with value '{}'", key, value).into()),
     };
     fields.push(field);
   }
@@ -132,10 +192,106 @@ pub fn json_to_arrow(json_values: &[Value]) -> Result<(Vec<ArrayRef>, Schema), B
             .collect();
           Arc::new(StringArray::from(values)) as ArrayRef
         }
-        _ => return Err(format!("Unsupported data type for field {}", field.name()).into()), // Explicit error type
+        DataType::Boolean => {
+          let values: Vec<bool> = json_values
+            .iter()
+            .map(|v| v.get(&field.name()).and_then(Value::as_bool).unwrap_or_default())
+            .collect();
+          Arc::new(BooleanArray::from(values)) as ArrayRef
+        }
+        DataType::List(inner_field) => {
+          let element_type = inner_field.data_type();
+
+          match element_type {
+            DataType::Utf8 => {
+              let string_builder = StringBuilder::new();
+              let mut list_builder = ListBuilder::new(string_builder);
+
+              for value in json_values.iter().map(|v| v.get(&field.name())) {
+                if let Some(Value::Array(arr)) = value {
+                  let string_builder = list_builder.values();
+                  for item in arr {
+                    let str_val = item.as_str().unwrap_or_default();
+                    string_builder.append_value(str_val);
+                  }
+                  list_builder.append(true);
+                } else {
+                  list_builder.append(false); // Handle missing or non-array values
+                }
+              }
+
+              let list_array = list_builder.finish();
+              Arc::new(list_array) as ArrayRef
+            }
+            DataType::Int64 => {
+              let int_builder = Int64Builder::new();
+              let mut list_builder = ListBuilder::new(int_builder);
+
+              for value in json_values.iter().map(|v| v.get(&field.name())) {
+                if let Some(Value::Array(arr)) = value {
+                  let int_builder = list_builder.values();
+                  for item in arr {
+                    let int_val = item.as_i64().unwrap_or_default();
+                    int_builder.append_value(int_val);
+                  }
+                  list_builder.append(true);
+                } else {
+                  list_builder.append(false);
+                }
+              }
+
+              let list_array = list_builder.finish();
+              Arc::new(list_array) as ArrayRef
+            }
+            DataType::Float64 => {
+              let float_builder = Float64Builder::new();
+              let mut list_builder = ListBuilder::new(float_builder);
+
+              for value in json_values.iter().map(|v| v.get(&field.name())) {
+                if let Some(Value::Array(arr)) = value {
+                  let float_builder = list_builder.values();
+                  for item in arr {
+                    let float_val = item.as_f64().unwrap_or_default();
+                    float_builder.append_value(float_val);
+                  }
+                  list_builder.append(true);
+                } else {
+                  list_builder.append(false);
+                }
+              }
+
+              let list_array = list_builder.finish();
+              Arc::new(list_array) as ArrayRef
+            }
+            DataType::Boolean => {
+              let bool_builder = BooleanBuilder::new();
+              let mut list_builder = ListBuilder::new(bool_builder);
+
+              for value in json_values.iter().map(|v| v.get(&field.name())) {
+                if let Some(Value::Array(arr)) = value {
+                  let bool_builder = list_builder.values();
+                  for item in arr {
+                    let bool_val = item.as_bool().unwrap_or(false);
+                    bool_builder.append_value(bool_val);
+                  }
+                  list_builder.append(true);
+                } else {
+                  list_builder.append(false);
+                }
+              }
+
+              let list_array = list_builder.finish();
+              Arc::new(list_array) as ArrayRef
+            }
+            _ => {
+              return Err(format!("Unsupported inner data type for ListArray: '{:?}'", element_type).into());
+            }
+          }
+        }
+        _ => return Err(format!("Unsupported data type for field '{}'", field.name()).into()),
       })
     })
-    .collect::<Result<_, Box<dyn std::error::Error>>>()?; // Specify error type explicitly
+    .collect::<Result<_, Box<dyn std::error::Error>>>()?;
 
   Ok((arrays, schema))
 }
