@@ -15,8 +15,8 @@ async fn test_local_storage() {
   let table_schema = r#"
     {
       "date": { "type": "string", "required": true, "unique": true },
-      "temperature": { "type": "float", "required": true },
-      "humidity": { "type": "float", "required": true },
+      "temperature": { "type": "int|float", "required": true },
+      "humidity": { "type": "int|float", "required": true },
       "full_counter": { "type": "int", "required": true },
       "is_cool": { "type": "bool", "required": true },
       "ring_details": { "type": "array", "required": true }
@@ -34,11 +34,19 @@ async fn test_local_storage() {
     [
       {
         "date": "2024.08.18 20:58:32",
-        "humidity": 12.0,
-        "temperature": 22.0,
-        "full_counter": 10,
+        "humidity": 12,
+        "temperature": 22,
+        "full_counter": 7,
         "is_cool": true,
         "ring_details": ["Ahmed", "Eyal", "Olive"]
+      },
+      {
+        "date": "2024.08.18 20:58:35",
+        "humidity": 88.5,
+        "temperature": 44.0,
+        "full_counter": 77,
+        "is_cool": true,
+        "ring_details": ["Moin", "Jeel"]
       }
     ]
   "#

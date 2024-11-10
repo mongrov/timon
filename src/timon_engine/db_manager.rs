@@ -428,7 +428,7 @@ impl DatabaseManager {
     fn get_value_type(value: &Value) -> &str {
       if value.is_f64() {
         "float"
-      } else if value.is_i64() {
+      } else if value.is_i64() || value.is_u64() {
         "int"
       } else if value.is_string() {
         "string"
@@ -440,16 +440,20 @@ impl DatabaseManager {
         "unknown"
       }
     }
-    let received_type = get_value_type(value);
 
-    match field_type {
-      "float" if value.is_f64() => Ok(()),
-      "int" if value.is_i64() => Ok(()),
-      "string" if value.is_string() => Ok(()),
-      "bool" if value.is_boolean() => Ok(()),
-      "array" if value.is_array() => Ok(()),
-      _ => Err(format!("Field '{}' expected typeof '{}' but got '{}'", field_name, field_type, received_type).into()),
+    let actual_type = get_value_type(value);
+    let expected_types: Vec<&str> = field_type.split('|').collect();
+    if !expected_types.contains(&actual_type) {
+      return Err(
+        format!(
+          "Type mismatch for field '{}': expected '{}', but got '{}'.",
+          field_name, field_type, actual_type
+        )
+        .into(),
+      );
     }
+
+    Ok(())
   }
 
   fn read_parquet_file(&self, file_path: &str) -> Result<Vec<Value>, Box<dyn std::error::Error>> {

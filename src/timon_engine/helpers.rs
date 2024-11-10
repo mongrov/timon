@@ -15,6 +15,7 @@ use std::error::Error;
 use std::sync::Arc;
 
 pub fn record_batches_to_json(batches: &[RecordBatch]) -> Result<Value, serde_json::Error> {
+  // println!("batches >>> {:?}", batches);
   fn array_value_to_json(array: &ArrayRef, row_index: usize) -> serde_json::Value {
     match array.data_type() {
       DataType::Int64 => json!(array.as_any().downcast_ref::<Int64Array>().unwrap().value(row_index)),
@@ -126,46 +127,61 @@ pub fn row_to_json(row: &Row) -> serde_json::Value {
 }
 
 pub fn json_to_arrow(json_values: &[Value]) -> Result<(Vec<ArrayRef>, Schema), Box<dyn std::error::Error>> {
-  // Extract schema from the first JSON object
-  let first_obj = json_values
-    .first()
-    .ok_or("No data to write".to_string())?
-    .as_object()
-    .ok_or("Expected JSON object".to_string())?;
-
-  // Define fields and handle errors separately
-  let mut fields = Vec::new();
-
-  for (key, value) in first_obj {
-    let field = match value {
-      Value::Number(num) if num.is_f64() => ArrowField::new(key, DataType::Float64, false),
-      Value::Number(_) => ArrowField::new(key, DataType::Int64, false),
-      Value::String(_) => ArrowField::new(key, DataType::Utf8, false),
-      Value::Bool(_) => ArrowField::new(key, DataType::Boolean, false),
-      Value::Array(values) => {
-        let first_value = values.first().ok_or(format!("Array for key '{}' is empty", key))?;
-        let element_data_type = match first_value {
-          Value::Number(num) if num.is_f64() => DataType::Float64,
-          Value::Number(_) => DataType::Int64,
-          Value::String(_) => DataType::Utf8,
-          Value::Bool(_) => DataType::Boolean,
-          _ => DataType::Null,
-        };
-
-        ArrowField::new(
-          key,
-          DataType::List(Box::new(ArrowField::new("item", element_data_type, true)).into()),
-          false,
-        )
-      }
-      _ => return Err(format!("Unsupported JSON value type for key '{}' with value '{}'", key, value).into()),
-    };
-    fields.push(field);
+  fn resolve_data_type_conflict(current: Option<DataType>, new_type: DataType) -> DataType {
+    match (current, new_type) {
+      (None, new) => new,
+      (Some(DataType::Int64), DataType::Float64) => DataType::Float64, // Promote Int64 to Float64
+      (Some(DataType::Float64), DataType::Int64) => DataType::Float64, // Promote Int64 to Float64
+      (Some(current), new) if current == new => current,               // Same type
+      (_, new) => new,                                                 // Prefer the new type
+    }
   }
 
+  if json_values.is_empty() {
+    return Err("No data to write".into());
+  }
+
+  // Determine the schema dynamically
+  let mut field_types: std::collections::HashMap<String, DataType> = std::collections::HashMap::new();
+
+  // Iterate through each JSON object to detect data types
+  for obj in json_values.iter().filter_map(Value::as_object) {
+    for (key, value) in obj.iter() {
+      let current_type = field_types.get(key).cloned();
+      let new_type = match value {
+        Value::Number(num) if num.is_f64() => DataType::Float64,
+        Value::Number(_) => DataType::Int64,
+        Value::String(_) => DataType::Utf8,
+        Value::Bool(_) => DataType::Boolean,
+        Value::Array(arr) => {
+          if let Some(first_val) = arr.first() {
+            match first_val {
+              Value::Number(n) if n.is_f64() => DataType::List(Box::new(ArrowField::new("item", DataType::Float64, true)).into()),
+              Value::Number(_) => DataType::List(Box::new(ArrowField::new("item", DataType::Int64, true)).into()),
+              Value::String(_) => DataType::List(Box::new(ArrowField::new("item", DataType::Utf8, true)).into()),
+              Value::Bool(_) => DataType::List(Box::new(ArrowField::new("item", DataType::Boolean, true)).into()),
+              _ => DataType::List(Box::new(ArrowField::new("item", DataType::Null, true)).into()),
+            }
+          } else {
+            DataType::List(Box::new(ArrowField::new("item", DataType::Null, true)).into())
+          }
+        }
+        _ => DataType::Null,
+      };
+
+      // Resolve potential conflicts by promoting types
+      field_types.insert(key.clone(), resolve_data_type_conflict(current_type, new_type));
+    }
+  }
+
+  // Define schema fields
+  let fields: Vec<ArrowField> = field_types
+    .into_iter()
+    .map(|(key, data_type)| ArrowField::new(&key, data_type, false))
+    .collect();
   let schema = Schema::new(fields);
 
-  // Convert JSON values into corresponding Arrow arrays
+  // Create Arrow arrays based on the detected schema
   let arrays: Vec<ArrayRef> = schema
     .fields()
     .iter()
