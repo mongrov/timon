@@ -9,7 +9,7 @@ use parquet::file::properties::WriterProperties;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::error::Error;
 use std::path::Path;
 use std::sync::Arc;
@@ -312,19 +312,21 @@ impl DatabaseManager {
       let mut combined_json_values = existing_json_values;
       combined_json_values.extend(json_values);
 
-      // check and remove deduplicated field values
+      // Check and update deduplicated field values
       let unique_fields = get_unique_fields(table_schema)?;
       if !unique_fields.is_empty() {
-        let mut seen = HashSet::new();
-        combined_json_values.retain(|record| {
+        let mut seen: HashMap<String, serde_json::Value> = HashMap::new();
+        for record in combined_json_values.iter() {
           let key = unique_fields
             .iter()
             .map(|field| record.get(field).map(|v| v.to_string()).unwrap_or_default())
             .collect::<Vec<String>>()
             .join("-");
-
-          seen.insert(key)
-        });
+          // Update the record in the map with the latest entry
+          seen.insert(key, record.clone());
+        }
+        // Replace the original vector with updated values
+        combined_json_values = seen.into_values().collect();
       }
 
       // Convert combined data to Arrow arrays
@@ -423,7 +425,6 @@ impl DatabaseManager {
     Ok(())
   }
 
-  // Validate the type of each field in the JSON data
   fn validate_field_type(&self, field_name: &str, field_type: &str, value: &serde_json::Value) -> Result<(), Box<dyn Error>> {
     fn get_value_type(value: &Value) -> &str {
       if value.is_f64() {
