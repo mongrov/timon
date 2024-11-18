@@ -423,7 +423,7 @@ pub mod ios {
             string_to_c_str(err_message)
           }
         },
-        (Err(e), _) | (_, Err(e)) => {
+        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
           let err_message = serde_json::json!({ "error": e }).to_string();
           string_to_c_str(err_message)
         }
