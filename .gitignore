@@ -6,3 +6,6 @@ jniLibs
 # local env files
 .env*.local
 *.log
+
+# development and testing folder
+/tmp

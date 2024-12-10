@@ -2,6 +2,13 @@ mod timon_engine;
 use crate::timon_engine::{init_bucket, query_bucket, sink_daily_parquet};
 pub use timon_engine::{create_database, create_table, delete_database, delete_table, init_timon, insert, list_databases, list_tables, query};
 
+#[cfg(feature = "dev_cli")]
+mod cli;
+#[cfg(feature = "dev_cli")]
+use clap::Parser;
+#[cfg(feature = "dev_cli")]
+use cli::{convert_json_to_parquet, execute_query, Commands, CLI};
+
 #[allow(dead_code)]
 async fn test_local_storage() {
   const STORAGE_PATH: &str = "/tmp/timon";
@@ -85,9 +92,27 @@ async fn test_s3_sync() {
   println!("{}", sink_daily_parquet_result.unwrap());
 }
 
+#[cfg(not(feature = "dev_cli"))]
 fn main() {
   tokio::runtime::Runtime::new().expect("Failed to create runtime").block_on(async {
     test_local_storage().await;
     test_s3_sync().await;
   });
+}
+
+#[cfg(feature = "dev_cli")]
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+  let cli = CLI::parse();
+
+  match &cli.command {
+    Commands::Convert { input, output } => {
+      convert_json_to_parquet(input.as_str(), output.as_str())?;
+      println!("JSON converted to Parquet successfully.");
+    }
+    Commands::Query { file, query } => {
+      execute_query(file.as_str(), query.as_str()).await?;
+    }
+  }
+  Ok(())
 }

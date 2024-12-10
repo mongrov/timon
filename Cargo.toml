@@ -24,6 +24,10 @@ object_store = { version = "0.10.2", features = ["aws"] }
 url = { version = "2.5.2" }
 chrono = "0.4.38"
 hex = "0.4.3"
+clap = { version = "4.5.23", features = ["derive"], optional = true }
+
+[features]
+dev_cli = ["clap"]
 
 [lib]
 name = "tsdb_timon"
