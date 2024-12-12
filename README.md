@@ -105,12 +105,63 @@ Upload data from the specified database and table as Parquet files, organized by
 
 ### Build the Binary
 Run the following command to build the utility with the necessary features:  
+
+#### **Cross-Compile the Binary**
+Rust provides tools to cross-compile your code for different platforms. This involves building the binary for a platform different from your current one.
+
+#### Example for Windows:
+On Linux or macOS, you can compile for Windows:
 ```bash
-cargo build --features dev_cli --release
+rustup target add x86_64-pc-windows-gnu
+cargo build --features dev_cli --release --target x86_64-pc-windows-gnu
 ```
 
-The resulting binary file will be located at:  
-`timon/target/release/tsdb_timon`
+#### Example for macOS:
+On Linux, you can compile for macOS:
+```bash
+rustup target add x86_64-apple-darwin
+cargo build --features dev_cli --release --target x86_64-apple-darwin
+```
+
+#### **Build Natively on Each Platform**
+If cross-compilation is not feasible, you can build the binary on each target platform natively. This ensures compatibility.
+
+#### On macOS:
+```bash
+cargo build --release
+```
+
+#### On Windows:
+```powershell
+cargo build --release
+```
+
+#### **Use Cross (Simplified Cross-Compiling)**
+The [`cross`](https://github.com/cross-rs/cross) tool simplifies cross-compiling by providing pre-configured Docker containers for various targets. It automatically handles dependencies and toolchains.
+
+#### Install `cross`:
+```bash
+cargo install cross
+```
+
+```bash
+cross build --release --target x86_64-pc-windows-gnu
+cross build --release --target x86_64-apple-darwin
+```
+
+
+#### **Consider Using Rust's MUSL for Static Linking (Linux Only)**
+If targeting Linux systems with no shared libraries, you can build a statically linked binary using MUSL:
+```bash
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-musl
+```
+This produces a binary that works on most Linux distributions.
+
+### Summary
+- Use **cross-compilation** to build for other platforms without a native environment.
+- Use **`cross`** for easier cross-compilation.
+- If you have access to all platforms, build natively on each.
 
 ---
 
