@@ -56,7 +56,7 @@ impl CloudStorageManager {
   }
 
   #[allow(dead_code)]
-  pub async fn query_bucket(&self, date_range: HashMap<&str, &str>, sql_query: &str, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
+  pub async fn query_bucket(&self, date_range: HashMap<String, String>, sql_query: &str, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
     let session_context = SessionContext::new();
     let file_name = &extract_table_name(sql_query);
 

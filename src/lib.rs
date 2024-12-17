@@ -214,20 +214,14 @@ pub mod android {
     mut env: JNIEnv,
     _class: JClass,
     db_name: JString,
-    date_range: JObject,
     sql_query: JString,
+    _date_range: JObject, // TODO: Utilize date_range to optionally enhance the query by limiting the parquet files included based on the specified date range.
   ) -> jstring {
     // Convert Java strings to Rust strings
     let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
     let rust_sql_query: String = env.get_string(&sql_query).expect("Couldn't get java string!").into();
 
-    let mut rust_date_range: HashMap<&str, &str> = HashMap::new();
-    let rust_start = get_date_range_value(&mut env, &date_range, "start");
-    let rust_end = get_date_range_value(&mut env, &date_range, "end");
-    rust_date_range.insert("start_date", &rust_start);
-    rust_date_range.insert("end_date", &rust_end);
-
-    match Runtime::new().unwrap().block_on(query(&rust_db_name, rust_date_range, &rust_sql_query)) {
+    match Runtime::new().unwrap().block_on(query(&rust_db_name, &rust_sql_query, None)) {
       Ok(result) => {
         let json_string = result.to_string();
         let output = env.new_string(json_string).expect("Couldn't create success string!");
@@ -540,22 +534,13 @@ pub mod ios {
   #[no_mangle]
   pub extern "C" fn Java_com_rustexample_TimonModule_query(
     db_name: *const c_char,
-    date_range_json: *const c_char,
     sql_query: *const c_char,
+    date_range_json: *const c_char, // TODO: Utilize date_range to optionally enhance the query by limiting the parquet files included based on the specified date range.
   ) -> *mut c_char {
     unsafe {
-      match (c_str_to_string(db_name), c_str_to_string(date_range_json), c_str_to_string(sql_query)) {
+      match (c_str_to_string(db_name), c_str_to_string(sql_query), c_str_to_string(date_range_json)) {
         (Ok(rust_db_name), Ok(rust_date_range_json), Ok(rust_sql_query)) => {
-          // Parse date_range_json into HashMap
-          let rust_date_range: HashMap<String, String> = serde_json::from_str(&rust_date_range_json).unwrap_or_default();
-          let start_date = rust_date_range.get("start").cloned().unwrap_or_else(|| "1970-01-01".to_string());
-          let end_date = rust_date_range.get("end").cloned().unwrap_or_else(|| "1970-01-02".to_string());
-
-          let mut date_range_map = HashMap::new();
-          date_range_map.insert("start_date", start_date.as_str());
-          date_range_map.insert("end_date", end_date.as_str());
-
-          match Runtime::new().unwrap().block_on(query(&rust_db_name, date_range_map, &rust_sql_query)) {
+          match Runtime::new().unwrap().block_on(query(&rust_db_name, &rust_sql_query, None)) {
             Ok(result) => {
               let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "[]".to_string());
               string_to_c_str(json_string)

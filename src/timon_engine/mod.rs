@@ -218,9 +218,9 @@ pub fn insert(db_name: &str, table_name: &str, json_data: &str) -> Result<Value,
 }
 
 #[allow(dead_code)]
-pub async fn query(db_name: &str, date_range: HashMap<&str, &str>, sql_query: &str) -> Result<Value, String> {
+pub async fn query(db_name: &str, sql_query: &str, date_range: Option<HashMap<String, String>>) -> Result<Value, String> {
   let database_manager = get_database_manager();
-  match database_manager.query(db_name, date_range, sql_query, true).await {
+  match database_manager.query(db_name, sql_query, date_range, true).await {
     Ok(db_manager::DataFusionOutput::Json(data)) => {
       let json_value = serde_json::to_value(&data).map_err(|e| e.to_string())?;
       let result = TimonResult {
@@ -285,7 +285,11 @@ pub fn init_bucket(bucket_endpoint: &str, bucket_name: &str, access_key_id: &str
 
 pub async fn query_bucket(date_range: HashMap<&str, &str>, sql_query: &str) -> Result<Value, String> {
   let cloud_storage_manager = get_cloud_storage_manager();
-  match cloud_storage_manager.query_bucket(date_range, &sql_query, true).await {
+  let mut converted_date_range: HashMap<String, String> = HashMap::new(); // TODO: remove converted_date_range
+  for (key, value) in date_range {
+    converted_date_range.insert(key.to_string(), value.to_string());
+  }
+  match cloud_storage_manager.query_bucket(converted_date_range, &sql_query, true).await {
     Ok(db_manager::DataFusionOutput::Json(data)) => {
       let json_value = serde_json::to_value(&data).map_err(|e| e.to_string())?;
       let result = TimonResult {

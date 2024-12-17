@@ -1,5 +1,5 @@
 use arrow::record_batch::RecordBatch;
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use datafusion::dataframe::DataFrame;
 use datafusion::datasource::MemTable;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
@@ -502,8 +502,8 @@ impl DatabaseManager {
   pub async fn query(
     &self,
     db_name: &str,
-    date_range: HashMap<&str, &str>,
     sql_query: &str,
+    date_range: Option<HashMap<String, String>>,
     is_json_format: bool,
   ) -> DataFusionResult<DataFusionOutput> {
     let ctx = SessionContext::new();
@@ -511,7 +511,17 @@ impl DatabaseManager {
     let file_name = &extract_table_name(&sql_query);
     let base_dir = format!("{}/{}/{}", &self.data_path, db_name, file_name);
 
-    let file_list = generate_paths(&base_dir, file_name, date_range, Granularity::Day, false).unwrap();
+    let default_date_range = || {
+      let today = Utc::now().naive_utc().date();
+      let last_six_months_date = (today - Duration::days(6 * 30)).to_string();
+      let current_date = today.to_string();
+      let mut map: HashMap<String, String> = HashMap::new();
+      map.insert("start_date".to_owned(), last_six_months_date);
+      map.insert("end_date".to_owned(), current_date);
+      map
+    };
+    let date_range = date_range.unwrap_or_else(default_date_range);
+    let file_list = generate_paths(&base_dir, file_name, date_range, Granularity::Day, false).expect("Failed to generate paths");
 
     for (i, file_path) in file_list.iter().enumerate() {
       if Path::new(file_path).exists() {
@@ -520,8 +530,6 @@ impl DatabaseManager {
           Ok(_) => table_names.push(table_name),
           Err(e) => eprintln!("Failed to register {}: {:?}", file_path, e),
         }
-      } else {
-        eprintln!("File does not exist: {}", file_path);
       }
     }
 

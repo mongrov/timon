@@ -321,7 +321,7 @@ pub enum Granularity {
 pub fn generate_paths(
   base_dir: &str,
   file_name: &str,
-  date_range: HashMap<&str, &str>,
+  date_range: HashMap<String, String>,
   granularity: Granularity,
   is_s3: bool,
 ) -> Result<Vec<String>, ParseError> {
