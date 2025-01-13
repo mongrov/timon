@@ -318,12 +318,39 @@ pub enum Granularity {
   Day,
 }
 
-pub fn generate_paths(
+pub fn generate_local_paths(
   base_dir: &str,
   file_name: &str,
   date_range: HashMap<String, String>,
   granularity: Granularity,
-  is_s3: bool,
+) -> Result<Vec<String>, ParseError> {
+  let start_date = NaiveDate::parse_from_str(date_range.get("start_date").unwrap(), "%Y-%m-%d")?;
+  let end_date = NaiveDate::parse_from_str(date_range.get("end_date").unwrap(), "%Y-%m-%d")?;
+  let mut current_date = start_date;
+
+  let mut file_list = Vec::new();
+  while current_date <= end_date {
+    let path = match granularity {
+      Granularity::Month => format!("{}/{}_{}.parquet", base_dir, file_name, current_date.format("%Y-%m")),
+      Granularity::Day => format!("{}/{}_{}.parquet", base_dir, file_name, current_date.format("%Y-%m-%d")),
+    };
+    file_list.push(path);
+    current_date = match granularity {
+      Granularity::Month => current_date
+        .with_month(current_date.month() % 12 + 1)
+        .unwrap_or_else(|| NaiveDate::from_ymd_opt(current_date.year() + 1, 1, 1).unwrap()),
+      Granularity::Day => current_date.succ_opt().unwrap(),
+    };
+  }
+  Ok(file_list)
+}
+
+pub fn generate_s3_paths(
+  bucket_name: &str,
+  username: &str,
+  file_name: &str,
+  date_range: HashMap<String, String>,
+  granularity: Granularity,
 ) -> Result<Vec<String>, ParseError> {
   let start_date = NaiveDate::parse_from_str(date_range.get("start_date").unwrap(), "%Y-%m-%d")?;
   let end_date = NaiveDate::parse_from_str(date_range.get("end_date").unwrap(), "%Y-%m-%d")?;
@@ -333,13 +360,23 @@ pub fn generate_paths(
   while current_date <= end_date {
     let path = match granularity {
       Granularity::Month => format!(
-        "{}{}/{}_{}.parquet",
-        if is_s3 { "s3://" } else { "" },
-        base_dir,
+        "s3://{}/{}/{}/{}/{}_{}.parquet",
+        bucket_name,
+        username,
+        file_name,
+        current_date.format("%Y"),
         file_name,
         current_date.format("%Y-%m")
       ),
-      Granularity::Day => format!("{}/{}_{}.parquet", base_dir, file_name, current_date.format("%Y-%m-%d")),
+      Granularity::Day => format!(
+        "s3://{}/{}/{}/{}/{}_{}.parquet",
+        bucket_name,
+        username,
+        file_name,
+        current_date.format("%Y/%m"),
+        file_name,
+        current_date.format("%Y-%m-%d")
+      ),
     };
     file_list.push(path);
     current_date = match granularity {

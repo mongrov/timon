@@ -9,7 +9,7 @@ use serde_json::{self, Value};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-/* ******************************** File Storage ********************************
+/* ******************************** Local File Storage ********************************
 * @ init_timon/new(storage_path)
 * @ create_database(db_name)
 * @ create_table(db_name, table_name)
@@ -254,13 +254,20 @@ fn get_cloud_storage_manager() -> &'static CloudStorageManager {
   CLOUD_STORAGE_MANAGER.get().expect("CloudStorageManager is not initialized")
 }
 
-pub fn init_bucket(bucket_endpoint: &str, bucket_name: &str, access_key_id: &str, secret_access_key: &str) -> Result<Value, String> {
+pub fn init_bucket(
+  bucket_endpoint: &str,
+  bucket_name: &str,
+  access_key_id: &str,
+  secret_access_key: &str,
+  bucket_region: &str,
+) -> Result<Value, String> {
   let cloud_storage_manager = cloud_sync::CloudStorageManager::new(
     get_database_manager().clone(),
     Some(bucket_endpoint),
     Some(access_key_id),
     Some(secret_access_key),
     Some(bucket_name),
+    Some(bucket_region),
   );
 
   match CLOUD_STORAGE_MANAGER.set(cloud_storage_manager) {
@@ -283,13 +290,16 @@ pub fn init_bucket(bucket_endpoint: &str, bucket_name: &str, access_key_id: &str
   }
 }
 
-pub async fn query_bucket(date_range: HashMap<&str, &str>, sql_query: &str) -> Result<Value, String> {
+pub async fn query_bucket(username: &str, sql_query: &str, date_range: HashMap<&str, &str>) -> Result<Value, String> {
   let cloud_storage_manager = get_cloud_storage_manager();
   let mut converted_date_range: HashMap<String, String> = HashMap::new(); // TODO: remove converted_date_range
   for (key, value) in date_range {
     converted_date_range.insert(key.to_string(), value.to_string());
   }
-  match cloud_storage_manager.query_bucket(converted_date_range, &sql_query, true).await {
+  match cloud_storage_manager
+    .query_bucket(&username, &sql_query, converted_date_range, true)
+    .await
+  {
     Ok(db_manager::DataFusionOutput::Json(data)) => {
       let json_value = serde_json::to_value(&data).map_err(|e| e.to_string())?;
       let result = TimonResult {
@@ -321,9 +331,9 @@ pub async fn query_bucket(date_range: HashMap<&str, &str>, sql_query: &str) -> R
   }
 }
 
-pub async fn sink_daily_parquet(db_name: &str, table_name: &str) -> Result<Value, String> {
+pub async fn sink_daily_parquet(username: &str, db_name: &str, table_name: &str) -> Result<Value, String> {
   let cloud_storage_manager = get_cloud_storage_manager();
-  match cloud_storage_manager.sink_daily_parquet(db_name, table_name).await {
+  match cloud_storage_manager.sink_daily_parquet(username, db_name, table_name).await {
     Ok(_) => {
       let result = TimonResult {
         status: 200,

@@ -1,13 +1,59 @@
 mod timon_engine;
-use crate::timon_engine::{init_bucket, query_bucket, sink_daily_parquet};
-pub use timon_engine::{create_database, create_table, delete_database, delete_table, init_timon, insert, list_databases, list_tables, query};
-
+pub use timon_engine::{
+  create_database, create_table, delete_database, delete_table, init_bucket, init_timon, insert, list_databases, list_tables, query, query_bucket,
+  sink_daily_parquet,
+};
 #[cfg(feature = "dev_cli")]
 mod cli;
+#[cfg(feature = "cloud_server")]
+mod server;
+
+#[cfg(feature = "cloud_server")]
+mod cloud_server {
+  use crate::server::timon_server;
+  use std::io;
+
+  #[actix_web::main]
+  pub async fn main() -> io::Result<()> {
+    timon_server().await
+  }
+}
+
 #[cfg(feature = "dev_cli")]
-use clap::Parser;
+mod dev_cli {
+  use crate::cli::{convert_json_to_parquet, execute_query, Commands, CLI};
+  use clap::Parser;
+
+  #[tokio::main]
+  pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = CLI::parse();
+
+    match &cli.command {
+      Commands::Convert { input, output } => {
+        convert_json_to_parquet(input.as_str(), output.as_str())?;
+        println!("JSON converted to Parquet successfully.");
+      }
+      Commands::Query { file, query } => {
+        execute_query(file.as_str(), query.as_str()).await?;
+      }
+    }
+    Ok(())
+  }
+}
+
+#[cfg(feature = "cloud_server")]
+fn main() {
+  if let Err(e) = cloud_server::main() {
+    eprintln!("Failed to start the cloud server: {}", e);
+  }
+}
+
 #[cfg(feature = "dev_cli")]
-use cli::{convert_json_to_parquet, execute_query, Commands, CLI};
+fn main() {
+  if let Err(e) = dev_cli::main() {
+    eprintln!("Failed to build the CLI tool: {}", e);
+  }
+}
 
 #[allow(dead_code)]
 async fn test_local_storage() {
@@ -80,39 +126,24 @@ async fn test_s3_sync() {
   let bucket_name = "timon";
   let access_key_id = "ahmed";
   let secret_access_key = "ahmed1234";
-  let init_bucket_result = init_bucket(bucket_endpoint, bucket_name, access_key_id, secret_access_key).unwrap();
+  let bucket_region = "us-east-1";
+  let init_bucket_result = init_bucket(bucket_endpoint, bucket_name, access_key_id, secret_access_key, bucket_region).unwrap();
   println!("init_bucket_result: {}", init_bucket_result);
 
   let range = std::collections::HashMap::from([("start_date", "2024-07-01"), ("end_date", "2024-08-01")]);
   let sql_query = "SELECT * FROM temperature LIMIT 25";
-  let df_result = query_bucket(range, &sql_query).await.unwrap();
+  let df_result = query_bucket("user6172", &sql_query, range).await.unwrap();
   println!("query_bucket {:?}", df_result);
 
-  let sink_daily_parquet_result = sink_daily_parquet("test", "temperature").await;
+  let sink_daily_parquet_result = sink_daily_parquet("user6172", "test", "temperature").await;
   println!("{}", sink_daily_parquet_result.unwrap());
 }
 
-#[cfg(not(feature = "dev_cli"))]
+// This block is executed for local development testing(run async tests for local_storage and S3 cloud_sync).
+#[cfg(all(not(feature = "dev_cli"), not(feature = "cloud_server")))]
 fn main() {
   tokio::runtime::Runtime::new().expect("Failed to create runtime").block_on(async {
     test_local_storage().await;
     test_s3_sync().await;
   });
-}
-
-#[cfg(feature = "dev_cli")]
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-  let cli = CLI::parse();
-
-  match &cli.command {
-    Commands::Convert { input, output } => {
-      convert_json_to_parquet(input.as_str(), output.as_str())?;
-      println!("JSON converted to Parquet successfully.");
-    }
-    Commands::Query { file, query } => {
-      execute_query(file.as_str(), query.as_str()).await?;
-    }
-  }
-  Ok(())
 }

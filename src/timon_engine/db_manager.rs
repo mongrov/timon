@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::{fmt, fs};
 use tokio::io::Result as TokioResult;
 
-use super::helpers::{extract_table_name, generate_paths, get_unique_fields, json_to_arrow, record_batches_to_json, row_to_json, Granularity};
+use super::helpers::{extract_table_name, generate_local_paths, get_unique_fields, json_to_arrow, record_batches_to_json, row_to_json, Granularity};
 
 pub enum DataFusionOutput {
   Json(Value),
@@ -521,7 +521,7 @@ impl DatabaseManager {
       map
     };
     let date_range = date_range.unwrap_or_else(default_date_range);
-    let file_list = generate_paths(&base_dir, file_name, date_range, Granularity::Day, false).expect("Failed to generate paths");
+    let file_list = generate_local_paths(&base_dir, file_name, date_range, Granularity::Day).expect("Failed to generate paths");
 
     for (i, file_path) in file_list.iter().enumerate() {
       if Path::new(file_path).exists() {

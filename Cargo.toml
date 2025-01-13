@@ -25,9 +25,15 @@ url = { version = "2.5.2" }
 chrono = "0.4.38"
 hex = "0.4.3"
 clap = { version = "4.5.23", features = ["derive"], optional = true }
+actix-web = { version = "4.9.0", optional = true }
+actix-web-httpauth = { version = "0.8.2", optional = true }
+jsonwebtoken = { version = "9.3.0", optional = true }
+log ={ version = "0.4.24", optional = true}
+env_logger = { version = "0.11.6", optional =  true}
 
 [features]
 dev_cli = ["clap"]
+cloud_server = ["actix-web", "actix-web-httpauth", "jsonwebtoken", "log", "env_logger"]
 
 [lib]
 name = "tsdb_timon"

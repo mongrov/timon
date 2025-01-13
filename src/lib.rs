@@ -245,13 +245,21 @@ pub mod android {
     bucket_name: JString,
     access_key_id: JString,
     secret_access_key: JString,
+    bucket_region: JString,
   ) -> jstring {
     let rust_bucket_endpoint: String = env.get_string(&bucket_endpoint).expect("Couldn't get java string!").into();
     let rust_bucket_name: String = env.get_string(&bucket_name).expect("Couldn't get java string!").into();
     let rust_access_key_id: String = env.get_string(&access_key_id).expect("Couldn't get java string!").into();
     let rust_secret_access_key: String = env.get_string(&secret_access_key).expect("Couldn't get java string!").into();
+    let rust_bucket_region: String = env.get_string(&bucket_region).expect("Couldn't get java string!").into();
 
-    match init_bucket(&rust_bucket_endpoint, &rust_bucket_name, &rust_access_key_id, &rust_secret_access_key) {
+    match init_bucket(
+      &rust_bucket_endpoint,
+      &rust_bucket_name,
+      &rust_access_key_id,
+      &rust_secret_access_key,
+      &rust_bucket_region,
+    ) {
       Ok(result) => {
         let json_string = result.to_string();
         let output = env.new_string(json_string).expect("Couldn't create success string!");
@@ -269,10 +277,12 @@ pub mod android {
   pub unsafe extern "C" fn Java_com_rustexample_TimonModule_queryBucket(
     mut env: JNIEnv,
     _class: JClass,
-    date_range: JObject,
+    username: JString,
     sql_query: JString,
+    date_range: JObject,
   ) -> jstring {
     // Convert Java strings to Rust strings
+    let rust_username: String = env.get_string(&username).expect("Couldn't get java string!").into();
     let rust_sql_query: String = env.get_string(&sql_query).expect("Couldn't get java string!").into();
 
     let mut rust_date_range: HashMap<&str, &str> = HashMap::new();
@@ -281,7 +291,10 @@ pub mod android {
     rust_date_range.insert("start_date", &rust_start);
     rust_date_range.insert("end_date", &rust_end);
 
-    match Runtime::new().unwrap().block_on(query_bucket(rust_date_range, &rust_sql_query)) {
+    match Runtime::new()
+      .unwrap()
+      .block_on(query_bucket(&rust_username, &rust_sql_query, rust_date_range))
+    {
       Ok(result) => {
         let json_string = result.to_string();
         let output = env.new_string(json_string).expect("Couldn't create success string!");
@@ -297,16 +310,21 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_sinkMonthlyParquet(
+  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_sinkDailyParquet(
     mut env: JNIEnv,
     _class: JClass,
+    username: JString,
     db_name: JString,
     table_name: JString,
   ) -> jstring {
+    let rust_username: String = env.get_string(&username).expect("Couldn't get java string!").into();
     let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
     let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
 
-    match Runtime::new().unwrap().block_on(sink_daily_parquet(&rust_db_name, &rust_table_name)) {
+    match Runtime::new()
+      .unwrap()
+      .block_on(sink_daily_parquet(&rust_username, &rust_db_name, &rust_table_name))
+    {
       Ok(result) => {
         let json_string = result.to_string();
         let output = env.new_string(json_string).expect("Couldn't create success string!");
@@ -566,6 +584,7 @@ pub mod ios {
     bucket_name: *const c_char,
     access_key_id: *const c_char,
     secret_access_key: *const c_char,
+    bucket_region: *const c_char,
   ) -> *mut c_char {
     unsafe {
       match (
@@ -573,9 +592,16 @@ pub mod ios {
         c_str_to_string(bucket_name),
         c_str_to_string(access_key_id),
         c_str_to_string(secret_access_key),
+        c_str_to_string(bucket_region),
       ) {
-        (Ok(rust_bucket_endpoint), Ok(rust_bucket_name), Ok(rust_access_key_id), Ok(rust_secret_access_key)) => {
-          match init_bucket(&rust_bucket_endpoint, &rust_bucket_name, &rust_access_key_id, &rust_secret_access_key) {
+        (Ok(rust_bucket_endpoint), Ok(rust_bucket_name), Ok(rust_access_key_id), Ok(rust_secret_access_key), Ok(rust_bucket_region)) => {
+          match init_bucket(
+            &rust_bucket_endpoint,
+            &rust_bucket_name,
+            &rust_access_key_id,
+            &rust_secret_access_key,
+            &rust_bucket_region,
+          ) {
             Ok(result) => {
               let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
               string_to_c_str(json_string)
@@ -595,10 +621,14 @@ pub mod ios {
   }
 
   #[no_mangle]
-  pub extern "C" fn Java_com_rustexample_TimonModule_queryBucket(date_range_json: *const c_char, sql_query: *const c_char) -> *mut c_char {
+  pub extern "C" fn Java_com_rustexample_TimonModule_queryBucket(
+    username: *const c_char,
+    sql_query: *const c_char,
+    date_range_json: *const c_char,
+  ) -> *mut c_char {
     unsafe {
-      match (c_str_to_string(date_range_json), c_str_to_string(sql_query)) {
-        (Ok(rust_date_range_json), Ok(rust_sql_query)) => {
+      match (c_str_to_string(username), c_str_to_string(sql_query), c_str_to_string(date_range_json)) {
+        (Ok(rust_username), Ok(rust_sql_query), Ok(rust_date_range_json)) => {
           // Parse date_range_json into HashMap
           let rust_date_range: HashMap<String, String> = serde_json::from_str(&rust_date_range_json).unwrap_or_default();
           let start_date = rust_date_range.get("start").cloned().unwrap_or_else(|| "1970-01-01".to_string());
@@ -608,7 +638,10 @@ pub mod ios {
           date_range_map.insert("start_date", start_date.as_str());
           date_range_map.insert("end_date", end_date.as_str());
 
-          match Runtime::new().unwrap().block_on(query_bucket(date_range_map, &rust_sql_query)) {
+          match Runtime::new()
+            .unwrap()
+            .block_on(query_bucket(&rust_username, &rust_sql_query, date_range_map))
+          {
             Ok(result) => {
               let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "[]".to_string());
               string_to_c_str(json_string)
@@ -628,19 +661,28 @@ pub mod ios {
   }
 
   #[no_mangle]
-  pub extern "C" fn Java_com_rustexample_TimonModule_sinkMonthlyParquet(db_name: *const c_char, table_name: *const c_char) -> *mut c_char {
+  pub extern "C" fn Java_com_rustexample_TimonModule_sinkDailyParquet(
+    username: *const c_char,
+    db_name: *const c_char,
+    table_name: *const c_char,
+  ) -> *mut c_char {
     unsafe {
-      match (c_str_to_string(db_name), c_str_to_string(table_name)) {
-        (Ok(rust_db_name), Ok(rust_table_name)) => match Runtime::new().unwrap().block_on(sink_daily_parquet(&rust_db_name, &rust_table_name)) {
-          Ok(result) => {
-            let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
-            string_to_c_str(json_string)
+      match (c_str_to_string(username), c_str_to_string(db_name), c_str_to_string(table_name)) {
+        (Ok(rust_username), Ok(rust_db_name), Ok(rust_table_name)) => {
+          match Runtime::new()
+            .unwrap()
+            .block_on(sink_daily_parquet(&rust_username, &rust_db_name, &rust_table_name))
+          {
+            Ok(result) => {
+              let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
+              string_to_c_str(json_string)
+            }
+            Err(err) => {
+              let err_message = serde_json::json!({ "error": format!("Failed to sink monthly Parquet files: {:?}", err) }).to_string();
+              string_to_c_str(err_message)
+            }
           }
-          Err(err) => {
-            let err_message = serde_json::json!({ "error": format!("Failed to sink monthly Parquet files: {:?}", err) }).to_string();
-            string_to_c_str(err_message)
-          }
-        },
+        }
         _ => {
           let err_message = serde_json::json!({ "error": "Invalid arguments" }).to_string();
           string_to_c_str(err_message)
