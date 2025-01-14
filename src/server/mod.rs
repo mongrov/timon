@@ -168,7 +168,7 @@ pub async fn timon_server() -> io::Result<()> {
     .init();
 
   let port: u16 = env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8080);
-  let address = format!("127.0.0.1:{}", port);
+  let address = format!("0.0.0.0:{}", port);
 
   let storage_path = "tmp/timon";
   match init_timon(storage_path) {
