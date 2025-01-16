@@ -1,5 +1,4 @@
 use arrow::record_batch::RecordBatch;
-use chrono::{Duration, Utc};
 use datafusion::dataframe::DataFrame;
 use datafusion::datasource::MemTable;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
@@ -16,7 +15,10 @@ use std::sync::Arc;
 use std::{fmt, fs};
 use tokio::io::Result as TokioResult;
 
-use super::helpers::{extract_table_name, generate_local_paths, get_unique_fields, json_to_arrow, record_batches_to_json, row_to_json, Granularity};
+use super::helpers::{
+  extract_hourly_date, extract_monthly_date, extract_table_name, get_unique_fields, json_to_arrow, record_batches_to_json, rounded_timestamp,
+  row_to_json,
+};
 
 pub enum DataFusionOutput {
   Json(Value),
@@ -300,7 +302,7 @@ impl DatabaseManager {
       self.validate_data_against_schema(&table_schema, json_value)?;
     }
 
-    let current_date = Utc::now().format("%Y-%m-%d").to_string();
+    let current_date = rounded_timestamp(5);
     let file_path = format!("{}/{}_{}.parquet", table_path.unwrap(), table_name, current_date);
 
     // Convert JSON data to Arrow arrays
@@ -358,6 +360,122 @@ impl DatabaseManager {
     }
 
     Ok(format!("Data was successfully written to '{}'", file_path))
+  }
+
+  fn merge_files<F>(&mut self, group_extractor: F) -> Result<(), Box<dyn std::error::Error>>
+  where
+    F: Fn(&str) -> Option<String>,
+  {
+    let databases_list = self.list_databases()?;
+    for db_name in databases_list {
+      let tables_list = self.list_tables(&db_name)?;
+      for table_name in tables_list {
+        let files = self.build_files_list(&db_name, &table_name)?;
+        if files.is_empty() {
+          return Err("No files to merge".into());
+        }
+
+        // Group files based on the extractor function
+        let mut grouped_files: HashMap<String, Vec<String>> = HashMap::new();
+        for file in files {
+          if self.is_valid_parquet_file(&file) {
+            if let Some(group_key) = group_extractor(&file) {
+              grouped_files.entry(group_key).or_default().push(file);
+            }
+          } else {
+            eprintln!("Skipping invalid Parquet file: {}", file);
+          }
+        }
+
+        // Merge files for each group
+        for (group, files_in_group) in grouped_files {
+          let mut all_records = Vec::new();
+
+          for file in files_in_group.clone() {
+            let json_records = self.read_parquet_file(&file)?;
+            all_records.extend(json_records);
+          }
+
+          let (arrays, schema) = json_to_arrow(&all_records)?;
+          let record_batch = RecordBatch::try_new(Arc::new(schema), arrays)?;
+
+          let table_path = self.get_table_path(&db_name, &table_name);
+          let output_file = format!("{}/{}_{}.parquet", table_path.unwrap(), &table_name, group);
+          let file = fs::File::create(output_file)?;
+          let props = WriterProperties::builder().build();
+          let mut writer = ArrowWriter::try_new(file, record_batch.schema().clone(), Some(props))?;
+          writer.write(&record_batch)?;
+          writer.close()?;
+
+          for file in files_in_group {
+            fs::remove_file(file)?;
+          }
+        }
+      }
+    }
+    Ok(())
+  }
+
+  fn is_valid_parquet_file(&self, file_path: &str) -> bool {
+    match self.read_parquet_file(file_path) {
+      Ok(_) => true,
+      Err(err) => {
+        eprintln!("Invalid Parquet file {}: {}", file_path, err);
+        false
+      }
+    }
+  }
+
+  pub fn merge_files_by_hour(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    self.merge_files(extract_hourly_date)
+  }
+
+  pub fn merge_files_by_day(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    self.merge_files(extract_monthly_date)
+  }
+
+  fn build_files_list(&self, db_name: &str, table_name: &str) -> Result<Vec<String>, Box<dyn Error>> {
+    // Reload metadata to ensure it's up-to-date
+    let metadata = self
+      .read_metadata()
+      .map_err(|e| DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))?;
+
+    // Validate if the database exists
+    let database = metadata
+      .databases
+      .get(db_name)
+      .ok_or_else(|| format!("Database '{}' does not exist.", db_name))?;
+
+    // Validate if the table exists within the database
+    let table = database
+      .tables
+      .get(table_name)
+      .ok_or_else(|| format!("Table '{}' does not exist in database '{}'.", table_name, db_name))?;
+
+    // Get the table's path
+    let table_path = &table.path;
+
+    // Ensure the directory exists
+    if !Path::new(table_path).exists() {
+      return Err(format!("Table path '{}' does not exist.", table_path).into());
+    }
+
+    // Collect all files in the table directory
+    let mut file_list = Vec::new();
+    for entry in fs::read_dir(table_path)? {
+      let entry = entry?;
+      let path = entry.path();
+
+      // Only include files, ignore directories
+      if path.is_file() {
+        file_list.push(path.to_string_lossy().to_string());
+      }
+    }
+
+    // Sort files by their name for consistency
+    file_list.sort();
+
+    Ok(file_list)
   }
 
   fn validate_schema_structure(&self, schema: &Value) -> Result<(), Box<dyn Error>> {
@@ -499,33 +617,20 @@ impl DatabaseManager {
     None
   }
 
-  pub async fn query(
-    &self,
-    db_name: &str,
-    sql_query: &str,
-    date_range: Option<HashMap<String, String>>,
-    is_json_format: bool,
-  ) -> DataFusionResult<DataFusionOutput> {
+  pub async fn query(&self, db_name: &str, sql_query: &str, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
     let ctx = SessionContext::new();
+    let table_name = &extract_table_name(&sql_query);
+    let files_list = self
+      .build_files_list(db_name, &table_name)
+      .map_err(|e| DataFusionError::Execution(format!("Error building files list: {}", e)))?;
+    if files_list.is_empty() {
+      return Err(DataFusionError::Plan("No valid tables found to query".to_string()));
+    }
+
     let mut table_names = Vec::new();
-    let file_name = &extract_table_name(&sql_query);
-    let base_dir = format!("{}/{}/{}", &self.data_path, db_name, file_name);
-
-    let default_date_range = || {
-      let today = Utc::now().naive_utc().date();
-      let last_six_months_date = (today - Duration::days(6 * 30)).to_string();
-      let current_date = today.to_string();
-      let mut map: HashMap<String, String> = HashMap::new();
-      map.insert("start_date".to_owned(), last_six_months_date);
-      map.insert("end_date".to_owned(), current_date);
-      map
-    };
-    let date_range = date_range.unwrap_or_else(default_date_range);
-    let file_list = generate_local_paths(&base_dir, file_name, date_range, Granularity::Day).expect("Failed to generate paths");
-
-    for (i, file_path) in file_list.iter().enumerate() {
+    for (i, file_path) in files_list.iter().enumerate() {
       if Path::new(file_path).exists() {
-        let table_name = format!("{}_{}", file_name, i);
+        let table_name = format!("{}_{}", table_name, i);
         match ctx.register_parquet(&table_name, file_path, ParquetReadOptions::default()).await {
           Ok(_) => table_names.push(table_name),
           Err(e) => eprintln!("Failed to register {}: {:?}", file_path, e),
@@ -555,7 +660,7 @@ impl DatabaseManager {
     let mem_table = MemTable::try_new(schema, vec![combined_results])?;
     ctx.register_table("combined_table", Arc::new(mem_table))?;
     // Adjust the user-provided SQL query to run on the combined table
-    let adjusted_sql_query = sql_query.replace(file_name, "combined_table");
+    let adjusted_sql_query = sql_query.replace(table_name, "combined_table");
     // Execute the user-provided SQL query on the combined table
     let final_df = ctx.sql(&adjusted_sql_query).await?;
     let final_results = final_df.collect().await?;

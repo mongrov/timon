@@ -34,7 +34,6 @@ pub struct InsertRequest {
 pub struct QueryRequest {
   db_name: String,
   sql_query: String,
-  date_range: Option<HashMap<String, String>>,
 }
 
 #[derive(Deserialize)]
@@ -120,7 +119,7 @@ pub async fn insert_handler(req: web::Json<InsertRequest>) -> impl Responder {
 
 // Query data
 pub async fn query_handler(req: web::Json<QueryRequest>) -> impl Responder {
-  match query(&req.db_name, &req.sql_query, req.date_range.clone()).await {
+  match query(&req.db_name, &req.sql_query).await {
     Ok(result) => HttpResponse::Ok().json(QueryResponse { result: result.to_string() }),
     Err(e) => HttpResponse::InternalServerError().json(format!("Error: {}", e)),
   }

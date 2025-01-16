@@ -109,7 +109,7 @@ async fn test_local_storage() {
 
   // let range: std::collections::HashMap<&str, &str> = std::collections::HashMap::from([("start_date", "2024-12-12"), ("end_date", "2025-01-12")]);
   let sql_query = format!("SELECT * FROM temperature ORDER BY date ASC LIMIT 25");
-  let query_result = query(DATABASE_NAME, &sql_query, None).await;
+  let query_result = query(DATABASE_NAME, &sql_query).await;
   println!("query_result: {}", query_result.unwrap());
 
   let delete_table_result = delete_table(DATABASE_NAME, "iot").unwrap();

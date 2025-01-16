@@ -44,7 +44,7 @@ external fun deleteTable(dbName: String, tableName: String): String
 external fun insert(dbName: String, tableName: String, jsonData: String): String
 
 // Query a database with a date range and SQL query
-external fun query(dbName: String, dateRange: Map<String, String>, sqlQuery: String): String
+external fun query(dbName: String, sqlQuery: String): String
 ```
 
 ## S3-Compatible Storage Functions
@@ -60,6 +60,7 @@ external fun queryBucket(userName: String, sqlQuery: String, dateRange: Map<Stri
 
 // Sink dayly data to Parquet format in the bucket
 external fun sinkDailyParquet(userName: String, dbName: String, tableName: String): String
+```
 
 ## Function Descriptions
 
@@ -87,7 +88,7 @@ Deletes the specified table from the given database.
 - **insert(dbName: String, tableName: String, jsonData: String)**
 Inserts JSON-formatted data into the specified table.
 
-- **query(dbName: String, dateRange: Map<String, String>, sqlQuery: String)**
+- **query(dbName: String, sqlQuery: String)**
 Executes an SQL query on the specified database within the given date range.
 
 - **initBucket(bucket_endpoint: String, bucket_name: String, access_key_id: String, secret_access_key: String, bucket_region: String)**

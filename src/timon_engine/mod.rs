@@ -2,12 +2,15 @@ pub mod cloud_sync;
 pub mod db_manager;
 pub mod helpers;
 
+use chrono::{Timelike, Utc};
 use cloud_sync::CloudStorageManager;
 use db_manager::DatabaseManager;
 use serde::Serialize;
-use serde_json::{self, Value};
+use serde_json;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::OnceLock;
+use tokio::time::{self, Duration};
 
 /* ******************************** Local File Storage ********************************
 * @ init_timon/new(storage_path)
@@ -31,9 +34,64 @@ fn get_database_manager() -> &'static DatabaseManager {
   DATABASE_MANAGER.get().expect("DatabaseManager is not initialized")
 }
 
+fn schedule_files_merge_tasks(db_manager: DatabaseManager) {
+  // Schedule the merge_files_by_hour task
+  let db_manager_clone = db_manager.clone();
+  tokio::spawn(async move {
+    loop {
+      // Get the current time and calculate the duration until the next hour
+      let now = Utc::now();
+      let seconds_until_next_hour = 3600 - (now.minute() as u64 * 60 + now.second() as u64);
+      let duration_until_next_hour = Duration::from_secs(seconds_until_next_hour);
+      println!("Waiting for {:?} until the next hour.", duration_until_next_hour);
+
+      // Wait until the next hour
+      time::sleep(duration_until_next_hour).await;
+
+      // Execute the task
+      match db_manager_clone.clone().merge_files_by_hour() {
+        Ok(_) => {
+          println!("SUCCESS: merge_files_by_hour executed at {:?}", Utc::now());
+        }
+        Err(err) => {
+          eprintln!("ERROR: merge_files_by_hour failed: {}", err);
+        }
+      }
+    }
+  });
+
+  // Schedule the merge_files_by_day task
+  let db_manager_clone = db_manager.clone();
+  tokio::spawn(async move {
+    loop {
+      // Get the current time and calculate the duration until the next midnight
+      let now = Utc::now();
+      let seconds_until_next_midnight = 86400 - (now.hour() as u64 * 3600 + now.minute() as u64 * 60 + now.second() as u64);
+      let duration_until_next_midnight = Duration::from_secs(seconds_until_next_midnight);
+      println!("Waiting for {:?} until the next midnight", duration_until_next_midnight);
+
+      // Wait until the next midnight
+      time::sleep(duration_until_next_midnight).await;
+
+      // Execute the task
+      match db_manager_clone.clone().merge_files_by_day() {
+        Ok(_) => {
+          println!("SUCCESS: merge_files_by_day executed at {:?}", Utc::now());
+        }
+        Err(err) => {
+          eprintln!("ERROR: merge_files_by_day failed: {}", err);
+        }
+      }
+    }
+  });
+}
+
 #[allow(dead_code)]
 pub fn init_timon(storage_path: &str) -> Result<Value, String> {
   let db_manager = DatabaseManager::new(storage_path);
+
+  schedule_files_merge_tasks(db_manager.clone());
+
   match DATABASE_MANAGER.set(db_manager) {
     Ok(_) => {
       let result = TimonResult {
@@ -218,9 +276,9 @@ pub fn insert(db_name: &str, table_name: &str, json_data: &str) -> Result<Value,
 }
 
 #[allow(dead_code)]
-pub async fn query(db_name: &str, sql_query: &str, date_range: Option<HashMap<String, String>>) -> Result<Value, String> {
+pub async fn query(db_name: &str, sql_query: &str) -> Result<Value, String> {
   let database_manager = get_database_manager();
-  match database_manager.query(db_name, sql_query, date_range, true).await {
+  match database_manager.query(db_name, sql_query, true).await {
     Ok(db_manager::DataFusionOutput::Json(data)) => {
       let json_value = serde_json::to_value(&data).map_err(|e| e.to_string())?;
       let result = TimonResult {

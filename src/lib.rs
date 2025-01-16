@@ -210,18 +210,12 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_query(
-    mut env: JNIEnv,
-    _class: JClass,
-    db_name: JString,
-    sql_query: JString,
-    _date_range: JObject, // TODO: Utilize date_range to optionally enhance the query by limiting the parquet files included based on the specified date range.
-  ) -> jstring {
+  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_query(mut env: JNIEnv, _class: JClass, db_name: JString, sql_query: JString) -> jstring {
     // Convert Java strings to Rust strings
     let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
     let rust_sql_query: String = env.get_string(&sql_query).expect("Couldn't get java string!").into();
 
-    match Runtime::new().unwrap().block_on(query(&rust_db_name, &rust_sql_query, None)) {
+    match Runtime::new().unwrap().block_on(query(&rust_db_name, &rust_sql_query)) {
       Ok(result) => {
         let json_string = result.to_string();
         let output = env.new_string(json_string).expect("Couldn't create success string!");
@@ -550,15 +544,11 @@ pub mod ios {
   }
 
   #[no_mangle]
-  pub extern "C" fn Java_com_rustexample_TimonModule_query(
-    db_name: *const c_char,
-    sql_query: *const c_char,
-    date_range_json: *const c_char, // TODO: Utilize date_range to optionally enhance the query by limiting the parquet files included based on the specified date range.
-  ) -> *mut c_char {
+  pub extern "C" fn Java_com_rustexample_TimonModule_query(db_name: *const c_char, sql_query: *const c_char) -> *mut c_char {
     unsafe {
-      match (c_str_to_string(db_name), c_str_to_string(sql_query), c_str_to_string(date_range_json)) {
+      match (c_str_to_string(db_name), c_str_to_string(sql_query)) {
         (Ok(rust_db_name), Ok(rust_date_range_json), Ok(rust_sql_query)) => {
-          match Runtime::new().unwrap().block_on(query(&rust_db_name, &rust_sql_query, None)) {
+          match Runtime::new().unwrap().block_on(query(&rust_db_name, &rust_sql_query)) {
             Ok(result) => {
               let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "[]".to_string());
               string_to_c_str(json_string)

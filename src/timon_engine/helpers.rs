@@ -4,7 +4,7 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field as ArrowField, Schema, TimeUnit};
 use base64::{engine::general_purpose, Engine as _};
-use chrono::{Datelike, NaiveDate, ParseError};
+use chrono::{Datelike, NaiveDate, ParseError, Timelike, Utc};
 use datafusion::arrow::record_batch::RecordBatch;
 use parquet::data_type::{AsBytes, Decimal};
 use parquet::record::{Field as ParquetField, Row};
@@ -318,33 +318,6 @@ pub enum Granularity {
   Day,
 }
 
-pub fn generate_local_paths(
-  base_dir: &str,
-  file_name: &str,
-  date_range: HashMap<String, String>,
-  granularity: Granularity,
-) -> Result<Vec<String>, ParseError> {
-  let start_date = NaiveDate::parse_from_str(date_range.get("start_date").unwrap(), "%Y-%m-%d")?;
-  let end_date = NaiveDate::parse_from_str(date_range.get("end_date").unwrap(), "%Y-%m-%d")?;
-  let mut current_date = start_date;
-
-  let mut file_list = Vec::new();
-  while current_date <= end_date {
-    let path = match granularity {
-      Granularity::Month => format!("{}/{}_{}.parquet", base_dir, file_name, current_date.format("%Y-%m")),
-      Granularity::Day => format!("{}/{}_{}.parquet", base_dir, file_name, current_date.format("%Y-%m-%d")),
-    };
-    file_list.push(path);
-    current_date = match granularity {
-      Granularity::Month => current_date
-        .with_month(current_date.month() % 12 + 1)
-        .unwrap_or_else(|| NaiveDate::from_ymd_opt(current_date.year() + 1, 1, 1).unwrap()),
-      Granularity::Day => current_date.succ_opt().unwrap(),
-    };
-  }
-  Ok(file_list)
-}
-
 pub fn generate_s3_paths(
   bucket_name: &str,
   username: &str,
@@ -399,6 +372,46 @@ pub fn extract_table_name(sql_query: &str) -> String {
       eprintln!("No table name found in the SQL query.");
       String::new()
     })
+}
+
+pub fn rounded_timestamp(interval: u32) -> String {
+  let now = Utc::now();
+  let minute = now.minute();
+  let rounded_minute = (minute / interval) * interval;
+  let rounded_time = now
+    .with_minute(rounded_minute)
+    .unwrap()
+    .with_second(0)
+    .unwrap()
+    .with_nanosecond(0)
+    .unwrap();
+
+  rounded_time.format("%Y-%m-%d_%H-%M").to_string()
+}
+
+pub fn extract_hourly_date(filename: &str) -> Option<String> {
+  // Example filename format: test_table_2025-01-15_14-30.parquet
+  let parts: Vec<&str> = filename.split('_').collect();
+  if parts.len() >= 3 {
+    let date = parts[parts.len() - 2]; // "2025-01-15"
+    let time_str = parts[parts.len() - 1]; // "14-30.parquet"
+    let time_parts: Vec<&str> = time_str.strip_suffix(".parquet")?.split('-').collect();
+    if time_parts.len() == 2 {
+      // Combine date and hour
+      return Some(format!("{}_{}", date, time_parts[0])); // "2025-01-15_14"
+    }
+  }
+  None
+}
+
+pub fn extract_monthly_date(filename: &str) -> Option<String> {
+  // Example filename format: test_table_2025-01-15_14.parquet
+  let parts: Vec<&str> = filename.split('_').collect();
+  if parts.len() >= 3 {
+    let date = parts[parts.len() - 2]; // "2025-01-15"
+    return Some(date.to_string()); // Return the date part
+  }
+  None
 }
 
 pub fn get_unique_fields(schema: Value) -> Result<Vec<String>, Box<dyn Error>> {
