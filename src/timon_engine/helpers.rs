@@ -322,7 +322,7 @@ pub fn generate_s3_paths(
   bucket_name: &str,
   username: &str,
   file_name: &str,
-  date_range: HashMap<String, String>,
+  date_range: HashMap<&str, &str>,
   granularity: Granularity,
 ) -> Result<Vec<String>, ParseError> {
   let start_date = NaiveDate::parse_from_str(date_range.get("start_date").unwrap(), "%Y-%m-%d")?;

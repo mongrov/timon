@@ -64,7 +64,7 @@ impl CloudStorageManager {
     &self,
     username: &str,
     sql_query: &str,
-    date_range: HashMap<String, String>,
+    date_range: HashMap<&str, &str>,
     is_json_format: bool,
   ) -> DataFusionResult<DataFusionOutput> {
     let session_context = SessionContext::new();
