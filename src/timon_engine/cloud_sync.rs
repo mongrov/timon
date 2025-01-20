@@ -163,54 +163,44 @@ impl CloudStorageManager {
   }
 
   #[allow(dead_code)]
-  pub async fn sink_daily_parquet(&self, username: &str, db_name: &str, table_name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let dir_path = self.db_manager.get_table_path(db_name, table_name);
-    if dir_path.is_none() {
-      return Err(format!("Database '{}' or Table '{}' does not exist.", db_name, table_name).into());
-    }
-    let dir_path = dir_path.unwrap();
-
-    // List all Parquet files in the directory
-    let files = fs::read_dir(&dir_path)?
-      .filter_map(|entry| entry.ok())
-      .filter(|entry| entry.path().is_file() && entry.file_name().to_string_lossy().starts_with(format!("{}_", table_name).as_str()))
-      .map(|entry| entry.path().to_string_lossy().to_string())
-      .collect::<Vec<_>>();
-
-    // Return an error if no files are found
+  pub async fn cloud_sync_parquet(&self, username: &str, db_name: &str, table_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let files = self.db_manager.build_files_list(db_name, table_name)?;
     if files.is_empty() {
       return Err(format!("No data files found for Table '{}' in Database '{}'.", table_name, db_name).into());
     }
 
-    // Regex to match YYYY-MM-DD in filenames
-    let regx = Regex::new(r"(\d{4})-(\d{2})-(\d{2})\.parquet$")?;
+    // Regex to match YYYY-MM-dd filenames
+    let regx = Regex::new(r"(\d{4})-(\d{2})-(\d{2})").unwrap();
 
     for file in files {
       if let Some(filename) = Path::new(&file).file_name().and_then(|n| n.to_str()) {
-        if let Some(caps) = regx.captures(filename) {
-          let year = caps.get(1).map_or("", |m| m.as_str());
-          let month = caps.get(2).map_or("", |m| m.as_str());
-          let file_date_extension = caps.get(0).map_or("", |m| m.as_str());
+        let caps = regx
+          .captures(filename)
+          .ok_or_else(|| format!("Filename '{}' does not match the expected pattern", filename))?;
+        let year = caps.get(1).map_or("", |m| m.as_str());
+        let month = caps.get(2).map_or("", |m| m.as_str());
+        let day = caps.get(3).map_or("", |m| m.as_str());
+        let file_date_extension = caps.get(0).map_or("", |m| m.as_str());
 
-          let source_path = format!("{}/{}_{}", dir_path, table_name, file_date_extension);
-          let target_path = format!("{}/{}/{}/{}/{}_{}", username, table_name, year, month, table_name, file_date_extension);
-          self
-            .upload_to_bucket(&source_path, &target_path)
-            .await
-            .map_err(|e| format!("Failed to upload file {} to S3 path {}: {:?}", source_path, target_path, e))?;
+        let source_path = file.clone();
+        let target_path = format!("{}/{}/{}/{}/{}/{}/{}", username, db_name, table_name, year, month, day, filename);
 
-          // Remove the local file after successful upload
-          let current_date = chrono::Utc::now().naive_utc().date();
-          let date_part = file_date_extension.split('.').next().unwrap_or("");
-          match NaiveDate::parse_from_str(date_part, "%Y-%m-%d") {
-            Ok(file_date) => {
-              if file_date < current_date {
-                fs::remove_file(&source_path).map_err(|e| format!("Failed to delete local file {}: {:?}", source_path, e))?;
-              }
+        self
+          .upload_to_bucket(&source_path, &target_path)
+          .await
+          .map_err(|e| format!("Failed to upload file {} to S3 path {}: {:?}", source_path, target_path, e))?;
+
+        // Remove the local file after successful upload
+        let current_date = chrono::Utc::now().naive_utc().date();
+        let date_part = file_date_extension.split('.').next().unwrap_or("");
+        match NaiveDate::parse_from_str(date_part, "%Y-%m-%d") {
+          Ok(file_date) => {
+            if file_date < current_date {
+              fs::remove_file(&source_path).map_err(|e| format!("Failed to delete local file {}: {:?}", source_path, e))?;
             }
-            Err(e) => {
-              eprintln!("Warning: Failed to parse file date '{}': {:?}", file_date_extension, e);
-            }
+          }
+          Err(e) => {
+            eprintln!("Warning: Failed to parse file date '{}': {:?}", file_date_extension, e);
           }
         }
       }

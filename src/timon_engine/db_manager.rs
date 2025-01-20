@@ -67,10 +67,11 @@ pub struct DatabaseManager {
   metadata: Metadata,
   data_path: String,
   metadata_path: String,
+  bucket_interval: u32,
 }
 
 impl DatabaseManager {
-  pub fn new(storage_path: &str) -> Self {
+  pub fn new(storage_path: &str, bucket_interval: u32) -> Self {
     let data_path = format!("{}/data", storage_path);
     let metadata_path = format!("{}/metadata.json", storage_path);
 
@@ -107,6 +108,7 @@ impl DatabaseManager {
       metadata,
       data_path,
       metadata_path,
+      bucket_interval,
     }
   }
 
@@ -302,7 +304,7 @@ impl DatabaseManager {
       self.validate_data_against_schema(&table_schema, json_value)?;
     }
 
-    let current_date = rounded_timestamp(5);
+    let current_date = rounded_timestamp(self.bucket_interval);
     let file_path = format!("{}/{}_{}.parquet", table_path.unwrap(), table_name, current_date);
 
     // Convert JSON data to Arrow arrays
@@ -362,6 +364,7 @@ impl DatabaseManager {
     Ok(format!("Data was successfully written to '{}'", file_path))
   }
 
+  #[allow(dead_code)] // TODO: Remove this code or make the logic merge files on the cloud
   fn merge_files<F>(&mut self, group_extractor: F) -> Result<(), Box<dyn std::error::Error>>
   where
     F: Fn(&str) -> Option<String>,
@@ -416,6 +419,16 @@ impl DatabaseManager {
     Ok(())
   }
 
+  #[allow(dead_code)] // TODO: Remove this code or make the logic merge files on the cloud
+  pub fn merge_files_by_hour(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    self.merge_files(extract_hourly_date)
+  }
+
+  #[allow(dead_code)] // TODO: Remove this code or make the logic merge files on the cloud
+  pub fn merge_files_by_day(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    self.merge_files(extract_monthly_date)
+  }
+
   fn is_valid_parquet_file(&self, file_path: &str) -> bool {
     match self.read_parquet_file(file_path) {
       Ok(_) => true,
@@ -426,15 +439,7 @@ impl DatabaseManager {
     }
   }
 
-  pub fn merge_files_by_hour(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-    self.merge_files(extract_hourly_date)
-  }
-
-  pub fn merge_files_by_day(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-    self.merge_files(extract_monthly_date)
-  }
-
-  fn build_files_list(&self, db_name: &str, table_name: &str) -> Result<Vec<String>, Box<dyn Error>> {
+  pub fn build_files_list(&self, db_name: &str, table_name: &str) -> Result<Vec<String>, Box<dyn Error>> {
     // Reload metadata to ensure it's up-to-date
     let metadata = self
       .read_metadata()

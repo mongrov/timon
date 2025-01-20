@@ -1,7 +1,7 @@
 mod timon_engine;
 pub use timon_engine::{
-  create_database, create_table, delete_database, delete_table, init_bucket, init_timon, insert, list_databases, list_tables, query, query_bucket,
-  sink_daily_parquet,
+  cloud_sync_parquet, create_database, create_table, delete_database, delete_table, init_bucket, init_timon, insert, list_databases, list_tables,
+  query, query_bucket,
 };
 #[cfg(feature = "dev_cli")]
 mod cli;
@@ -58,7 +58,7 @@ fn main() {
 #[allow(dead_code)]
 async fn test_local_storage() {
   const STORAGE_PATH: &str = "/tmp/timon";
-  let timon_result = init_timon(STORAGE_PATH).unwrap();
+  let timon_result = init_timon(STORAGE_PATH, 30).unwrap();
   println!("init_timon -> {}", timon_result);
 
   const DATABASE_NAME: &str = "test";
@@ -120,7 +120,7 @@ async fn test_local_storage() {
 
 #[allow(dead_code)]
 async fn test_s3_sync() {
-  init_timon("/tmp/timon").unwrap();
+  init_timon("/tmp/timon", 30).unwrap();
 
   let bucket_endpoint = "http://localhost:9000";
   let bucket_name = "timon";
@@ -135,8 +135,8 @@ async fn test_s3_sync() {
   let df_result = query_bucket("user6172", &sql_query, range).await.unwrap();
   println!("query_bucket {:?}", df_result);
 
-  let sink_daily_parquet_result = sink_daily_parquet("user6172", "test", "temperature").await;
-  println!("{}", sink_daily_parquet_result.unwrap());
+  let cloud_sync_parquet_result = cloud_sync_parquet("user6172", "test", "temperature").await;
+  println!("{}", cloud_sync_parquet_result.unwrap());
 }
 
 // This block is executed for local development testing(run async tests for local_storage and S3 cloud_sync).

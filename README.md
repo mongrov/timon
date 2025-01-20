@@ -20,7 +20,7 @@ These functions manage databases and tables stored locally on the file system. D
 
 ```kotlin
 // Initialize Timon with a local storage path
-external fun initTimon(storagePath: String): String
+external fun initTimon(storagePath: String, bucketInterval: Number): String
 
 // Create a new database
 external fun createDatabase(dbName: String): String
@@ -59,12 +59,12 @@ external fun initBucket(bucket_endpoint: String, bucket_name: String, access_key
 external fun queryBucket(userName: String, sqlQuery: String, dateRange: Map<String, String>): String
 
 // Sink dayly data to Parquet format in the bucket
-external fun sinkDailyParquet(userName: String, dbName: String, tableName: String): String
+external fun cloudSyncParquet(userName: String, dbName: String, tableName: String): String
 ```
 
 ## Function Descriptions
 
-- **initTimon(storagePath: String)**
+- **initTimon(storagePath: String, bucketInterval: Number)**
 Initializes the local file storage at the specified path.
 
 - **createDatabase(dbName: String)**
@@ -97,7 +97,7 @@ Initializes an S3-compatible bucket for data storage.
 - **queryBucket(userName: String, sqlQuery: String, dateRange: Map<String, String>)**
 Queries data in the S3 bucket based on the given date range and SQL query.
 
-- **sinkDailyParquet(userName: String, dbName: String, tableName: String)**
+- **cloudSyncParquet(userName: String, dbName: String, tableName: String)**
 Upload data from the specified database and table as Parquet files, organized by day into S3-compatible bucket.
 
 

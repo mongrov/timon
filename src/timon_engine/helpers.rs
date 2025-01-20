@@ -376,17 +376,42 @@ pub fn extract_table_name(sql_query: &str) -> String {
 
 pub fn rounded_timestamp(interval: u32) -> String {
   let now = Utc::now();
-  let minute = now.minute();
-  let rounded_minute = (minute / interval) * interval;
-  let rounded_time = now
-    .with_minute(rounded_minute)
-    .unwrap()
-    .with_second(0)
-    .unwrap()
-    .with_nanosecond(0)
-    .unwrap();
 
-  rounded_time.format("%Y-%m-%d_%H-%M").to_string()
+  // Determine the rounded time based on the interval
+  let rounded_time = if interval > 60 {
+    // For intervals greater than 60, calculate hour buckets
+    let total_minutes = now.hour() * 60 + now.minute();
+    let rounded_total_minutes = (total_minutes / interval) * interval;
+    let rounded_hour = rounded_total_minutes / 60;
+    let rounded_minute = rounded_total_minutes % 60;
+
+    now
+      .with_hour(rounded_hour as u32)
+      .unwrap()
+      .with_minute(rounded_minute as u32)
+      .unwrap()
+      .with_second(0)
+      .unwrap()
+      .with_nanosecond(0)
+      .unwrap()
+  } else {
+    // For intervals within 60 minutes, calculate minute buckets
+    let rounded_minute = (now.minute() / interval) * interval;
+    now
+      .with_minute(rounded_minute)
+      .unwrap()
+      .with_second(0)
+      .unwrap()
+      .with_nanosecond(0)
+      .unwrap()
+  };
+
+  // Output format: exclude minutes for hour-based intervals
+  if interval > 60 && interval % 60 == 0 {
+    rounded_time.format("%Y-%m-%d_%H").to_string()
+  } else {
+    rounded_time.format("%Y-%m-%d_%H-%M").to_string()
+  }
 }
 
 pub fn extract_hourly_date(filename: &str) -> Option<String> {

@@ -3,20 +3,30 @@ pub mod timon_engine;
 // cbindgen:ignore
 #[cfg(target_os = "android")]
 pub mod android {
-  use crate::timon_engine::{create_database, create_table, delete_database, delete_table, init_timon, insert, list_databases, list_tables, query};
-  use crate::timon_engine::{init_bucket, query_bucket, sink_daily_parquet};
+  use crate::timon_engine::{
+    cloud_sync_parquet, create_database, create_table, delete_database, delete_table, init_bucket, init_timon, insert, list_databases, list_tables,
+    query, query_bucket,
+  };
   use jni::objects::{JClass, JObject, JString, JValue};
-  use jni::sys::jstring;
+  use jni::sys::{jint, jstring};
   use jni::JNIEnv;
   use std::collections::HashMap;
   use tokio::runtime::Runtime;
 
   // ******************************** File Storage ********************************
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_initTimon(mut env: JNIEnv, _class: JClass, storage_path: JString) -> jstring {
+  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_initTimon(
+    mut env: JNIEnv,
+    _class: JClass,
+    storage_path: JString,
+    bucket_interval: jint,
+  ) -> jstring {
+    // Convert `storage_path` from Java `String` to Rust `String`
     let rust_storage_path: String = env.get_string(&storage_path).expect("Couldn't get java string!").into();
+    // Convert `bucket_interval` from Java `int` to Rust `u32`
+    let rust_bucket_interval: u32 = bucket_interval as u32;
 
-    match init_timon(&rust_storage_path) {
+    match init_timon(&rust_storage_path, rust_bucket_interval) {
       Ok(result) => {
         let json_string = result.to_string();
         let output = env.new_string(json_string).expect("Couldn't create success string!");
@@ -304,7 +314,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_sinkDailyParquet(
+  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_cloudSyncParquet(
     mut env: JNIEnv,
     _class: JClass,
     username: JString,
@@ -317,7 +327,7 @@ pub mod android {
 
     match Runtime::new()
       .unwrap()
-      .block_on(sink_daily_parquet(&rust_username, &rust_db_name, &rust_table_name))
+      .block_on(cloud_sync_parquet(&rust_username, &rust_db_name, &rust_table_name))
     {
       Ok(result) => {
         let json_string = result.to_string();
@@ -325,7 +335,7 @@ pub mod android {
         output.into_raw()
       }
       Err(err) => {
-        let err_message = format!("Failed sink monthly parquet files: {:?}", err);
+        let err_message = format!("Failed sink parquet files: {:?}", err);
         let output = env.new_string(err_message).expect("Couldn't create error string!");
         output.into_raw()
       }
@@ -335,8 +345,10 @@ pub mod android {
 
 #[cfg(target_os = "ios")]
 pub mod ios {
-  use crate::timon_engine::{create_database, create_table, delete_database, delete_table, init_timon, insert, list_databases, list_tables, query};
-  use crate::timon_engine::{init_bucket, query_bucket, sink_daily_parquet};
+  use crate::timon_engine::{
+    cloud_sync_parquet, create_database, create_table, delete_database, delete_table, init_bucket, init_timon, insert, list_databases, list_tables,
+    query, query_bucket,
+  };
   use libc::c_char;
   use std::collections::HashMap;
   use std::ffi::{CStr, CString};
@@ -360,24 +372,16 @@ pub mod ios {
   }
 
   #[no_mangle]
-  pub extern "C" fn rust_string_free(s: *mut c_char) {
-    if !s.is_null() {
-      unsafe {
-        CString::from_raw(s);
-      }
-    }
-  }
-  #[no_mangle]
-  pub extern "C" fn Java_com_rustexample_TimonModule_initTimon(storage_path: *const c_char) -> *mut c_char {
+  pub extern "C" fn Java_com_rustexample_TimonModule_initTimon(storage_path: *const c_char, bucket_interval: u32) -> *mut c_char {
     unsafe {
       match c_str_to_string(storage_path) {
-        Ok(rust_storage_path) => match init_timon(&rust_storage_path) {
+        Ok(rust_storage_path) => match init_timon(&rust_storage_path, bucket_interval) {
           Ok(result) => {
             let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
             string_to_c_str(json_string)
           }
           Err(err) => {
-            let err_message = serde_json::json!({ "error": format!("Failed to initialize Timon: {:?}", err) }).to_string();
+            let err_message = serde_json::json!({ "error": format!("Failed to initialize Timon: {:?}", err)}).to_string();
             string_to_c_str(err_message)
           }
         },
@@ -651,7 +655,7 @@ pub mod ios {
   }
 
   #[no_mangle]
-  pub extern "C" fn Java_com_rustexample_TimonModule_sinkDailyParquet(
+  pub extern "C" fn Java_com_rustexample_TimonModule_cloudSyncParquet(
     username: *const c_char,
     db_name: *const c_char,
     table_name: *const c_char,
@@ -661,14 +665,14 @@ pub mod ios {
         (Ok(rust_username), Ok(rust_db_name), Ok(rust_table_name)) => {
           match Runtime::new()
             .unwrap()
-            .block_on(sink_daily_parquet(&rust_username, &rust_db_name, &rust_table_name))
+            .block_on(cloud_sync_parquet(&rust_username, &rust_db_name, &rust_table_name))
           {
             Ok(result) => {
               let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
               string_to_c_str(json_string)
             }
             Err(err) => {
-              let err_message = serde_json::json!({ "error": format!("Failed to sink monthly Parquet files: {:?}", err) }).to_string();
+              let err_message = serde_json::json!({ "error": format!("Failed to sink Parquet files: {:?}", err) }).to_string();
               string_to_c_str(err_message)
             }
           }
