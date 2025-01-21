@@ -372,6 +372,15 @@ pub mod ios {
   }
 
   #[no_mangle]
+  pub extern "C" fn rust_string_free(s: *mut c_char) {
+    if !s.is_null() {
+      unsafe {
+        CString::from_raw(s);
+      }
+    }
+  }
+
+  #[no_mangle]
   pub extern "C" fn Java_com_rustexample_TimonModule_initTimon(storage_path: *const c_char, bucket_interval: u32) -> *mut c_char {
     unsafe {
       match c_str_to_string(storage_path) {
@@ -551,18 +560,16 @@ pub mod ios {
   pub extern "C" fn Java_com_rustexample_TimonModule_query(db_name: *const c_char, sql_query: *const c_char) -> *mut c_char {
     unsafe {
       match (c_str_to_string(db_name), c_str_to_string(sql_query)) {
-        (Ok(rust_db_name), Ok(rust_date_range_json), Ok(rust_sql_query)) => {
-          match Runtime::new().unwrap().block_on(query(&rust_db_name, &rust_sql_query)) {
-            Ok(result) => {
-              let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "[]".to_string());
-              string_to_c_str(json_string)
-            }
-            Err(err) => {
-              let err_message = serde_json::json!({ "error": format!("Error querying Parquet files: {:?}", err) }).to_string();
-              string_to_c_str(err_message)
-            }
+        (Ok(rust_db_name), Ok(rust_sql_query)) => match Runtime::new().unwrap().block_on(query(&rust_db_name, &rust_sql_query)) {
+          Ok(result) => {
+            let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "[]".to_string());
+            string_to_c_str(json_string)
           }
-        }
+          Err(err) => {
+            let err_message = serde_json::json!({ "error": format!("Error querying Parquet files: {:?}", err) }).to_string();
+            string_to_c_str(err_message)
+          }
+        },
         _ => {
           let err_message = serde_json::json!({ "error": "Invalid arguments" }).to_string();
           string_to_c_str(err_message)

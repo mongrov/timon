@@ -1,6 +1,6 @@
 [package]
 name = "tsdb_timon"
-version = "1.0.8"
+version = "1.0.85"
 edition = "2021"
 authors = ["Ahmed Boutaraa <ahmed@mongrov.com>"]
 description = "Efficient local storage and Amazon S3-compatible data synchronization for time-series data, leveraging Parquet for storage and DataFusion for querying, all wrapped in a simple and intuitive API."
