@@ -38,8 +38,9 @@ pub struct QueryRequest {
 
 #[derive(Deserialize)]
 pub struct QueryBucketRequest {
-  date_range: HashMap<String, String>,
+  db_name: String,
   sql_query: String,
+  date_range: HashMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -137,7 +138,7 @@ pub async fn query_bucket_handler(req: HttpRequest, body: web::Json<QueryBucketR
       .iter()
       .map(|(k, v)| (k.as_str(), v.as_str()))
       .collect::<HashMap<&str, &str>>();
-    match query_bucket(username, &body.sql_query, date_range).await {
+    match query_bucket(username, &body.db_name, &body.sql_query, date_range).await {
       Ok(result) => HttpResponse::Ok().json(QueryResponse { result: result.to_string() }),
       Err(e) => HttpResponse::InternalServerError().json(format!("Error: {}", e)),
     }

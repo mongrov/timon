@@ -4,7 +4,8 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field as ArrowField, Schema, TimeUnit};
 use base64::{engine::general_purpose, Engine as _};
-use chrono::{Datelike, NaiveDate, ParseError, Timelike, Utc};
+use chrono::{Duration, NaiveDate};
+use chrono::{Timelike, Utc};
 use datafusion::arrow::record_batch::RecordBatch;
 use parquet::data_type::{AsBytes, Decimal};
 use parquet::record::{Field as ParquetField, Row};
@@ -312,52 +313,41 @@ pub fn json_to_arrow(json_values: &[Value]) -> Result<(Vec<ArrayRef>, Schema), B
   Ok((arrays, schema))
 }
 
-#[allow(dead_code)]
-pub enum Granularity {
-  Month,
-  Day,
-}
-
 pub fn generate_s3_paths(
   bucket_name: &str,
   username: &str,
-  file_name: &str,
+  db_name: &str,
+  table_name: &str,
+  bucket_interval: u32,
   date_range: HashMap<&str, &str>,
-  granularity: Granularity,
-) -> Result<Vec<String>, ParseError> {
-  let start_date = NaiveDate::parse_from_str(date_range.get("start_date").unwrap(), "%Y-%m-%d")?;
-  let end_date = NaiveDate::parse_from_str(date_range.get("end_date").unwrap(), "%Y-%m-%d")?;
-  let mut current_date = start_date;
-
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+  // Parse start and end dates
+  let start_date = NaiveDate::parse_from_str(date_range.get("start_date").unwrap(), "%Y-%m-%d")?
+    .and_hms_opt(0, 0, 0)
+    .unwrap();
+  let end_date = NaiveDate::parse_from_str(date_range.get("end_date").unwrap(), "%Y-%m-%d")?
+    .and_hms_opt(23, 59, 59)
+    .unwrap();
+  // Calculate the bucket interval duration in minutes
+  let interval_duration = Duration::minutes(bucket_interval as i64);
+  let mut current_datetime = start_date;
   let mut file_list = Vec::new();
-  while current_date <= end_date {
-    let path = match granularity {
-      Granularity::Month => format!(
-        "s3://{}/{}/{}/{}/{}_{}.parquet",
-        bucket_name,
-        username,
-        file_name,
-        current_date.format("%Y"),
-        file_name,
-        current_date.format("%Y-%m")
-      ),
-      Granularity::Day => format!(
-        "s3://{}/{}/{}/{}/{}_{}.parquet",
-        bucket_name,
-        username,
-        file_name,
-        current_date.format("%Y/%m"),
-        file_name,
-        current_date.format("%Y-%m-%d")
-      ),
-    };
+
+  while current_datetime <= end_date {
+    // Generate the path for the current interval
+    let path = format!(
+      "s3://{}/{}/{}/{}/{}/{}_{}.parquet",
+      bucket_name,
+      username,
+      db_name,
+      table_name,
+      current_datetime.format("%Y/%m/%d"),
+      table_name,
+      current_datetime.format("%Y-%m-%d_%H-%M")
+    );
     file_list.push(path);
-    current_date = match granularity {
-      Granularity::Month => current_date
-        .with_month(current_date.month() % 12 + 1)
-        .unwrap_or_else(|| NaiveDate::from_ymd_opt(current_date.year() + 1, 1, 1).unwrap()),
-      Granularity::Day => current_date.succ_opt().unwrap(),
-    };
+    // Increment to the next interval
+    current_datetime += interval_duration;
   }
   Ok(file_list)
 }

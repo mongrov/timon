@@ -67,7 +67,7 @@ pub struct DatabaseManager {
   metadata: Metadata,
   data_path: String,
   metadata_path: String,
-  bucket_interval: u32,
+  pub bucket_interval: u32,
 }
 
 impl DatabaseManager {

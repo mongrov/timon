@@ -292,9 +292,9 @@ pub fn init_bucket(
   }
 }
 
-pub async fn query_bucket(username: &str, sql_query: &str, date_range: HashMap<&str, &str>) -> Result<Value, String> {
+pub async fn query_bucket(username: &str, db_name: &str, sql_query: &str, date_range: HashMap<&str, &str>) -> Result<Value, String> {
   let cloud_storage_manager = get_cloud_storage_manager();
-  match cloud_storage_manager.query_bucket(&username, &sql_query, date_range, true).await {
+  match cloud_storage_manager.query_bucket(&username, db_name, &sql_query, date_range, true).await {
     Ok(db_manager::DataFusionOutput::Json(data)) => {
       let json_value = serde_json::to_value(&data).map_err(|e| e.to_string())?;
       let result = TimonResult {

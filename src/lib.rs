@@ -282,11 +282,13 @@ pub mod android {
     mut env: JNIEnv,
     _class: JClass,
     username: JString,
+    db_name: JString,
     sql_query: JString,
     date_range: JObject,
   ) -> jstring {
     // Convert Java strings to Rust strings
     let rust_username: String = env.get_string(&username).expect("Couldn't get java string!").into();
+    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
     let rust_sql_query: String = env.get_string(&sql_query).expect("Couldn't get java string!").into();
 
     let mut rust_date_range: HashMap<&str, &str> = HashMap::new();
@@ -297,7 +299,7 @@ pub mod android {
 
     match Runtime::new()
       .unwrap()
-      .block_on(query_bucket(&rust_username, &rust_sql_query, rust_date_range))
+      .block_on(query_bucket(&rust_username, &rust_db_name, &rust_sql_query, rust_date_range))
     {
       Ok(result) => {
         let json_string = result.to_string();
@@ -624,12 +626,18 @@ pub mod ios {
   #[no_mangle]
   pub extern "C" fn Java_com_rustexample_TimonModule_queryBucket(
     username: *const c_char,
+    db_name: *const c_char,
     sql_query: *const c_char,
     date_range_json: *const c_char,
   ) -> *mut c_char {
     unsafe {
-      match (c_str_to_string(username), c_str_to_string(sql_query), c_str_to_string(date_range_json)) {
-        (Ok(rust_username), Ok(rust_sql_query), Ok(rust_date_range_json)) => {
+      match (
+        c_str_to_string(username),
+        c_str_to_string(db_name),
+        c_str_to_string(sql_query),
+        c_str_to_string(date_range_json),
+      ) {
+        (Ok(rust_username), Ok(rust_db_name), Ok(rust_sql_query), Ok(rust_date_range_json)) => {
           // Parse date_range_json into HashMap
           let rust_date_range: HashMap<String, String> = serde_json::from_str(&rust_date_range_json).unwrap_or_default();
           let start_date = rust_date_range.get("start").cloned().unwrap_or_else(|| "1970-01-01".to_string());
@@ -641,7 +649,7 @@ pub mod ios {
 
           match Runtime::new()
             .unwrap()
-            .block_on(query_bucket(&rust_username, &rust_sql_query, date_range_map))
+            .block_on(query_bucket(&rust_username, &rust_db_name, &rust_sql_query, date_range_map))
           {
             Ok(result) => {
               let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "[]".to_string());

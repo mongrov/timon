@@ -4,7 +4,7 @@ use datafusion::datasource::listing::{ListingTable, ListingTableConfig, ListingT
 use datafusion::datasource::MemTable;
 use datafusion::error::Result as DataFusionResult;
 use datafusion::prelude::*;
-use helpers::{generate_s3_paths, record_batches_to_json, Granularity};
+use helpers::{generate_s3_paths, record_batches_to_json};
 use object_store::{
   aws::{AmazonS3, AmazonS3Builder},
   path::Path as StorePath,
@@ -63,15 +63,17 @@ impl CloudStorageManager {
   pub async fn query_bucket(
     &self,
     username: &str,
+    db_name: &str,
     sql_query: &str,
     date_range: HashMap<&str, &str>,
     is_json_format: bool,
   ) -> DataFusionResult<DataFusionOutput> {
+    let bucket_interval = self.db_manager.bucket_interval;
     let session_context = SessionContext::new();
-    let file_name = &extract_table_name(sql_query);
+    let table_name = &extract_table_name(sql_query);
 
     // Parse the date_range and generate Parquet file paths
-    let file_list = generate_s3_paths(&self.bucket_name, username, file_name, date_range, Granularity::Day).unwrap();
+    let file_list = generate_s3_paths(&self.bucket_name, username, db_name, table_name, bucket_interval, date_range).unwrap();
     // Register the object store with the session context
     let store_url = Url::parse(&format!("s3://{}", &self.bucket_name)).unwrap();
     session_context.runtime_env().register_object_store(&store_url, self.s3_store.clone());
@@ -79,7 +81,7 @@ impl CloudStorageManager {
     // Create a list of table names and register Parquet files
     let mut table_names = Vec::new();
     for (i, file_url) in file_list.iter().enumerate() {
-      let table_name = format!("{}_{}", file_name, i);
+      let table_name = format!("{}_{}", table_name, i);
       let file_url_parsed = match ListingTableUrl::parse(file_url) {
         Ok(url) => url,
         Err(e) => {
@@ -90,8 +92,8 @@ impl CloudStorageManager {
 
       let config = match ListingTableConfig::new(file_url_parsed).infer(&session_context.state()).await {
         Ok(cfg) => cfg,
-        Err(e) => {
-          eprintln!("Warning: Failed to infer schema for {}: {:?}", file_url, e);
+        Err(_) => {
+          eprintln!("Warning: Failed to infer schema for {}", file_url);
           continue;
         }
       };
@@ -133,7 +135,7 @@ impl CloudStorageManager {
     let mem_table = MemTable::try_new(schema, vec![combined_results])?;
     session_context.register_table("combined_table", Arc::new(mem_table))?;
     // Adjust the user-provided SQL query to run on the combined table
-    let adjusted_sql_query = sql_query.replace(file_name, "combined_table");
+    let adjusted_sql_query = sql_query.replace(table_name, "combined_table");
     // Execute the user-provided SQL query on the combined table
     let final_df = session_context.sql(&adjusted_sql_query).await?;
     let final_results = final_df.collect().await?;

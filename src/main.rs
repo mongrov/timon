@@ -132,7 +132,7 @@ async fn test_s3_sync() {
 
   let range = std::collections::HashMap::from([("start_date", "2024-07-01"), ("end_date", "2024-08-01")]);
   let sql_query = "SELECT * FROM temperature LIMIT 25";
-  let df_result = query_bucket("user6172", &sql_query, range).await.unwrap();
+  let df_result = query_bucket("user6172", "test", &sql_query, range).await.unwrap();
   println!("query_bucket {:?}", df_result);
 
   let cloud_sync_parquet_result = cloud_sync_parquet("user6172", "test", "temperature").await;
