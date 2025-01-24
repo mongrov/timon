@@ -323,7 +323,7 @@ impl DatabaseManager {
         for record in combined_json_values.iter() {
           let key = unique_fields
             .iter()
-            .map(|field| record.get(field).map(|v| v.to_string()).unwrap_or_default())
+            .map(|field| record.get(field).map(|v| v.as_str().unwrap_or_default().to_string()).unwrap_or_default())
             .collect::<Vec<String>>()
             .join("-");
           // Update the record in the map with the latest entry
