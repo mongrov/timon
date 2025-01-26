@@ -1,10 +1,10 @@
 mod utils;
-use arrow::record_batch::RecordBatch;
-use arrow::util::pretty::print_batches;
 use clap::{Parser, Subcommand};
+use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::arrow::util::pretty::print_batches;
+use datafusion::parquet::arrow::ArrowWriter;
+use datafusion::parquet::file::properties::WriterProperties;
 use datafusion::prelude::*;
-use parquet::arrow::ArrowWriter;
-use parquet::file::properties::WriterProperties;
 use serde_json::Value;
 use std::fs::File;
 use std::sync::Arc;

@@ -1,11 +1,11 @@
-use arrow::record_batch::RecordBatch;
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::dataframe::DataFrame;
 use datafusion::datasource::MemTable;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
+use datafusion::parquet::arrow::ArrowWriter;
+use datafusion::parquet::file::properties::WriterProperties;
+use datafusion::parquet::file::reader::{FileReader, SerializedFileReader};
 use datafusion::prelude::*;
-use parquet::arrow::ArrowWriter;
-use parquet::file::properties::WriterProperties;
-use parquet::file::reader::{FileReader, SerializedFileReader};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -622,11 +622,17 @@ impl DatabaseManager {
     None
   }
 
+  async fn get_table_columns(ctx: &SessionContext, table_name: &str) -> DataFusionResult<String> {
+    let df = ctx.sql(&format!("SELECT * FROM {} LIMIT 1", table_name)).await?;
+    let column_names: Vec<String> = df.schema().fields().iter().map(|field| format!("\"{}\"", field.name())).collect();
+    Ok(column_names.join(", "))
+  }
+
   pub async fn query(&self, db_name: &str, sql_query: &str, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
     let ctx = SessionContext::new();
-    let table_name = &extract_table_name(&sql_query);
+    let table_name = &extract_table_name(sql_query);
     let files_list = self
-      .build_files_list(db_name, &table_name)
+      .build_files_list(db_name, table_name)
       .map_err(|e| DataFusionError::Execution(format!("Error building files list: {}", e)))?;
     if files_list.is_empty() {
       return Err(DataFusionError::Plan("No valid tables found to query".to_string()));
@@ -647,12 +653,14 @@ impl DatabaseManager {
       return Err(DataFusionError::Plan("No valid tables found to query.".to_string()));
     }
 
-    // Combine all tables into a single SQL query using UNION ALL
+    let column_names = Self::get_table_columns(&ctx, &table_names[0]).await?;
+    // Combine tables using UNION ALL with explicit column selection
     let combined_query = format!(
-      "SELECT * FROM ({}) AS combined_table",
+      "SELECT {} FROM ({}) AS combined_table",
+      column_names,
       table_names
         .iter()
-        .map(|name| format!("SELECT * FROM {}", name))
+        .map(|name| format!("SELECT {} FROM {}", column_names, name))
         .collect::<Vec<_>>()
         .join(" UNION ALL ")
     );

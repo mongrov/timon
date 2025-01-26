@@ -1,5 +1,5 @@
-use arrow::array::{ArrayRef, BooleanBuilder, Float64Builder, Int32Builder, ListBuilder, StringBuilder};
-use arrow::datatypes::{DataType, Field, Schema};
+use datafusion::arrow::array::{ArrayRef, BooleanBuilder, Float64Builder, Int32Builder, ListBuilder, StringBuilder};
+use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;

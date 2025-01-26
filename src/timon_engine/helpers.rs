@@ -1,14 +1,14 @@
-use arrow::array::{
-  Array, ArrayRef, BooleanArray, BooleanBuilder, Float64Array, Float64Builder, Int64Array, Int64Builder, ListArray, ListBuilder, StringArray,
-  StringBuilder, TimestampMillisecondArray,
-};
-use arrow::datatypes::{DataType, Field as ArrowField, Schema, TimeUnit};
 use base64::{engine::general_purpose, Engine as _};
 use chrono::{Duration, NaiveDate};
 use chrono::{Timelike, Utc};
+use datafusion::arrow::array::{
+  Array, ArrayRef, BooleanArray, BooleanBuilder, Float64Array, Float64Builder, Int64Array, Int64Builder, ListArray, ListBuilder, StringArray,
+  StringBuilder, StringViewArray, TimestampMillisecondArray,
+};
+use datafusion::arrow::datatypes::{DataType, Field as ArrowField, Schema, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
-use parquet::data_type::{AsBytes, Decimal};
-use parquet::record::{Field as ParquetField, Row};
+use datafusion::parquet::data_type::{AsBytes, Decimal};
+use datafusion::parquet::record::{Field as ParquetField, Row};
 use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -16,12 +16,29 @@ use std::error::Error;
 use std::sync::Arc;
 
 pub fn record_batches_to_json(batches: &[RecordBatch]) -> Result<Value, serde_json::Error> {
-  // println!("batches >>> {:?}", batches);
   fn array_value_to_json(array: &ArrayRef, row_index: usize) -> serde_json::Value {
     match array.data_type() {
       DataType::Int64 => json!(array.as_any().downcast_ref::<Int64Array>().unwrap().value(row_index)),
       DataType::Float64 => json!(array.as_any().downcast_ref::<Float64Array>().unwrap().value(row_index)),
       DataType::Utf8 => json!(array.as_any().downcast_ref::<StringArray>().unwrap().value(row_index)),
+      DataType::Utf8View => {
+        // Downcast the array to StringViewArray
+        let string_view_array = array
+          .as_any()
+          .downcast_ref::<StringViewArray>()
+          .expect("Failed to downcast to StringViewArray");
+        // Extract the string values
+        let values: Vec<String> = (0..string_view_array.len())
+          .map(|i| {
+            if string_view_array.is_null(i) {
+              "null".to_string()
+            } else {
+              string_view_array.value(i).to_string()
+            }
+          })
+          .collect();
+        json!(values.get(row_index))
+      }
       DataType::Boolean => json!(array.as_any().downcast_ref::<BooleanArray>().unwrap().value(row_index)),
       DataType::Timestamp(TimeUnit::Millisecond, None) => json!(array.as_any().downcast_ref::<TimestampMillisecondArray>().unwrap().value(row_index)),
       DataType::List(_inner_field) => {
