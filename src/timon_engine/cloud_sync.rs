@@ -1,10 +1,11 @@
-use crate::timon_engine::helpers;
+use super::db_manager::{DataFusionOutput, DatabaseManager};
+use super::helpers::{extract_table_name, generate_s3_paths, record_batches_to_json};
 use chrono::NaiveDate;
 use datafusion::datasource::listing::{ListingTable, ListingTableConfig, ListingTableUrl};
 use datafusion::datasource::MemTable;
 use datafusion::error::Result as DataFusionResult;
 use datafusion::prelude::*;
-use helpers::{generate_s3_paths, record_batches_to_json};
+use object_store::ClientOptions;
 use object_store::{
   aws::{AmazonS3, AmazonS3Builder},
   path::Path as StorePath,
@@ -16,9 +17,6 @@ use std::path::Path;
 use std::{collections::HashMap, sync::Arc};
 use tokio::io::AsyncReadExt;
 use url::Url;
-
-use super::db_manager::{DataFusionOutput, DatabaseManager};
-use super::helpers::extract_table_name;
 
 pub struct CloudStorageManager {
   s3_store: Arc<AmazonS3>,
@@ -42,6 +40,12 @@ impl CloudStorageManager {
     let secret_access_key = secret_access_key.unwrap_or("ahmed1234").to_owned();
     let bucket_region = bucket_region.unwrap_or("us-west-1").to_owned();
 
+    let client_options = ClientOptions::new()
+      .with_allow_http(true)
+      .with_allow_http2()
+      // .with_root_certificate(certificate)
+      .with_allow_invalid_certificates(true);
+
     let s3_store = AmazonS3Builder::new()
       .with_endpoint(&bucket_endpoint)
       .with_bucket_name(&bucket_name)
@@ -49,6 +53,7 @@ impl CloudStorageManager {
       .with_secret_access_key(&secret_access_key)
       .with_region(&bucket_region)
       .with_allow_http(true)
+      .with_client_options(client_options)
       .build()
       .unwrap();
 
