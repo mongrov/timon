@@ -104,12 +104,19 @@ impl DatabaseManager {
     };
 
     // Create DatabaseManager instance
-    DatabaseManager {
+    let mut db_manager = DatabaseManager {
       metadata,
       data_path,
       metadata_path,
       bucket_interval,
+    };
+
+    // Update metadata with the provided storage_path
+    if let Err(e) = db_manager.update_metadata(storage_path) {
+      eprintln!("Error updating metadata: {}", e);
     }
+
+    db_manager
   }
 
   pub fn create_database(&mut self, db_name: &str) -> Result<(), DataFusionError> {
@@ -274,13 +281,6 @@ impl DatabaseManager {
     } else {
       Err(DataFusionError::Plan(format!("Database '{}' not found", db_name)))
     }
-  }
-
-  fn save_metadata(&self) -> TokioResult<()> {
-    // Serialize the metadata structure and save it to the file
-    let json = serde_json::to_string(&self.metadata)?;
-    fs::write(&self.metadata_path, json)?;
-    Ok(())
   }
 
   pub fn insert(&mut self, db_name: &str, table_name: &str, json_data: &str) -> Result<String, Box<dyn Error>> {
@@ -610,6 +610,30 @@ impl DatabaseManager {
     }
     let metadata: Metadata = serde_json::from_str(&metadata_contents).map_err(|e| Box::new(e) as Box<dyn Error>)?;
     Ok(metadata)
+  }
+
+  fn save_metadata(&self) -> TokioResult<()> {
+    // Serialize the metadata structure and save it to the file
+    let json = serde_json::to_string(&self.metadata)?;
+    fs::write(&self.metadata_path, json)?;
+    Ok(())
+  }
+
+  pub fn update_metadata(&mut self, storage_path: &str) -> TokioResult<()> {
+    // if the current LibraryDirectoryPath in iOS has changed, update the tables path
+    let new_data_path = storage_path.to_string() + "/data";
+    let mut metadata = self.read_metadata().unwrap();
+    // Update paths for all tables
+    for (db_name, db) in metadata.databases.iter_mut() {
+      for (table_name, table) in db.tables.iter_mut() {
+        let new_table_path = format!("{}/{}/{}", new_data_path, db_name, table_name);
+        table.path = new_table_path.clone();
+        println!("Updated path for table {}.{} To ({})", db_name, table_name, new_table_path);
+      }
+    }
+    self.metadata = metadata;
+    self.save_metadata()?;
+    Ok(())
   }
 
   pub fn get_table_path(&self, db_name: &str, table_name: &str) -> Option<String> {
