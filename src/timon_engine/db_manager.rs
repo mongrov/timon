@@ -317,61 +317,75 @@ impl DatabaseManager {
     // Track records per file
     let mut file_records: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     let mut seen: BTreeMap<String, Value> = BTreeMap::new();
+    let mut file_for_key: BTreeMap<String, String> = BTreeMap::new();
 
-    // Read all files and populate seen records
+    // Read existing files and track records
     for file in &file_list {
       let records = self.read_parquet_file(file)?;
       for record in &records {
         let key = build_key(record);
-        seen.insert(key.clone(), record.clone());
+        if !file_for_key.contains_key(&key) {
+          seen.insert(key.clone(), record.clone());
+          file_for_key.insert(key, file.clone());
+        }
       }
       file_records.insert(file.clone(), records);
     }
 
-    // Separate records into:
-    // - `updated_in_existing_files`: Records found in previous files that need updating.
-    // - `new_records`: Completely new records to be added to a new file.
-    let mut updated_in_existing_files: HashSet<String> = HashSet::new();
+    let mut updated_files: HashSet<String> = HashSet::new();
     let mut new_records: Vec<Value> = Vec::new();
-
-    for new_record in new_json_values {
-      let key = build_key(&new_record);
-      if seen.contains_key(&key) {
-        // Update existing record in the same file it was found in
-        seen.insert(key.clone(), new_record.clone());
-        updated_in_existing_files.insert(key);
-      } else {
-        // Completely new record → write to new file
-        new_records.push(new_record);
-      }
-    }
-
-    // Rewrite the affected files with updated records
-    for (file, records) in file_records.iter_mut() {
-      let mut updated_records: Vec<Value> = Vec::new();
-      for record in records.iter() {
-        let key = build_key(record);
-        if updated_in_existing_files.contains(&key) {
-          updated_records.push(seen.get(&key).unwrap().clone()); // Use updated record
-        } else {
-          updated_records.push(record.clone()); // Keep original record
-        }
-      }
-
-      if !updated_records.is_empty() {
-        let (arrays, schema) = json_to_arrow(&updated_records)?;
-        Self::parquet_file_writer(Path::new(file), schema, arrays)?;
-      }
-    }
 
     // Determine latest file path
     let current_date = rounded_timestamp(self.bucket_interval);
     let latest_file_path = format!("{}/{}_{}.parquet", table_path.unwrap(), table_name, current_date);
     let latest_file = Path::new(&latest_file_path);
+    let mut latest_file_records: Vec<Value> = if latest_file.exists() {
+      self.read_parquet_file(latest_file.to_str().unwrap())?
+    } else {
+      Vec::new()
+    };
 
-    // Write **only new records** to the latest file
-    if !new_records.is_empty() {
-      let (final_arrays, final_schema) = json_to_arrow(&new_records)?;
+    let mut latest_keys: HashMap<String, usize> = latest_file_records
+      .iter()
+      .enumerate()
+      .map(|(idx, record)| (build_key(record), idx))
+      .collect();
+
+    // Process new records
+    for new_record in new_json_values {
+      let key = build_key(&new_record);
+      if let Some(existing_file) = file_for_key.get(&key) {
+        // Update the record in its respective file
+        seen.insert(key.clone(), new_record.clone());
+        updated_files.insert(existing_file.clone());
+      } else if let Some(index) = latest_keys.get(&key) {
+        // If found in the latest file, update it there
+        latest_file_records[*index] = new_record.clone();
+      } else {
+        // New unique record, add to the latest file
+        new_records.push(new_record);
+        latest_keys.insert(key, latest_file_records.len() + new_records.len() - 1);
+      }
+    }
+
+    // Rewrite modified files
+    for file in updated_files {
+      if let Some(records) = file_records.get_mut(&file) {
+        for record in records.iter_mut() {
+          let key = build_key(record);
+          if let Some(updated_value) = seen.get(&key) {
+            *record = updated_value.clone();
+          }
+        }
+        let (arrays, schema) = json_to_arrow(records)?;
+        Self::parquet_file_writer(Path::new(&file), schema, arrays)?;
+      }
+    }
+
+    // Rewrite latest file (only if there are updates)
+    if !new_records.is_empty() || !latest_file_records.is_empty() {
+      latest_file_records.extend(new_records);
+      let (final_arrays, final_schema) = json_to_arrow(&latest_file_records)?;
       Self::parquet_file_writer(latest_file, final_schema, final_arrays)?;
     }
 
