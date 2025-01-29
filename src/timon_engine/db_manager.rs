@@ -1,3 +1,5 @@
+use datafusion::arrow::array::Array;
+use datafusion::arrow::datatypes::Schema;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::dataframe::DataFrame;
 use datafusion::datasource::MemTable;
@@ -8,7 +10,7 @@ use datafusion::parquet::file::reader::{FileReader, SerializedFileReader};
 use datafusion::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
 use std::path::Path;
 use std::sync::Arc;
@@ -284,84 +286,109 @@ impl DatabaseManager {
   }
 
   pub fn insert(&mut self, db_name: &str, table_name: &str, json_data: &str) -> Result<String, Box<dyn Error>> {
-    // Reload the metadata to ensure it's up to date
-    self.metadata = self
-      .read_metadata()
-      .map_err(|e| DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))
-      .unwrap();
+    // Reload metadata
+    self.metadata = self.read_metadata()?;
 
-    // Parse the JSON data
-    let json_values: Vec<Value> = serde_json::from_str(json_data)?;
+    let new_json_values: Vec<Value> = serde_json::from_str(json_data)?;
 
-    // Check if the database and table exist
+    // Validate database & table existence
     let table_path = self.get_table_path(db_name, table_name);
     if table_path.is_none() {
       return Err(format!("Database '{}' or Table '{}' does not exist.", db_name, table_name).into());
     }
 
     let table_schema = self.get_table_schema(db_name, table_name)?;
-    for json_value in &json_values {
+    for json_value in &new_json_values {
       self.validate_data_against_schema(&table_schema, json_value)?;
     }
 
-    let current_date = rounded_timestamp(self.bucket_interval);
-    let file_path = format!("{}/{}_{}.parquet", table_path.unwrap(), table_name, current_date);
+    // Get all existing files
+    let file_list = self.build_files_list(db_name, table_name)?;
 
-    // Convert JSON data to Arrow arrays
-    let (new_arrays, new_schema) = json_to_arrow(&json_values)?;
+    let unique_fields = get_unique_fields(table_schema.clone())?;
+    let build_key = |record: &Value| -> String {
+      unique_fields
+        .iter()
+        .map(|field| record.get(field).map(|v| v.to_string()).unwrap_or_default())
+        .collect::<Vec<String>>()
+        .join("-")
+    };
 
-    let path = Path::new(&file_path);
-    if path.exists() {
-      let existing_json_values = self.read_parquet_file(&file_path)?;
-      let mut combined_json_values = existing_json_values;
-      combined_json_values.extend(json_values);
+    // Track records per file
+    let mut file_records: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    let mut seen: BTreeMap<String, Value> = BTreeMap::new();
 
-      // Check and update deduplicated field values
-      let unique_fields = get_unique_fields(table_schema)?;
-      if !unique_fields.is_empty() {
-        let mut seen: HashMap<String, serde_json::Value> = HashMap::new();
-        for record in combined_json_values.iter() {
-          let key = unique_fields
-            .iter()
-            .map(|field| record.get(field).map(|v| v.as_str().unwrap_or_default().to_string()).unwrap_or_default())
-            .collect::<Vec<String>>()
-            .join("-");
-          // Update the record in the map with the latest entry
-          seen.insert(key, record.clone());
-        }
-        // Replace the original vector with updated values
-        combined_json_values = seen.into_values().collect();
+    // Read all files and populate seen records
+    for file in &file_list {
+      let records = self.read_parquet_file(file)?;
+      for record in &records {
+        let key = build_key(record);
+        seen.insert(key.clone(), record.clone());
       }
-
-      // Convert combined data to Arrow arrays
-      let (combined_arrays, combined_schema) = json_to_arrow(&combined_json_values)?;
-
-      // Create a Parquet writer
-      let file = fs::File::create(&path)?;
-      let props = WriterProperties::builder().build();
-      let mut writer = ArrowWriter::try_new(file, Arc::new(combined_schema.clone()), Some(props))?;
-
-      // Write the combined record batch to the Parquet file
-      let combined_batch = RecordBatch::try_new(Arc::new(combined_schema), combined_arrays)?;
-      writer.write(&combined_batch)?;
-
-      // Close the writer to ensure data is written to the file
-      writer.close()?;
-    } else {
-      // Create a new Parquet file with the new data
-      let file = fs::File::create(&path)?;
-      let props = WriterProperties::builder().build();
-      let mut writer = ArrowWriter::try_new(file, Arc::new(new_schema.clone()), Some(props))?;
-
-      // Write the record batch to the Parquet file
-      let record_batch = RecordBatch::try_new(Arc::new(new_schema), new_arrays)?;
-      writer.write(&record_batch)?;
-
-      // Close the writer to ensure data is written to the file
-      writer.close()?;
+      file_records.insert(file.clone(), records);
     }
 
-    Ok(format!("Data was successfully written to '{}'", file_path))
+    // Separate records into:
+    // - `updated_in_existing_files`: Records found in previous files that need updating.
+    // - `new_records`: Completely new records to be added to a new file.
+    let mut updated_in_existing_files: HashSet<String> = HashSet::new();
+    let mut new_records: Vec<Value> = Vec::new();
+
+    for new_record in new_json_values {
+      let key = build_key(&new_record);
+      if seen.contains_key(&key) {
+        // Update existing record in the same file it was found in
+        seen.insert(key.clone(), new_record.clone());
+        updated_in_existing_files.insert(key);
+      } else {
+        // Completely new record → write to new file
+        new_records.push(new_record);
+      }
+    }
+
+    // Rewrite the affected files with updated records
+    for (file, records) in file_records.iter_mut() {
+      let mut updated_records: Vec<Value> = Vec::new();
+      for record in records.iter() {
+        let key = build_key(record);
+        if updated_in_existing_files.contains(&key) {
+          updated_records.push(seen.get(&key).unwrap().clone()); // Use updated record
+        } else {
+          updated_records.push(record.clone()); // Keep original record
+        }
+      }
+
+      if !updated_records.is_empty() {
+        let (arrays, schema) = json_to_arrow(&updated_records)?;
+        Self::parquet_file_writer(Path::new(file), schema, arrays)?;
+      }
+    }
+
+    // Determine latest file path
+    let current_date = rounded_timestamp(self.bucket_interval);
+    let latest_file_path = format!("{}/{}_{}.parquet", table_path.unwrap(), table_name, current_date);
+    let latest_file = Path::new(&latest_file_path);
+
+    // Write **only new records** to the latest file
+    if !new_records.is_empty() {
+      let (final_arrays, final_schema) = json_to_arrow(&new_records)?;
+      Self::parquet_file_writer(latest_file, final_schema, final_arrays)?;
+    }
+
+    Ok(latest_file_path)
+  }
+
+  fn parquet_file_writer(path: &Path, schema: Schema, array: Vec<Arc<dyn Array>>) -> Result<String, Box<dyn Error>> {
+    // Create a Parquet writer
+    let file = fs::File::create(&path)?;
+    let props = WriterProperties::builder().build();
+    let mut writer = ArrowWriter::try_new(file, Arc::new(schema.clone()), Some(props))?;
+    // Write the combined record batch to the Parquet file
+    let combined_batch = RecordBatch::try_new(Arc::new(schema), array)?;
+    writer.write(&combined_batch)?;
+    // Close the writer to ensure data is written to the file
+    writer.close()?;
+    Ok(format!("Data was successfully written to '{}'", path.to_string_lossy()))
   }
 
   #[allow(dead_code)] // TODO: Remove this code or make the logic merge files on the cloud

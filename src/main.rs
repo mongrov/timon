@@ -57,8 +57,8 @@ fn main() {
 
 #[allow(dead_code)]
 async fn test_local_storage() {
-  const STORAGE_PATH: &str = "/tmp/timon";
-  let timon_result = init_timon(STORAGE_PATH, 30).unwrap();
+  const STORAGE_PATH: &str = "tmp/timon";
+  let timon_result = init_timon(STORAGE_PATH, 5).unwrap();
   println!("init_timon -> {}", timon_result);
 
   const DATABASE_NAME: &str = "test";
