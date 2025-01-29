@@ -7,8 +7,10 @@ use datafusion::arrow::array::{
 };
 use datafusion::arrow::datatypes::{DataType, Field as ArrowField, Schema, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::error::Result as DataFusionResult;
 use datafusion::parquet::data_type::{AsBytes, Decimal};
 use datafusion::parquet::record::{Field as ParquetField, Row};
+use datafusion::prelude::SessionContext;
 use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -460,4 +462,10 @@ pub fn get_unique_fields(schema: Value) -> Result<Vec<String>, Box<dyn Error>> {
   }
 
   Ok(unique_fields)
+}
+
+pub async fn get_table_columns(session_context: &SessionContext, table_name: &str) -> DataFusionResult<String> {
+  let df = session_context.sql(&format!("SELECT * FROM {} LIMIT 1", table_name)).await?;
+  let column_names: Vec<String> = df.schema().fields().iter().map(|field| format!("\"{}\"", field.name())).collect();
+  Ok(column_names.join(", "))
 }

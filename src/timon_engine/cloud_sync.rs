@@ -1,5 +1,5 @@
 use super::db_manager::{DataFusionOutput, DatabaseManager};
-use super::helpers::{extract_table_name, generate_s3_paths, record_batches_to_json};
+use super::helpers::{extract_table_name, generate_s3_paths, get_table_columns, record_batches_to_json};
 use chrono::NaiveDate;
 use datafusion::datasource::listing::{ListingTable, ListingTableConfig, ListingTableUrl};
 use datafusion::datasource::MemTable;
@@ -122,12 +122,14 @@ impl CloudStorageManager {
       return Err(datafusion::error::DataFusionError::Plan("No valid tables found to query.".to_string()));
     }
 
-    // Combine all tables into a single SQL query using UNION ALL
+    let column_names = get_table_columns(&session_context, &table_names[0]).await?;
+    // Combine tables using UNION ALL with explicit column selection
     let combined_query = format!(
-      "SELECT * FROM ({}) AS combined_table",
+      "SELECT {} FROM ({}) AS combined_table",
+      column_names,
       table_names
         .iter()
-        .map(|name| format!("SELECT * FROM {}", name))
+        .map(|name| format!("SELECT {} FROM {}", column_names, name))
         .collect::<Vec<_>>()
         .join(" UNION ALL ")
     );

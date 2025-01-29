@@ -61,21 +61,36 @@ async fn test_local_storage() {
   let timon_result = init_timon(STORAGE_PATH, 5).unwrap();
   println!("init_timon -> {}", timon_result);
 
-  const DATABASE_NAME: &str = "test";
+  const DATABASE_NAME: &str = "zivaring";
+  const TABLE_NANE: &str = "activitydetails";
   let database_result = create_database(DATABASE_NAME);
   println!("create_database -> {}", database_result.unwrap());
 
   let table_schema = r#"
     {
-      "date": { "type": "string", "required": true, "unique": true },
-      "temperature": { "type": "int|float", "required": true },
-      "humidity": { "type": "int|float", "required": true },
-      "full_counter": { "type": "int", "required": true },
-      "is_cool": { "type": "bool", "required": true },
-      "ring_details": { "type": "array", "required": true }
+      "date": {
+        "type": "string",
+        "required": true,
+        "unique": true
+      },
+      "distance": {
+        "type": "int|float"
+      },
+      "step": {
+        "type": "int"
+      },
+      "calories": {
+        "type": "int|float"
+      },
+      "arraySteps": {
+        "type": "array"
+      },
+      "is_sync": {
+        "type": "bool"
+      }
     }
   "#;
-  let table_result = create_table(DATABASE_NAME, "temperature", &table_schema);
+  let table_result = create_table(DATABASE_NAME, TABLE_NANE, &table_schema);
   println!("create_table -> {}", table_result.unwrap());
 
   let databases_list = list_databases().unwrap();
@@ -85,58 +100,52 @@ async fn test_local_storage() {
 
   let json_data: String = r#"
     [
-      {
-        "date": "2024.08.18 20:58:32",
-        "humidity": 12,
-        "temperature": 22,
-        "full_counter": 7,
-        "is_cool": true,
-        "ring_details": ["Ahmed", "Eyal", "Olive"]
-      },
-      {
-        "date": "2024.08.18 20:58:35",
-        "humidity": 88.5,
-        "temperature": 44.0,
-        "full_counter": 77,
-        "is_cool": true,
-        "ring_details": ["Moin", "Jeel"]
-      }
+      {"arraySteps":[43,39,0,0,0,0,0,0,0,0],"calories":2.56,"date":"2025.01.01 08:32:45","distance":0.05,"step":82},
+      {"arraySteps":[20,0,0,0,0,0,0,0,0,0],"calories":0.61,"date":"2025.01.01 09:24:19","distance":0.01,"step":20},
+      {"arraySteps":[19,0,0,0,0,0,0,0,0,0],"calories":0.65,"date":"2025.01.01 10:13:45","distance":0.01,"step":19},
+      {"arraySteps":[54,33,2,0,0,0,0,0,0,0],"calories":2.83,"date":"2025.01.01 10:29:56","distance":0.06,"step":89},
+      {"arraySteps":[38,0,0,15,0,0,0,0,0,0],"calories":1.53,"date":"2025.01.01 11:58:16","distance":0.03,"step":53},
+      {"arraySteps":[50,16,0,55,23,0,0,18,46,0],"calories":6.19,"date":"2025.01.01 12:15:38","distance":0.14,"step":208},
+      {"arraySteps":[18,0,0,20,0,0,0,0,0,0],"calories":1.05,"date":"2025.01.01 13:16:51","distance":0.01,"step":38}
     ]
   "#
   .to_string();
-  let insertion_result = insert(DATABASE_NAME, "temperature", &json_data);
+  let insertion_result = insert(DATABASE_NAME, TABLE_NANE, &json_data);
   println!("insertion_result: {}", insertion_result.unwrap());
 
-  // let range: std::collections::HashMap<&str, &str> = std::collections::HashMap::from([("start_date", "2024-12-12"), ("end_date", "2025-01-12")]);
-  let sql_query = format!("SELECT * FROM temperature ORDER BY date ASC LIMIT 25");
+  let sql_query = format!("SELECT * FROM {} ORDER BY date DESC LIMIT 25", TABLE_NANE);
   let query_result = query(DATABASE_NAME, &sql_query).await;
   println!("query_result: {}", query_result.unwrap());
 
-  let delete_table_result = delete_table(DATABASE_NAME, "iot").unwrap();
-  println!("delete_table_result -> {}", delete_table_result);
-  let delete_database_result = delete_database(DATABASE_NAME).unwrap();
-  println!("delete_database_result -> {}", delete_database_result);
+  // let delete_table_result = delete_table(DATABASE_NAME, "iot").unwrap();
+  // println!("delete_table_result -> {}", delete_table_result);
+  // let delete_database_result = delete_database(DATABASE_NAME).unwrap();
+  // println!("delete_database_result -> {}", delete_database_result);
 }
 
 #[allow(dead_code)]
 async fn test_s3_sync() {
-  init_timon("/tmp/timon", 30).unwrap();
+  init_timon("tmp/timon", 5).unwrap();
 
-  let bucket_endpoint = "http://localhost:9000";
-  let bucket_name = "timon";
-  let access_key_id = "ahmed";
-  let secret_access_key = "ahmed1234";
-  let bucket_region = "us-east-1";
+  let bucket_endpoint = "https://amazonaws.com";
+  let bucket_name = "zivaone_app";
+  let access_key_id = "xxx-xxx";
+  let secret_access_key = "xxx-xxx-xxx-xxx";
+  let bucket_region = "us-west-2";
   let init_bucket_result = init_bucket(bucket_endpoint, bucket_name, access_key_id, secret_access_key, bucket_region).unwrap();
   println!("init_bucket_result: {}", init_bucket_result);
 
-  let range = std::collections::HashMap::from([("start_date", "2024-07-01"), ("end_date", "2024-08-01")]);
-  let sql_query = "SELECT * FROM temperature LIMIT 25";
-  let df_result = query_bucket("user6172", "test", &sql_query, range).await.unwrap();
-  println!("query_bucket {:?}", df_result);
+  const USERNAME: &str = "wRE3w2vJcZLaabPQs";
+  const DATABASE_NAME: &str = "zivaring";
+  const TABLE_NAME: &str = "activitydetails";
 
-  let cloud_sync_parquet_result = cloud_sync_parquet("user6172", "test", "temperature").await;
+  let cloud_sync_parquet_result = cloud_sync_parquet(USERNAME, DATABASE_NAME, TABLE_NAME).await;
   println!("{}", cloud_sync_parquet_result.unwrap());
+
+  let range = std::collections::HashMap::from([("start_date", "2025-01-29"), ("end_date", "2025-01-29")]);
+  let sql_query = format!("SELECT * FROM {} ORDER BY date DESC LIMIT 25", TABLE_NAME);
+  let df_result = query_bucket(USERNAME, "zivaring", &sql_query, range).await.unwrap();
+  println!("query_bucket {:?}", df_result);
 }
 
 // This block is executed for local development testing(run async tests for local_storage and S3 cloud_sync).

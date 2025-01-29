@@ -1,3 +1,7 @@
+use super::helpers::{
+  extract_hourly_date, extract_monthly_date, extract_table_name, get_table_columns, get_unique_fields, json_to_arrow, record_batches_to_json,
+  rounded_timestamp, row_to_json,
+};
 use datafusion::arrow::array::Array;
 use datafusion::arrow::datatypes::Schema;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -16,11 +20,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::{fmt, fs};
 use tokio::io::Result as TokioResult;
-
-use super::helpers::{
-  extract_hourly_date, extract_monthly_date, extract_table_name, get_unique_fields, json_to_arrow, record_batches_to_json, rounded_timestamp,
-  row_to_json,
-};
 
 pub enum DataFusionOutput {
   Json(Value),
@@ -687,14 +686,8 @@ impl DatabaseManager {
     None
   }
 
-  async fn get_table_columns(ctx: &SessionContext, table_name: &str) -> DataFusionResult<String> {
-    let df = ctx.sql(&format!("SELECT * FROM {} LIMIT 1", table_name)).await?;
-    let column_names: Vec<String> = df.schema().fields().iter().map(|field| format!("\"{}\"", field.name())).collect();
-    Ok(column_names.join(", "))
-  }
-
   pub async fn query(&self, db_name: &str, sql_query: &str, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
-    let ctx = SessionContext::new();
+    let session_context = SessionContext::new();
     let table_name = &extract_table_name(sql_query);
     let files_list = self
       .build_files_list(db_name, table_name)
@@ -707,7 +700,10 @@ impl DatabaseManager {
     for (i, file_path) in files_list.iter().enumerate() {
       if Path::new(file_path).exists() {
         let table_name = format!("{}_{}", table_name, i);
-        match ctx.register_parquet(&table_name, file_path, ParquetReadOptions::default()).await {
+        match session_context
+          .register_parquet(&table_name, file_path, ParquetReadOptions::default())
+          .await
+        {
           Ok(_) => table_names.push(table_name),
           Err(e) => eprintln!("Failed to register {}: {:?}", file_path, e),
         }
@@ -718,7 +714,7 @@ impl DatabaseManager {
       return Err(DataFusionError::Plan("No valid tables found to query.".to_string()));
     }
 
-    let column_names = Self::get_table_columns(&ctx, &table_names[0]).await?;
+    let column_names = get_table_columns(&session_context, &table_names[0]).await?;
     // Combine tables using UNION ALL with explicit column selection
     let combined_query = format!(
       "SELECT {} FROM ({}) AS combined_table",
@@ -731,16 +727,16 @@ impl DatabaseManager {
     );
 
     // Execute the combined query
-    let combined_df = ctx.sql(&combined_query).await?;
+    let combined_df = session_context.sql(&combined_query).await?;
     let combined_results = combined_df.collect().await?;
     // Create an in-memory table from the combined results
     let schema = combined_results[0].schema();
     let mem_table = MemTable::try_new(schema, vec![combined_results])?;
-    ctx.register_table("combined_table", Arc::new(mem_table))?;
+    session_context.register_table("combined_table", Arc::new(mem_table))?;
     // Adjust the user-provided SQL query to run on the combined table
     let adjusted_sql_query = sql_query.replace(table_name, "combined_table");
     // Execute the user-provided SQL query on the combined table
-    let final_df = ctx.sql(&adjusted_sql_query).await?;
+    let final_df = session_context.sql(&adjusted_sql_query).await?;
     let final_results = final_df.collect().await?;
 
     if is_json_format {
@@ -749,7 +745,7 @@ impl DatabaseManager {
     } else {
       let final_schema = final_results[0].schema();
       let final_mem_table = MemTable::try_new(final_schema, vec![final_results])?;
-      let final_df = ctx.read_table(Arc::new(final_mem_table))?;
+      let final_df = session_context.read_table(Arc::new(final_mem_table))?;
       Ok(DataFusionOutput::DataFrame(final_df))
     }
   }
