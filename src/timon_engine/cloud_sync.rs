@@ -81,13 +81,16 @@ impl CloudStorageManager {
     let table_name = &extract_table_name(sql_query);
 
     // Parse the date_range and generate Parquet file paths
-    let file_list = self
-      .generate_s3_paths(username, db_name, table_name, date_range)
-      .await
-      .unwrap()
-      .iter()
-      .map(|file| format!("s3://{}/{}", self.bucket_name, file))
-      .collect::<Vec<_>>();
+    let file_list = match self.generate_s3_paths(username, db_name, table_name, date_range).await {
+      Ok(files) => files.iter().map(|file| format!("s3://{}/{}", self.bucket_name, file)).collect::<Vec<_>>(),
+      Err(e) => {
+        eprintln!("Error generating S3 paths: {:?}", e);
+        return Err(datafusion::error::DataFusionError::Execution(format!(
+          "Failed to generate S3 paths: {:?}",
+          e
+        )));
+      }
+    };
 
     // Register the object store with the session context
     let store_url = Url::parse(&format!("s3://{}", &self.bucket_name)).unwrap();
