@@ -1,6 +1,5 @@
 use base64::{engine::general_purpose, Engine as _};
-use chrono::{Duration, NaiveDate};
-use chrono::{Timelike, Utc};
+use chrono::{NaiveDate, Timelike, Utc};
 use datafusion::arrow::array::{
   Array, ArrayRef, BooleanArray, BooleanBuilder, Float64Array, Float64Builder, Int64Array, Int64Builder, ListArray, ListBuilder, StringArray,
   StringBuilder, StringViewArray, TimestampMillisecondArray,
@@ -332,45 +331,6 @@ pub fn json_to_arrow(json_values: &[Value]) -> Result<(Vec<ArrayRef>, Schema), B
   Ok((arrays, schema))
 }
 
-pub fn generate_s3_paths(
-  bucket_name: &str,
-  username: &str,
-  db_name: &str,
-  table_name: &str,
-  bucket_interval: u32,
-  date_range: HashMap<&str, &str>,
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-  // Parse start and end dates
-  let start_date = NaiveDate::parse_from_str(date_range.get("start_date").unwrap(), "%Y-%m-%d")?
-    .and_hms_opt(0, 0, 0)
-    .unwrap();
-  let end_date = NaiveDate::parse_from_str(date_range.get("end_date").unwrap(), "%Y-%m-%d")?
-    .and_hms_opt(23, 59, 59)
-    .unwrap();
-  // Calculate the bucket interval duration in minutes
-  let interval_duration = Duration::minutes(bucket_interval as i64);
-  let mut current_datetime = start_date;
-  let mut file_list = Vec::new();
-
-  while current_datetime <= end_date {
-    // Generate the path for the current interval
-    let path = format!(
-      "s3://{}/{}/{}/{}/{}/{}_{}.parquet",
-      bucket_name,
-      username,
-      db_name,
-      table_name,
-      current_datetime.format("%Y/%m/%d"),
-      table_name,
-      current_datetime.format("%Y-%m-%d_%H-%M")
-    );
-    file_list.push(path);
-    // Increment to the next interval
-    current_datetime += interval_duration;
-  }
-  Ok(file_list)
-}
-
 pub fn extract_table_name(sql_query: &str) -> String {
   Regex::new(r##"(?:FROM|JOIN)\s+[`\"]?(\w+)[`\"]?"##)
     .unwrap()
@@ -468,4 +428,26 @@ pub async fn get_table_columns(session_context: &SessionContext, table_name: &st
   let df = session_context.sql(&format!("SELECT * FROM {} LIMIT 1", table_name)).await?;
   let column_names: Vec<String> = df.schema().fields().iter().map(|field| format!("\"{}\"", field.name())).collect();
   Ok(column_names.join(", "))
+}
+
+pub fn filter_files_by_date_range(files: Vec<String>, start_date: &str, end_date: &str) -> Result<Vec<String>, Box<dyn Error>> {
+  let start_date = NaiveDate::parse_from_str(start_date, "%Y-%m-%d")?;
+  let end_date = NaiveDate::parse_from_str(end_date, "%Y-%m-%d")?;
+
+  let filtered_files = files
+    .into_iter()
+    .filter(|file| {
+      // Extract the date part from the file path
+      if let Some(date_str) = file.split('/').last() {
+        if let Some(date_part) = date_str.split('_').nth(1) {
+          if let Ok(file_date) = NaiveDate::parse_from_str(date_part, "%Y-%m-%d") {
+            return file_date >= start_date && file_date <= end_date;
+          }
+        }
+      }
+      false
+    })
+    .collect();
+
+  Ok(filtered_files)
 }

@@ -1,17 +1,16 @@
 use super::db_manager::{DataFusionOutput, DatabaseManager};
-use super::helpers::{extract_table_name, generate_s3_paths, get_table_columns, record_batches_to_json};
+use super::helpers::{extract_table_name, filter_files_by_date_range, get_table_columns, record_batches_to_json};
 use chrono::NaiveDate;
 use datafusion::datasource::listing::{ListingTable, ListingTableConfig, ListingTableUrl};
 use datafusion::datasource::MemTable;
 use datafusion::error::Result as DataFusionResult;
 use datafusion::prelude::*;
-use object_store::ClientOptions;
-use object_store::{
-  aws::{AmazonS3, AmazonS3Builder},
-  path::Path as StorePath,
-  ObjectStore,
-};
+use futures::{StreamExt, TryStreamExt};
+use object_store::aws::{AmazonS3, AmazonS3Builder};
+use object_store::path::Path as StorePath;
+use object_store::{ClientOptions, ObjectMeta, ObjectStore};
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use std::{collections::HashMap, sync::Arc};
@@ -22,6 +21,11 @@ pub struct CloudStorageManager {
   s3_store: Arc<AmazonS3>,
   db_manager: DatabaseManager,
   pub bucket_name: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Metadata {
+  files: Vec<String>,
 }
 
 impl CloudStorageManager {
@@ -73,12 +77,18 @@ impl CloudStorageManager {
     date_range: HashMap<&str, &str>,
     is_json_format: bool,
   ) -> DataFusionResult<DataFusionOutput> {
-    let bucket_interval = self.db_manager.bucket_interval;
     let session_context = SessionContext::new();
     let table_name = &extract_table_name(sql_query);
 
     // Parse the date_range and generate Parquet file paths
-    let file_list = generate_s3_paths(&self.bucket_name, username, db_name, table_name, bucket_interval, date_range).unwrap();
+    let file_list = self
+      .generate_s3_paths(username, db_name, table_name, date_range)
+      .await
+      .unwrap()
+      .iter()
+      .map(|file| format!("s3://{}/{}", self.bucket_name, file))
+      .collect::<Vec<_>>();
+
     // Register the object store with the session context
     let store_url = Url::parse(&format!("s3://{}", &self.bucket_name)).unwrap();
     session_context.runtime_env().register_object_store(&store_url, self.s3_store.clone());
@@ -156,6 +166,33 @@ impl CloudStorageManager {
       let final_df = session_context.read_table(Arc::new(final_mem_table))?;
       Ok(DataFusionOutput::DataFrame(final_df))
     }
+  }
+
+  async fn generate_s3_paths(
+    &self,
+    username: &str,
+    db_name: &str,
+    table_name: &str,
+    date_range: HashMap<&str, &str>,
+  ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    // Construct the prefix (path) to list files from
+    let prefix_path = StorePath::from(format!("{}/{}/{}", username, db_name, table_name));
+    // List all objects under the prefix
+    let objects = self.s3_store.list(Some(&prefix_path));
+    // Collect the stream of ObjectMeta into a Vec<ObjectMeta>
+    let object_metas: Vec<ObjectMeta> = objects
+      .map(|result| result.map_err(|e| Box::new(e) as Box<dyn std::error::Error>))
+      .try_collect()
+      .await?;
+
+    // Extract file paths from the collected ObjectMeta
+    let files: Vec<String> = object_metas.into_iter().map(|object_meta| object_meta.location.to_string()).collect();
+    // Filter files by date range
+    let start_date = date_range.get("start_date").unwrap();
+    let end_date = date_range.get("end_date").unwrap();
+    let filtered_files = filter_files_by_date_range(files, start_date, end_date)?;
+
+    Ok(filtered_files)
   }
 
   async fn upload_to_bucket(&self, source_path: &str, target_path: &str) -> Result<(), Box<dyn std::error::Error>> {

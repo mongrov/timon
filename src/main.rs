@@ -127,10 +127,10 @@ async fn test_local_storage() {
 async fn test_s3_sync() {
   init_timon("tmp/timon", 5).unwrap();
 
-  let bucket_endpoint = "https://amazonaws.com";
-  let bucket_name = "zivaone_app";
-  let access_key_id = "xxx-xxx";
-  let secret_access_key = "xxx-xxx-xxx-xxx";
+  let bucket_endpoint = "https://s3.us-west-2.amazonaws.com";
+  let bucket_name = "zivaoneapp";
+  let access_key_id = "xxx";
+  let secret_access_key = "xxx";
   let bucket_region = "us-west-2";
   let init_bucket_result = init_bucket(bucket_endpoint, bucket_name, access_key_id, secret_access_key, bucket_region).unwrap();
   println!("init_bucket_result: {}", init_bucket_result);
@@ -142,7 +142,7 @@ async fn test_s3_sync() {
   let cloud_sync_parquet_result = cloud_sync_parquet(USERNAME, DATABASE_NAME, TABLE_NAME).await;
   println!("{}", cloud_sync_parquet_result.unwrap());
 
-  let range = std::collections::HashMap::from([("start_date", "2025-01-29"), ("end_date", "2025-01-29")]);
+  let range = std::collections::HashMap::from([("start_date", "2025-01-10"), ("end_date", "2025-01-30")]);
   let sql_query = format!("SELECT * FROM {} ORDER BY date DESC LIMIT 25", TABLE_NAME);
   let df_result = query_bucket(USERNAME, "zivaring", &sql_query, range).await.unwrap();
   println!("query_bucket {:?}", df_result);

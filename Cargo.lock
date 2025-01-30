@@ -3633,6 +3633,7 @@ dependencies = [
  "clap",
  "datafusion",
  "env_logger",
+ "futures",
  "hex",
  "jni",
  "jsonwebtoken",
