@@ -291,18 +291,14 @@ impl DatabaseManager {
     let new_json_values: Vec<Value> = serde_json::from_str(json_data)?;
 
     // Validate database & table existence
-    let table_path = self.get_table_path(db_name, table_name);
-    if table_path.is_none() {
-      return Err(format!("Database '{}' or Table '{}' does not exist.", db_name, table_name).into());
-    }
+    let table_path = self
+      .get_table_path(db_name, table_name)
+      .ok_or_else(|| format!("Database '{}' or Table '{}' does not exist.", db_name, table_name))?;
 
     let table_schema = self.get_table_schema(db_name, table_name)?;
     for json_value in &new_json_values {
       self.validate_data_against_schema(&table_schema, json_value)?;
     }
-
-    // Get all existing files
-    let file_list = self.build_files_list(db_name, table_name)?;
 
     let unique_fields = get_unique_fields(table_schema.clone())?;
     let build_key = |record: &Value| -> String {
@@ -318,8 +314,13 @@ impl DatabaseManager {
     let mut seen: BTreeMap<String, Value> = BTreeMap::new();
     let mut file_for_key: BTreeMap<String, String> = BTreeMap::new();
 
+    // Get all existing files
+    let file_list = self.build_files_list(db_name, table_name)?;
+    let len = file_list.len();
+    let last_three_files = &file_list[len.saturating_sub(3)..];
+
     // Read existing files and track records
-    for file in &file_list {
+    for file in last_three_files {
       let records = self.read_parquet_file(file)?;
       for record in &records {
         let key = build_key(record);
@@ -336,7 +337,7 @@ impl DatabaseManager {
 
     // Determine latest file path
     let current_date = rounded_timestamp(self.bucket_interval);
-    let latest_file_path = format!("{}/{}_{}.parquet", table_path.unwrap(), table_name, current_date);
+    let latest_file_path = format!("{}/{}_{}.parquet", table_path, table_name, current_date);
     let latest_file = Path::new(&latest_file_path);
     let mut latest_file_records: Vec<Value> = if latest_file.exists() {
       self.read_parquet_file(latest_file.to_str().unwrap())?
@@ -368,17 +369,22 @@ impl DatabaseManager {
     }
 
     // Rewrite modified files
+    let mut file_updates: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for file in updated_files {
-      if let Some(records) = file_records.get_mut(&file) {
-        for record in records.iter_mut() {
-          let key = build_key(record);
-          if let Some(updated_value) = seen.get(&key) {
-            *record = updated_value.clone();
-          }
-        }
-        let (arrays, schema) = json_to_arrow(records)?;
-        Self::parquet_file_writer(Path::new(&file), schema, arrays)?;
+      if let Some(records) = file_records.get(&file) {
+        let updated_records: Vec<Value> = records
+          .iter()
+          .map(|record| seen.get(&build_key(record)).cloned().unwrap_or_else(|| record.clone()))
+          .collect();
+
+        file_updates.insert(file.clone(), updated_records);
       }
+    }
+
+    //  perform **batch writes** after collecting all updates
+    for (file, records) in file_updates {
+      let (arrays, schema) = json_to_arrow(&records)?;
+      Self::parquet_file_writer(Path::new(&file), schema, arrays)?;
     }
 
     // Rewrite latest file (only if there are updates)
