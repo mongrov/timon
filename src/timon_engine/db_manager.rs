@@ -316,12 +316,19 @@ impl DatabaseManager {
 
     // Get all existing files
     let file_list = self.build_files_list(db_name, table_name)?;
-    let len = file_list.len();
-    let last_three_files = &file_list[len.saturating_sub(3)..];
+    let current_date = rounded_timestamp(self.bucket_interval);
+    let latest_file_path = format!("{}/{}_{}.parquet", table_path, table_name, current_date);
+    let last_three_files: Vec<String> = file_list
+      .iter()
+      .filter(|file| *file != &latest_file_path) // Exclude latest file path
+      .rev()
+      .take(3)
+      .cloned()
+      .collect();
 
     // Read existing files and track records
     for file in last_three_files {
-      let records = self.read_parquet_file(file)?;
+      let records = self.read_parquet_file(&file)?;
       for record in &records {
         let key = build_key(record);
         if !file_for_key.contains_key(&key) {
@@ -333,11 +340,9 @@ impl DatabaseManager {
     }
 
     let mut updated_files: HashSet<String> = HashSet::new();
-    let mut new_records: Vec<Value> = Vec::new();
+    let new_records: Vec<Value> = Vec::new();
 
     // Determine latest file path
-    let current_date = rounded_timestamp(self.bucket_interval);
-    let latest_file_path = format!("{}/{}_{}.parquet", table_path, table_name, current_date);
     let latest_file = Path::new(&latest_file_path);
     let mut latest_file_records: Vec<Value> = if latest_file.exists() {
       self.read_parquet_file(latest_file.to_str().unwrap())?
@@ -362,9 +367,10 @@ impl DatabaseManager {
         // If found in the latest file, update it there
         latest_file_records[*index] = new_record.clone();
       } else {
-        // New unique record, add to the latest file
-        new_records.push(new_record);
-        latest_keys.insert(key, latest_file_records.len() + new_records.len() - 1);
+        // New unique record, add to the latest file **first** then store index
+        let index = latest_file_records.len();
+        latest_file_records.push(new_record.clone());
+        latest_keys.insert(key, index);
       }
     }
 
@@ -388,7 +394,7 @@ impl DatabaseManager {
     }
 
     // Rewrite latest file (only if there are updates)
-    if !new_records.is_empty() || !latest_file_records.is_empty() {
+    if !latest_keys.is_empty() || !new_records.is_empty() {
       latest_file_records.extend(new_records);
       let (final_arrays, final_schema) = json_to_arrow(&latest_file_records)?;
       Self::parquet_file_writer(latest_file, final_schema, final_arrays)?;
