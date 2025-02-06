@@ -43,8 +43,11 @@ external fun deleteTable(dbName: String, tableName: String): String
 // Insert data into a table in JSON format
 external fun insert(dbName: String, tableName: String, jsonData: String): String
 
-// Query a database with a date range and SQL query
+// Query a database with SQL query
 external fun query(dbName: String, sqlQuery: String): String
+
+// Query a database for a given user with SQL query
+external fun queryGroup(userName: String, dbName: String, sqlQuery: String): String
 ```
 
 ## S3-Compatible Storage Functions
@@ -58,8 +61,11 @@ external fun initBucket(bucket_endpoint: String, bucket_name: String, access_key
 // Query the bucket with a date range and SQL query
 external fun queryBucket(userName: String, dbName: String, sqlQuery: String, dateRange: Map<String, String>): String
 
-// Sink dayly data to Parquet format in the bucket
-external fun cloudSyncParquet(userName: String, dbName: String, tableName: String): String
+// Sink daily data to Parquet format in the bucket
+external fun cloudSinkParquet(userName: String, dbName: String, tableName: String): String
+
+// Fetch data from a given user and save it locally
+external fun cloudFetchParquet(userName: String, dbName: String, tableName: String, dateRange: Map<String, String>): String
 ```
 
 ## Function Descriptions
@@ -89,7 +95,7 @@ Deletes the specified table from the given database.
 Inserts JSON-formatted data into the specified table.
 
 - **query(dbName: String, sqlQuery: String)**
-Executes an SQL query on the specified database within the given date range.
+Executes an SQL query on the specified database.
 
 - **initBucket(bucket_endpoint: String, bucket_name: String, access_key_id: String, secret_access_key: String, bucket_region: String)**
 Initializes an S3-compatible bucket for data storage.
@@ -97,7 +103,7 @@ Initializes an S3-compatible bucket for data storage.
 - **queryBucket(userName: String, dbName: String, sqlQuery: String, dateRange: Map<String, String>)**
 Queries data in the S3 bucket based on the given date range and SQL query.
 
-- **cloudSyncParquet(userName: String, dbName: String, tableName: String)**
+- **cloudSinkParquet(userName: String, dbName: String, tableName: String)**
 Upload data from the specified database and table as Parquet files, organized by day into S3-compatible bucket.
 
 

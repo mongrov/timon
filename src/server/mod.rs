@@ -1,6 +1,6 @@
 mod utils;
 use crate::timon_engine::{
-  cloud_sync_parquet, create_database, create_table, delete_database, delete_table, init_bucket, init_timon, insert, list_databases, list_tables,
+  cloud_sink_parquet, create_database, create_table, delete_database, delete_table, init_bucket, init_timon, insert, list_databases, list_tables,
   query, query_bucket,
 };
 use actix_web::{middleware, web, App, HttpMessage, HttpRequest, HttpResponse, HttpServer, Responder};
@@ -148,11 +148,11 @@ pub async fn query_bucket_handler(req: HttpRequest, body: web::Json<QueryBucketR
 }
 
 // Sink daily Parquet data
-pub async fn cloud_sync_parquet_handler(req: HttpRequest, body: web::Json<SinkParquetRequest>) -> impl Responder {
+pub async fn cloud_sink_parquet_handler(req: HttpRequest, body: web::Json<SinkParquetRequest>) -> impl Responder {
   // Access claims from the request extensions
   if let Some(claims) = req.extensions().get::<Claims>() {
     let username = &claims.sub;
-    match cloud_sync_parquet(username, &body.db_name, &body.table_name).await {
+    match cloud_sink_parquet(username, &body.db_name, &body.table_name).await {
       Ok(result) => HttpResponse::Ok().json(QueryResponse { result: result.to_string() }),
       Err(e) => HttpResponse::InternalServerError().json(format!("Error: {}", e)),
     }
@@ -205,7 +205,7 @@ pub async fn timon_server() -> io::Result<()> {
           .route("/insert", web::post().to(insert_handler))
           .route("/query", web::get().to(query_handler))
           .route("/query_bucket", web::get().to(query_bucket_handler))
-          .route("/sync_bucket", web::post().to(cloud_sync_parquet_handler)),
+          .route("/sync_bucket", web::post().to(cloud_sink_parquet_handler)),
       )
   })
   .bind(address)?

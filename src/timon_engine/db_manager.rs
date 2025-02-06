@@ -65,6 +65,7 @@ struct DatabaseInfo {
 
 #[derive(Clone)]
 pub struct DatabaseManager {
+  pub storage_path: String,
   metadata: Metadata,
   data_path: String,
   metadata_path: String,
@@ -106,6 +107,7 @@ impl DatabaseManager {
 
     // Create DatabaseManager instance
     let mut db_manager = DatabaseManager {
+      storage_path: storage_path.to_string(),
       metadata,
       data_path,
       metadata_path,
@@ -315,7 +317,7 @@ impl DatabaseManager {
     let mut file_for_key: BTreeMap<String, String> = BTreeMap::new();
 
     // Get all existing files
-    let file_list = self.build_files_list(db_name, table_name)?;
+    let file_list = self.build_files_list(db_name, table_name, None)?;
     let current_date = rounded_timestamp(self.bucket_interval);
     let latest_file_path = format!("{}/{}_{}.parquet", table_path, table_name, current_date);
     let last_three_files: Vec<String> = file_list
@@ -403,6 +405,14 @@ impl DatabaseManager {
     Ok(latest_file_path)
   }
 
+  pub async fn query(&self, db_name: &str, sql_query: &str, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
+    self.execute_query(None, db_name, sql_query, is_json_format).await
+  }
+
+  pub async fn query_group(&self, username: &str, db_name: &str, sql_query: &str, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
+    self.execute_query(Some(username), db_name, sql_query, is_json_format).await
+  }
+
   fn parquet_file_writer(path: &Path, schema: Schema, array: Vec<Arc<dyn Array>>) -> Result<String, Box<dyn Error>> {
     // Create a Parquet writer
     let file = fs::File::create(&path)?;
@@ -425,7 +435,7 @@ impl DatabaseManager {
     for db_name in databases_list {
       let tables_list = self.list_tables(&db_name)?;
       for table_name in tables_list {
-        let files = self.build_files_list(&db_name, &table_name)?;
+        let files = self.build_files_list(&db_name, &table_name, None)?;
         if files.is_empty() {
           return Err("No files to merge".into());
         }
@@ -491,7 +501,7 @@ impl DatabaseManager {
     }
   }
 
-  pub fn build_files_list(&self, db_name: &str, table_name: &str) -> Result<Vec<String>, Box<dyn Error>> {
+  pub fn build_files_list(&self, db_name: &str, table_name: &str, username: Option<&str>) -> Result<Vec<String>, Box<dyn Error>> {
     // Reload metadata to ensure it's up-to-date
     let metadata = self
       .read_metadata()
@@ -509,17 +519,31 @@ impl DatabaseManager {
       .get(table_name)
       .ok_or_else(|| format!("Table '{}' does not exist in database '{}'.", table_name, db_name))?;
 
-    // Get the table's path
-    let table_path = &table.path;
+    // Get the base table path
+    let base_table_path = Path::new(&table.path);
+
+    // Extract the base directory (root path) from the table path
+    let base_root = base_table_path
+      .ancestors()
+      .nth(3) // Adjust according to depth: "<base_path>/data/zivaring/activitydetails"
+      .ok_or_else(|| format!("Failed to determine base directory from '{}'", base_table_path.display()))?
+      .to_path_buf();
+
+    // Determine the final path
+    let final_table_path = if let Some(user) = username {
+      base_root.join("group").join(user).join(db_name).join(table_name) // Correct order
+    } else {
+      base_table_path.to_path_buf() // Default to the existing path
+    };
 
     // Ensure the directory exists
-    if !Path::new(table_path).exists() {
-      return Err(format!("Table path '{}' does not exist.", table_path).into());
+    if !final_table_path.exists() {
+      return Err(format!("Table path '{}' does not exist.", final_table_path.display()).into());
     }
 
-    // Collect all files in the table directory
+    // Collect all files in the chosen directory
     let mut file_list = Vec::new();
-    for entry in fs::read_dir(table_path)? {
+    for entry in fs::read_dir(final_table_path)? {
       let entry = entry?;
       let path = entry.path();
 
@@ -698,12 +722,14 @@ impl DatabaseManager {
     None
   }
 
-  pub async fn query(&self, db_name: &str, sql_query: &str, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
+  async fn execute_query(&self, username: Option<&str>, db_name: &str, sql_query: &str, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
     let session_context = SessionContext::new();
-    let table_name = &extract_table_name(sql_query);
+    let table_name = extract_table_name(sql_query);
+
     let files_list = self
-      .build_files_list(db_name, table_name)
+      .build_files_list(db_name, &table_name, username)
       .map_err(|e| DataFusionError::Execution(format!("Error building files list: {}", e)))?;
+
     if files_list.is_empty() {
       return Err(DataFusionError::Plan("No valid tables found to query".to_string()));
     }
@@ -711,13 +737,14 @@ impl DatabaseManager {
     let mut table_names = Vec::new();
     for (i, file_path) in files_list.iter().enumerate() {
       if Path::new(file_path).exists() {
-        let table_name = format!("{}_{}", table_name, i);
-        match session_context
-          .register_parquet(&table_name, file_path, ParquetReadOptions::default())
+        let temp_table_name = format!("{}_{}", table_name, i);
+        if let Err(e) = session_context
+          .register_parquet(&temp_table_name, file_path, ParquetReadOptions::default())
           .await
         {
-          Ok(_) => table_names.push(table_name),
-          Err(e) => eprintln!("Failed to register {}: {:?}", file_path, e),
+          eprintln!("Failed to register {}: {:?}", file_path, e);
+        } else {
+          table_names.push(temp_table_name);
         }
       }
     }
@@ -727,7 +754,6 @@ impl DatabaseManager {
     }
 
     let column_names = get_table_columns(&session_context, &table_names[0]).await?;
-    // Combine tables using UNION ALL with explicit column selection
     let combined_query = format!(
       "SELECT {} FROM ({}) AS combined_table",
       column_names,
@@ -738,16 +764,13 @@ impl DatabaseManager {
         .join(" UNION ALL ")
     );
 
-    // Execute the combined query
     let combined_df = session_context.sql(&combined_query).await?;
     let combined_results = combined_df.collect().await?;
-    // Create an in-memory table from the combined results
     let schema = combined_results[0].schema();
     let mem_table = MemTable::try_new(schema, vec![combined_results])?;
     session_context.register_table("combined_table", Arc::new(mem_table))?;
-    // Adjust the user-provided SQL query to run on the combined table
-    let adjusted_sql_query = sql_query.replace(table_name, "combined_table");
-    // Execute the user-provided SQL query on the combined table
+
+    let adjusted_sql_query = sql_query.replace(&table_name, "combined_table");
     let final_df = session_context.sql(&adjusted_sql_query).await?;
     let final_results = final_df.collect().await?;
 

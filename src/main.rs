@@ -1,7 +1,7 @@
 mod timon_engine;
 pub use timon_engine::{
-  cloud_sync_parquet, create_database, create_table, delete_database, delete_table, init_bucket, init_timon, insert, list_databases, list_tables,
-  query, query_bucket,
+  cloud_fetch_parquet, cloud_sink_parquet, create_database, create_table, delete_database, delete_table, init_bucket, init_timon, insert,
+  list_databases, list_tables, query, query_bucket, query_group,
 };
 #[cfg(feature = "dev_cli")]
 mod cli;
@@ -93,7 +93,7 @@ async fn test_local_storage() {
   let table_result = create_table(DATABASE_NAME, TABLE_NANE, &table_schema);
   println!("create_table -> {}", table_result.unwrap());
 
-  let databases_list = list_databases().unwrap();
+  let databases_list: serde_json::Value = list_databases().unwrap();
   let tables_list = list_tables(DATABASE_NAME).unwrap();
   println!("databases_list -> {:?}", databases_list);
   println!("tables_list -> {:?}", tables_list);
@@ -117,6 +117,10 @@ async fn test_local_storage() {
   let query_result = query(DATABASE_NAME, &sql_query).await;
   println!("query_result: {}", query_result.unwrap());
 
+  let sql_query = format!("SELECT * FROM {} ORDER BY date DESC LIMIT 25", TABLE_NANE);
+  let query_group_result = query_group("wRE3w2vJcZLaabPQs", DATABASE_NAME, &sql_query).await;
+  println!("query_group_result: {}", query_group_result.unwrap());
+
   // let delete_table_result = delete_table(DATABASE_NAME, "iot").unwrap();
   // println!("delete_table_result -> {}", delete_table_result);
   // let delete_database_result = delete_database(DATABASE_NAME).unwrap();
@@ -125,27 +129,30 @@ async fn test_local_storage() {
 
 #[allow(dead_code)]
 async fn test_s3_sync() {
+  const USERNAME: &str = "wRE3w2vJcZLaabPQs";
+  const DATABASE_NAME: &str = "zivaring";
+  const TABLE_NAME: &str = "activitydetails";
   init_timon("tmp/timon", 5).unwrap();
 
   let bucket_endpoint = "https://s3.us-west-2.amazonaws.com";
   let bucket_name = "zivaoneapp";
-  let access_key_id = "xxx";
-  let secret_access_key = "xxx";
+  let access_key_id = "xx";
+  let secret_access_key = "xx";
   let bucket_region = "us-west-2";
   let init_bucket_result = init_bucket(bucket_endpoint, bucket_name, access_key_id, secret_access_key, bucket_region).unwrap();
   println!("init_bucket_result: {}", init_bucket_result);
 
-  const USERNAME: &str = "wRE3w2vJcZLaabPQs";
-  const DATABASE_NAME: &str = "zivaring";
-  const TABLE_NAME: &str = "activitydetails";
+  let fetch_range = std::collections::HashMap::from([("start_date", "2025-01-10"), ("end_date", "2025-01-31")]);
+  let cloud_fetch_parquet_result = cloud_fetch_parquet(USERNAME, DATABASE_NAME, TABLE_NAME, fetch_range).await;
+  println!("{}", cloud_fetch_parquet_result.unwrap());
 
-  let cloud_sync_parquet_result = cloud_sync_parquet(USERNAME, DATABASE_NAME, TABLE_NAME).await;
-  println!("{}", cloud_sync_parquet_result.unwrap());
+  // let cloud_sink_parquet_result = cloud_sink_parquet(USERNAME, DATABASE_NAME, TABLE_NAME).await;
+  // println!("{}", cloud_sink_parquet_result.unwrap());
 
-  let range = std::collections::HashMap::from([("start_date", "2025-01-10"), ("end_date", "2025-01-30")]);
-  let sql_query = format!("SELECT * FROM {} ORDER BY date DESC LIMIT 25", TABLE_NAME);
-  let df_result = query_bucket(USERNAME, "zivaring", &sql_query, range).await.unwrap();
-  println!("query_bucket {:?}", df_result);
+  // let query_range = std::collections::HashMap::from([("start_date", "2025-01-10"), ("end_date", "2025-01-30")]);
+  // let sql_query = format!("SELECT * FROM {} ORDER BY date DESC LIMIT 25", TABLE_NAME);
+  // let df_result = query_bucket(USERNAME, "zivaring", &sql_query, query_range).await.unwrap();
+  // println!("query_bucket {:?}", df_result);
 }
 
 // This block is executed for local development testing(run async tests for local_storage and S3 cloud_sync).

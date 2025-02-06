@@ -11,13 +11,14 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 /* ******************************** Local File Storage ********************************
-* @ init_timon/new(storage_path)
+* @ init_timon/new(storage_path, bucket_interval)
 * @ create_database(db_name)
 * @ create_table(db_name, table_name)
 * @ list_databases() & list_tables(db_name)
 * @ delete_database(db_name) & delete_table(db_name, table_name)
 * @ insert(db_name, table_name, json_data)
-* @ query(db_name, date_range, sql_query)
+* @ query(db_name, sql_query)
+* @ query_group(username, db_name, sql_query)
  */
 #[derive(Serialize)]
 pub struct TimonResult {
@@ -244,10 +245,36 @@ pub async fn query(db_name: &str, sql_query: &str) -> Result<Value, String> {
   }
 }
 
+#[allow(dead_code)]
+pub async fn query_group(username: &str, db_name: &str, sql_query: &str) -> Result<Value, String> {
+  let database_manager = get_database_manager();
+  match database_manager.query_group(username, db_name, sql_query, true).await {
+    Ok(db_manager::DataFusionOutput::Json(data)) => {
+      let json_value = serde_json::to_value(&data).map_err(|e| e.to_string())?;
+      let result = TimonResult {
+        status: 200,
+        message: format!("query_group data with success from '{}' with '{}'", db_name, sql_query),
+        json_value: Some(json_value),
+      };
+      serde_json::to_value(&result).map_err(|e| e.to_string())
+    }
+    Ok(db_manager::DataFusionOutput::DataFrame(_df)) => Err("DataFrame output is not directly convertible to string".to_owned()),
+    Err(err) => {
+      let result = TimonResult {
+        status: 400,
+        message: err.to_string(),
+        json_value: None,
+      };
+      serde_json::to_value(&result).map_err(|e| e.to_string())
+    }
+  }
+}
+
 /* ******************************** S3 Compatible Storage ********************************
 * @ init_bucket(bucket_endpoint, bucket_name, access_key_id, secret_access_key)
 * @ query_bucket(bucket_name, date_range, sql_query)
-* @ cloud_sync_parquet(db_name, table_name)
+* @ cloud_sink_parquet(username, db_name, table_name)
+* @ cloud_fetch_parquet(username, db_name, table_name)
  */
 
 static CLOUD_STORAGE_MANAGER: OnceLock<CloudStorageManager> = OnceLock::new();
@@ -326,15 +353,40 @@ pub async fn query_bucket(username: &str, db_name: &str, sql_query: &str, date_r
   }
 }
 
-pub async fn cloud_sync_parquet(username: &str, db_name: &str, table_name: &str) -> Result<Value, String> {
+pub async fn cloud_sink_parquet(username: &str, db_name: &str, table_name: &str) -> Result<Value, String> {
   let cloud_storage_manager = get_cloud_storage_manager();
-  match cloud_storage_manager.cloud_sync_parquet(username, db_name, table_name).await {
+  match cloud_storage_manager.cloud_sink_parquet(username, db_name, table_name).await {
     Ok(_) => {
       let result = TimonResult {
         status: 200,
         message: format!(
           "successfully uploaded '{}.{}' table data to '{}' bucket",
           db_name, table_name, cloud_storage_manager.bucket_name
+        ),
+        json_value: None,
+      };
+      serde_json::to_value(&result).map_err(|e| e.to_string())
+    }
+    Err(err) => {
+      let result = TimonResult {
+        status: 400,
+        message: err.to_string(),
+        json_value: None,
+      };
+      serde_json::to_value(&result).map_err(|e| e.to_string())
+    }
+  }
+}
+
+pub async fn cloud_fetch_parquet(username: &str, db_name: &str, table_name: &str, date_range: HashMap<&str, &str>) -> Result<Value, String> {
+  let cloud_storage_manager = get_cloud_storage_manager();
+  match cloud_storage_manager.cloud_fetch_parquet(username, db_name, table_name, date_range).await {
+    Ok(_) => {
+      let result = TimonResult {
+        status: 200,
+        message: format!(
+          "successfully fetched user '{}' data from '{}.{}.{}'",
+          username, cloud_storage_manager.bucket_name, db_name, table_name
         ),
         json_value: None,
       };

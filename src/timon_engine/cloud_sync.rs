@@ -12,6 +12,7 @@ use object_store::{ClientOptions, ObjectMeta, ObjectStore};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::{collections::HashMap, sync::Arc};
 use tokio::io::AsyncReadExt;
@@ -29,7 +30,6 @@ struct Metadata {
 }
 
 impl CloudStorageManager {
-  #[allow(dead_code)]
   pub fn new(
     db_manager: DatabaseManager,
     bucket_endpoint: Option<&str>,
@@ -68,7 +68,6 @@ impl CloudStorageManager {
     }
   }
 
-  #[allow(dead_code)]
   pub async fn query_bucket(
     &self,
     username: &str,
@@ -171,49 +170,8 @@ impl CloudStorageManager {
     }
   }
 
-  async fn generate_s3_paths(
-    &self,
-    username: &str,
-    db_name: &str,
-    table_name: &str,
-    date_range: HashMap<&str, &str>,
-  ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    // Construct the prefix (path) to list files from
-    let prefix_path = StorePath::from(format!("{}/{}/{}", username, db_name, table_name));
-    // List all objects under the prefix
-    let objects = self.s3_store.list(Some(&prefix_path));
-    // Collect the stream of ObjectMeta into a Vec<ObjectMeta>
-    let object_metas: Vec<ObjectMeta> = objects
-      .map(|result| result.map_err(|e| Box::new(e) as Box<dyn std::error::Error>))
-      .try_collect()
-      .await?;
-
-    // Extract file paths from the collected ObjectMeta
-    let files: Vec<String> = object_metas.into_iter().map(|object_meta| object_meta.location.to_string()).collect();
-    // Filter files by date range
-    let start_date = date_range.get("start_date").unwrap();
-    let end_date = date_range.get("end_date").unwrap();
-    let filtered_files = filter_files_by_date_range(files, start_date, end_date)?;
-
-    Ok(filtered_files)
-  }
-
-  async fn upload_to_bucket(&self, source_path: &str, target_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let s3_store = &self.s3_store;
-    let object_store = Arc::new(s3_store);
-
-    // Prepare the file for upload
-    let mut file = tokio::fs::File::open(source_path).await?;
-    let mut data = Vec::new();
-    file.read_to_end(&mut data).await?;
-    object_store.put(&StorePath::from(target_path), data.into()).await?;
-
-    Ok(())
-  }
-
-  #[allow(dead_code)]
-  pub async fn cloud_sync_parquet(&self, username: &str, db_name: &str, table_name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let files = self.db_manager.build_files_list(db_name, table_name)?;
+  pub async fn cloud_sink_parquet(&self, username: &str, db_name: &str, table_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let files = self.db_manager.build_files_list(db_name, table_name, None)?;
     if files.is_empty() {
       return Err(format!("No data files found for Table '{}' in Database '{}'.", table_name, db_name).into());
     }
@@ -254,6 +212,122 @@ impl CloudStorageManager {
         }
       }
     }
+
+    Ok(())
+  }
+
+  pub async fn cloud_fetch_parquet(
+    &self,
+    username: &str,
+    db_name: &str,
+    table_name: &str,
+    date_range: HashMap<&str, &str>,
+  ) -> Result<(), Box<dyn std::error::Error>> {
+    let prefix_path = format!("{}/{}/{}", username, db_name, table_name);
+    let cloud_files = &self.list_cloud_files(&prefix_path).await?;
+    let start_date = date_range.get("start_date").ok_or("Missing start_date")?;
+    let end_date = date_range.get("end_date").ok_or("Missing end_date")?;
+    let filtered_cloud_files = filter_files_by_date_range(cloud_files.to_vec(), start_date, end_date)?;
+
+    for cloud_file in filtered_cloud_files {
+      if let Some(filename) = Path::new(&cloud_file).file_name().and_then(|n| n.to_str()) {
+        let local_path = format!(
+          "{}/group/{}/{}/{}/{}",
+          &self.db_manager.storage_path, username, db_name, table_name, filename
+        );
+        self.fetch_from_bucket(&cloud_file, &local_path).await?;
+      }
+    }
+    Ok(())
+  }
+
+  async fn generate_s3_paths(
+    &self,
+    username: &str,
+    db_name: &str,
+    table_name: &str,
+    date_range: HashMap<&str, &str>,
+  ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    // Construct the prefix (path) to list files from
+    let prefix_path = format!("{}/{}/{}", username, db_name, table_name);
+
+    // Extract file paths from the collected ObjectMeta
+    let files: Vec<String> = self.list_cloud_files(&prefix_path).await?;
+    // object_metas.into_iter().map(|object_meta| object_meta.location.to_string()).collect(); // Filter files by date range
+    let start_date = date_range.get("start_date").ok_or("Missing start_date")?;
+    let end_date = date_range.get("end_date").ok_or("Missing end_date")?;
+    let filtered_files = filter_files_by_date_range(files, start_date, end_date)?;
+
+    Ok(filtered_files)
+  }
+
+  async fn list_cloud_files(&self, prefix_path: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    // List all objects under the prefix
+    let objects = self.s3_store.list(Some(&StorePath::from(prefix_path)));
+    // Collect the stream of ObjectMeta into a Vec<ObjectMeta>
+    let object_metas: Vec<ObjectMeta> = objects
+      .map(|result| result.map_err(|e| Box::new(e) as Box<dyn std::error::Error>))
+      .try_collect()
+      .await?;
+    // Extract file paths from the collected ObjectMeta
+    let files: Vec<String> = object_metas.into_iter().map(|object_meta| object_meta.location.to_string()).collect();
+    Ok(files)
+  }
+
+  async fn upload_to_bucket(&self, source_path: &str, target_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let s3_store = &self.s3_store;
+    let object_store = Arc::new(s3_store);
+
+    // Prepare the file for upload
+    let mut file = tokio::fs::File::open(source_path).await?;
+    let mut data = Vec::new();
+    file.read_to_end(&mut data).await?;
+    object_store.put(&StorePath::from(target_path), data.into()).await?;
+
+    Ok(())
+  }
+
+  async fn fetch_from_bucket(&self, target_path: &str, local_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let object_store = &self.s3_store;
+    let path = StorePath::from(target_path);
+
+    // Ensure the parent directory exists
+    if let Some(parent) = std::path::Path::new(local_path).parent() {
+      fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory '{}': {}", parent.display(), e))?;
+    }
+
+    // Stream the bytes from object storage
+    let mut stream = match object_store.get(&path).await {
+      Ok(s) => s.into_stream(),
+      Err(e) => {
+        if e.to_string().contains("NotFound") {
+          eprintln!("Warning: File '{}' not found in S3, skipping fetch.", target_path);
+          return Ok(()); // Skip processing
+        }
+        return Err(format!("Failed to stream object '{}': {}", target_path, e).into());
+      }
+    };
+
+    // Create a local file to write the Parquet data
+    let file = fs::File::create(local_path).map_err(|e| format!("Failed to create local file '{}': {}", local_path, e))?;
+    let mut writer = BufWriter::new(file);
+    let mut total_bytes_written = 0;
+
+    // Process the stream and write chunks directly to the file
+    while let Some(chunk) = stream.next().await {
+      let bytes = chunk.map_err(|e| format!("Error reading stream for '{}': {}", target_path, e))?;
+      writer
+        .write_all(&bytes)
+        .map_err(|e| format!("Failed to write to file '{}': {}", local_path, e))?;
+      total_bytes_written += bytes.len();
+    }
+
+    writer.flush().map_err(|e| format!("Failed to flush file '{}': {}", local_path, e))?;
+
+    println!(
+      "Successfully downloaded '{}' from S3 to '{}' ({} bytes)",
+      target_path, local_path, total_bytes_written
+    );
 
     Ok(())
   }
