@@ -1,7 +1,8 @@
 use super::helpers::{
-  extract_hourly_date, extract_monthly_date, extract_table_name, get_table_columns, get_unique_fields, json_to_arrow, record_batches_to_json,
+  extract_hourly_date, extract_monthly_date, extract_table_name, get_property_fields, get_table_columns, json_to_arrow, record_batches_to_json,
   rounded_timestamp, row_to_json,
 };
+use chrono::{DateTime, NaiveDateTime, Utc};
 use datafusion::arrow::array::Array;
 use datafusion::arrow::datatypes::Schema;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -13,7 +14,7 @@ use datafusion::parquet::file::properties::WriterProperties;
 use datafusion::parquet::file::reader::{FileReader, SerializedFileReader};
 use datafusion::prelude::*;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
 use std::path::Path;
@@ -290,7 +291,7 @@ impl DatabaseManager {
     // Reload metadata
     self.metadata = self.read_metadata()?;
 
-    let new_json_values: Vec<Value> = serde_json::from_str(json_data)?;
+    let mut new_json_values: Vec<Value> = serde_json::from_str(json_data)?;
 
     // Validate database & table existence
     let table_path = self
@@ -298,11 +299,33 @@ impl DatabaseManager {
       .ok_or_else(|| format!("Database '{}' or Table '{}' does not exist.", db_name, table_name))?;
 
     let table_schema = self.get_table_schema(db_name, table_name)?;
+
+    let datetime_fields = get_property_fields(table_schema.clone(), "datetime")?;
+    // Convert datetime fields
+    for json_value in &mut new_json_values {
+      for field in &datetime_fields {
+        if let Some(Value::String(date_str)) = json_value.get(field) {
+          // Try parsing using the correct format
+          let parsed_date =
+            NaiveDateTime::parse_from_str(date_str, "%Y.%m.%d %H:%M:%S").map(|dt| DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
+          match parsed_date {
+            Ok(parsed_date) => {
+              let iso_datetime = parsed_date.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+              json_value[field] = json!(iso_datetime); // Store in JSON value
+            }
+            Err(e) => {
+              println!("Failed to parse datetime for field: {}. Error: {}", field, e);
+            }
+          }
+        }
+      }
+    }
+
     for json_value in &new_json_values {
       self.validate_data_against_schema(&table_schema, json_value)?;
     }
 
-    let unique_fields = get_unique_fields(table_schema.clone())?;
+    let unique_fields = get_property_fields(table_schema.clone(), "unique")?;
     let build_key = |record: &Value| -> String {
       unique_fields
         .iter()
@@ -389,7 +412,7 @@ impl DatabaseManager {
       }
     }
 
-    //  perform **batch writes** after collecting all updates
+    // Perform **batch writes** after collecting all updates
     for (file, records) in file_updates {
       let (arrays, schema) = json_to_arrow(&records)?;
       Self::parquet_file_writer(Path::new(&file), schema, arrays)?;
@@ -402,7 +425,7 @@ impl DatabaseManager {
       Self::parquet_file_writer(latest_file, final_schema, final_arrays)?;
     }
 
-    Ok(latest_file_path)
+    Ok(format!("Data was successfully written to '{}'", latest_file_path))
   }
 
   pub async fn query(&self, db_name: &str, sql_query: &str, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {

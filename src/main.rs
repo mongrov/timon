@@ -62,7 +62,7 @@ async fn test_local_storage() {
   println!("init_timon -> {}", timon_result);
 
   const DATABASE_NAME: &str = "zivaring";
-  const TABLE_NANE: &str = "activitydetails";
+  const TABLE_NAME: &str = "activitydetails";
   let database_result = create_database(DATABASE_NAME);
   println!("create_database -> {}", database_result.unwrap());
 
@@ -71,7 +71,8 @@ async fn test_local_storage() {
       "date": {
         "type": "string",
         "required": true,
-        "unique": true
+        "unique": true,
+        "datetime": true
       },
       "distance": {
         "type": "int|float"
@@ -90,7 +91,7 @@ async fn test_local_storage() {
       }
     }
   "#;
-  let table_result = create_table(DATABASE_NAME, TABLE_NANE, &table_schema);
+  let table_result = create_table(DATABASE_NAME, TABLE_NAME, &table_schema);
   println!("create_table -> {}", table_result.unwrap());
 
   let databases_list: serde_json::Value = list_databases().unwrap();
@@ -103,21 +104,21 @@ async fn test_local_storage() {
       {"arraySteps":[43,39,0,0,0,0,0,0,0,0],"calories":2.56,"date":"2025.01.01 08:32:45","distance":0.05,"step":82},
       {"arraySteps":[20,0,0,0,0,0,0,0,0,0],"calories":0.61,"date":"2025.01.01 09:24:19","distance":0.01,"step":20},
       {"arraySteps":[19,0,0,0,0,0,0,0,0,0],"calories":0.65,"date":"2025.01.01 10:13:45","distance":0.01,"step":19},
-      {"arraySteps":[54,33,2,0,0,0,0,0,0,0],"calories":2.83,"date":"2025.01.01 10:29:56","distance":0.06,"step":89},
-      {"arraySteps":[38,0,0,15,0,0,0,0,0,0],"calories":1.53,"date":"2025.01.01 11:58:16","distance":0.03,"step":53},
-      {"arraySteps":[50,16,0,55,23,0,0,18,46,0],"calories":6.19,"date":"2025.01.01 12:15:38","distance":0.14,"step":208},
-      {"arraySteps":[18,0,0,20,0,0,0,0,0,0],"calories":1.05,"date":"2025.01.01 13:16:51","distance":0.01,"step":38}
+      {"arraySteps":[54,33,2,0,0,0,0,0,0,0],"calories":2.83,"date":"2025.01.02 10:29:56","distance":0.06,"step":89},
+      {"arraySteps":[38,0,0,15,0,0,0,0,0,0],"calories":1.53,"date":"2025.01.02 11:58:16","distance":0.03,"step":53},
+      {"arraySteps":[50,16,0,55,23,0,0,18,46,0],"calories":6.19,"date":"2025.03.01 12:15:38","distance":0.14,"step":208},
+      {"arraySteps":[18,0,0,20,0,0,0,0,0,0],"calories":1.05,"date":"2025.01.04 13:16:51","distance":0.01,"step":38}
     ]
   "#
   .to_string();
-  let insertion_result = insert(DATABASE_NAME, TABLE_NANE, &json_data);
+  let insertion_result = insert(DATABASE_NAME, TABLE_NAME, &json_data);
   println!("insertion_result: {}", insertion_result.unwrap());
 
-  let sql_query = format!("SELECT * FROM {} ORDER BY date DESC LIMIT 25", TABLE_NANE);
+  let sql_query = format!(r#"SELECT CAST(date AS TIMESTAMP) AS parsed_date FROM activitydetails ORDER BY date DESC LIMIT 25"#,);
   let query_result = query(DATABASE_NAME, &sql_query).await;
   println!("query_result: {}", query_result.unwrap());
 
-  let sql_query = format!("SELECT * FROM {} ORDER BY date DESC LIMIT 25", TABLE_NANE);
+  let sql_query = format!("SELECT * FROM {} ORDER BY date DESC LIMIT 25", TABLE_NAME);
   let query_group_result = query_group("wRE3w2vJcZLaabPQs", DATABASE_NAME, &sql_query).await;
   println!("query_group_result: {}", query_group_result.unwrap());
 

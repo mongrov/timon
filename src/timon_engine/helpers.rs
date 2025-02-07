@@ -1,8 +1,8 @@
 use base64::{engine::general_purpose, Engine as _};
-use chrono::{NaiveDate, Timelike, Utc};
+use chrono::{Days, NaiveDate, Timelike, Utc};
 use datafusion::arrow::array::{
-  Array, ArrayRef, BooleanArray, BooleanBuilder, Float64Array, Float64Builder, Int64Array, Int64Builder, ListArray, ListBuilder, StringArray,
-  StringBuilder, StringViewArray, TimestampMillisecondArray,
+  Array, ArrayRef, BooleanArray, BooleanBuilder, Date32Array, Float64Array, Float64Builder, Int64Array, Int64Builder, ListArray, ListBuilder,
+  StringArray, StringBuilder, StringViewArray, TimestampMillisecondArray, TimestampNanosecondArray,
 };
 use datafusion::arrow::datatypes::{DataType, Field as ArrowField, Schema, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -42,6 +42,18 @@ pub fn record_batches_to_json(batches: &[RecordBatch]) -> Result<Value, serde_js
       }
       DataType::Boolean => json!(array.as_any().downcast_ref::<BooleanArray>().unwrap().value(row_index)),
       DataType::Timestamp(TimeUnit::Millisecond, None) => json!(array.as_any().downcast_ref::<TimestampMillisecondArray>().unwrap().value(row_index)),
+      DataType::Timestamp(TimeUnit::Nanosecond, None) => {
+        json!(array.as_any().downcast_ref::<TimestampNanosecondArray>().unwrap().value(row_index) / 1_000_000)
+      }
+      DataType::Date32 => {
+        let base_date = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+        array
+          .as_any()
+          .downcast_ref::<Date32Array>()
+          .map(|date_array| date_array.value(row_index))
+          .and_then(|days_since_epoch| base_date.checked_add_days(Days::new(days_since_epoch as u64)))
+          .map_or(json!(null), |naive_date| json!(naive_date))
+      }
       DataType::List(_inner_field) => {
         let list_array = array.as_any().downcast_ref::<ListArray>().unwrap();
         let offsets = list_array.value_offsets();
@@ -408,20 +420,18 @@ pub fn extract_monthly_date(filename: &str) -> Option<String> {
   None
 }
 
-pub fn get_unique_fields(schema: Value) -> Result<Vec<String>, Box<dyn Error>> {
-  let mut unique_fields = Vec::new();
-
+pub fn get_property_fields(schema: Value, property: &str) -> Result<Vec<String>, Box<dyn Error>> {
+  let mut fields = Vec::new();
   if let Some(properties) = schema.as_object() {
     for (field_name, field_properties) in properties {
-      if let Some(unique) = field_properties.get("unique") {
-        if unique.as_bool() == Some(true) {
-          unique_fields.push(field_name.clone());
+      if let Some(prop_value) = field_properties.get(property) {
+        if prop_value.as_bool() == Some(true) {
+          fields.push(field_name.clone());
         }
       }
     }
   }
-
-  Ok(unique_fields)
+  Ok(fields)
 }
 
 pub async fn get_table_columns(session_context: &SessionContext, table_name: &str) -> DataFusionResult<String> {
