@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose, Engine as _};
-use chrono::{Days, NaiveDate, Timelike, Utc};
+use chrono::{DateTime, Days, Local, NaiveDate, Timelike, Utc};
 use datafusion::arrow::array::{
   Array, ArrayRef, BooleanArray, BooleanBuilder, Date32Array, Float64Array, Float64Builder, Int32Array, Int64Array, Int64Builder, ListArray,
   ListBuilder, StringArray, StringBuilder, StringViewArray, TimestampMillisecondArray, TimestampNanosecondArray,
@@ -44,7 +44,16 @@ pub fn record_batches_to_json(batches: &[RecordBatch]) -> Result<Value, serde_js
       DataType::Boolean => json!(array.as_any().downcast_ref::<BooleanArray>().unwrap().value(row_index)),
       DataType::Timestamp(TimeUnit::Millisecond, None) => json!(array.as_any().downcast_ref::<TimestampMillisecondArray>().unwrap().value(row_index)),
       DataType::Timestamp(TimeUnit::Nanosecond, None) => {
-        json!(array.as_any().downcast_ref::<TimestampNanosecondArray>().unwrap().value(row_index) / 1_000_000)
+        let timestamp_ns = array.as_any().downcast_ref::<TimestampNanosecondArray>().unwrap().value(row_index);
+        // Convert nanoseconds to seconds and nanoseconds part
+        let naive_datetime = DateTime::from_timestamp(
+          timestamp_ns / 1_000_000_000,          // Seconds
+          (timestamp_ns % 1_000_000_000) as u32, // Nanoseconds
+        )
+        .unwrap();
+        let local_time = naive_datetime.with_timezone(&Local);
+        // Format as ISO 8601 datetime string
+        json!(local_time.format("%Y-%m-%d %H:%M:%S").to_string())
       }
       DataType::Date32 => {
         let base_date = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
