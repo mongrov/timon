@@ -1,8 +1,8 @@
 use base64::{engine::general_purpose, Engine as _};
 use chrono::{Days, NaiveDate, Timelike, Utc};
 use datafusion::arrow::array::{
-  Array, ArrayRef, BooleanArray, BooleanBuilder, Date32Array, Float64Array, Float64Builder, Int64Array, Int64Builder, ListArray, ListBuilder,
-  StringArray, StringBuilder, StringViewArray, TimestampMillisecondArray, TimestampNanosecondArray,
+  Array, ArrayRef, BooleanArray, BooleanBuilder, Date32Array, Float64Array, Float64Builder, Int32Array, Int64Array, Int64Builder, ListArray,
+  ListBuilder, StringArray, StringBuilder, StringViewArray, TimestampMillisecondArray, TimestampNanosecondArray,
 };
 use datafusion::arrow::datatypes::{DataType, Field as ArrowField, Schema, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -20,6 +20,7 @@ pub fn record_batches_to_json(batches: &[RecordBatch]) -> Result<Value, serde_js
   fn array_value_to_json(array: &ArrayRef, row_index: usize) -> serde_json::Value {
     match array.data_type() {
       DataType::Int64 => json!(array.as_any().downcast_ref::<Int64Array>().unwrap().value(row_index)),
+      DataType::Int32 => json!(array.as_any().downcast_ref::<Int32Array>().unwrap().value(row_index)),
       DataType::Float64 => json!(array.as_any().downcast_ref::<Float64Array>().unwrap().value(row_index)),
       DataType::Utf8 => json!(array.as_any().downcast_ref::<StringArray>().unwrap().value(row_index)),
       DataType::Utf8View => {
@@ -87,7 +88,10 @@ pub fn record_batches_to_json(batches: &[RecordBatch]) -> Result<Value, serde_js
         let values = extract_list_values(values_array.as_ref(), start_idx, end_idx);
         json!(values)
       }
-      _ => json!(null),
+      datatype => {
+        println!("Warning: unsupported Datatype {}", datatype);
+        json!(null)
+      }
     }
   }
 
@@ -344,10 +348,18 @@ pub fn json_to_arrow(json_values: &[Value]) -> Result<(Vec<ArrayRef>, Schema), B
 }
 
 pub fn extract_table_name(sql_query: &str) -> String {
-  Regex::new(r##"(?:FROM|JOIN)\s+[`\"]?(\w+)[`\"]?"##)
+  Regex::new(r#"(?i)(?:FROM|JOIN)\s+[`\"]?(\w+)['\"]?\s*(?:,|\b)"#)
     .unwrap()
     .captures_iter(sql_query)
-    .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
+    .filter_map(|cap| {
+      let table_name = cap.get(1)?.as_str();
+      // Exclude function-like entries (e.g., to_local_time) by checking if followed by '('
+      if sql_query.contains(&format!("{table_name}(")) {
+        None
+      } else {
+        Some(table_name.to_string())
+      }
+    })
     .nth(0)
     .unwrap_or_else(|| {
       eprintln!("No table name found in the SQL query.");
