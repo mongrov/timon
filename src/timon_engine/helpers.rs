@@ -210,7 +210,10 @@ pub fn json_to_arrow(json_values: &[Value]) -> Result<(Vec<ArrayRef>, Schema), B
             DataType::List(Box::new(ArrowField::new("item", DataType::Null, true)).into())
           }
         }
-        _ => DataType::Null,
+        datatype => {
+          println!("json_to_arrow: unsupported datatype {}", datatype);
+          DataType::Null
+        }
       };
 
       // Resolve potential conflicts by promoting types

@@ -2,7 +2,7 @@ use super::helpers::{
   extract_hourly_date, extract_monthly_date, extract_table_name, get_property_fields, get_table_columns, json_to_arrow, record_batches_to_json,
   rounded_timestamp, row_to_json,
 };
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{NaiveDateTime, TimeZone, Utc};
 use datafusion::arrow::array::Array;
 use datafusion::arrow::datatypes::Schema;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -305,13 +305,11 @@ impl DatabaseManager {
     for json_value in &mut new_json_values {
       for field in &datetime_fields {
         if let Some(Value::String(date_str)) = json_value.get(field) {
-          // Try parsing using the correct format
-          let parsed_date =
-            NaiveDateTime::parse_from_str(date_str, "%Y.%m.%d %H:%M:%S").map(|dt| DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
-          match parsed_date {
-            Ok(parsed_date) => {
-              let iso_datetime = parsed_date.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-              json_value[field] = json!(iso_datetime); // Store in JSON value
+          match NaiveDateTime::parse_from_str(date_str, "%Y.%m.%d %H:%M:%S") {
+            Ok(naive_dt) => {
+              let utc_dt = Utc.from_utc_datetime(&naive_dt);
+              let timestamp = utc_dt.timestamp();
+              json_value[field] = json!(timestamp);
             }
             Err(e) => {
               println!("Failed to parse datetime for field: {}. Error: {}", field, e);
