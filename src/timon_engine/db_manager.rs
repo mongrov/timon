@@ -1,6 +1,6 @@
 use super::helpers::{
-  extract_hourly_date, extract_monthly_date, extract_table_name, get_property_fields, get_table_columns, json_to_arrow, record_batches_to_json,
-  rounded_timestamp, row_to_json,
+  extract_hourly_date, extract_monthly_date, extract_table_name, extract_timestamp_from_filename, get_property_fields, get_table_columns,
+  json_to_arrow, precompute_file_timestamps, record_batches_to_json, rounded_timestamp, row_to_json,
 };
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use datafusion::arrow::array::Array;
@@ -15,8 +15,9 @@ use datafusion::parquet::file::reader::{FileReader, SerializedFileReader};
 use datafusion::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
+use std::ops::Index;
 use std::path::Path;
 use std::sync::Arc;
 use std::{fmt, fs};
@@ -292,38 +293,15 @@ impl DatabaseManager {
     self.metadata = self.read_metadata()?;
 
     let mut new_json_values: Vec<Value> = serde_json::from_str(json_data)?;
-
-    // Validate database & table existence
     let table_path = self
       .get_table_path(db_name, table_name)
       .ok_or_else(|| format!("Database '{}' or Table '{}' does not exist.", db_name, table_name))?;
-
     let table_schema = self.get_table_schema(db_name, table_name)?;
 
-    let datetime_fields = get_property_fields(table_schema.clone(), "datetime")?;
-    // Convert datetime fields
-    for json_value in &mut new_json_values {
-      for field in &datetime_fields {
-        if let Some(Value::String(date_str)) = json_value.get(field) {
-          match NaiveDateTime::parse_from_str(date_str, "%Y.%m.%d %H:%M:%S") {
-            Ok(naive_dt) => {
-              let utc_dt = Utc.from_utc_datetime(&naive_dt);
-              let timestamp = utc_dt.timestamp();
-              json_value[field] = json!(timestamp);
-            }
-            Err(e) => {
-              println!("Failed to parse datetime for field: {}. Error: {}", field, e);
-            }
-          }
-        }
-      }
-    }
-
-    for json_value in &new_json_values {
-      self.validate_data_against_schema(&table_schema, json_value)?;
-    }
-
+    let datetime_binding = get_property_fields(table_schema.clone(), "datetime")?;
+    let datetime_field = datetime_binding.index(0);
     let unique_fields = get_property_fields(table_schema.clone(), "unique")?;
+
     let build_key = |record: &Value| -> String {
       unique_fields
         .iter()
@@ -332,98 +310,83 @@ impl DatabaseManager {
         .join("-")
     };
 
-    // Track records per file
-    let mut file_records: BTreeMap<String, Vec<Value>> = BTreeMap::new();
-    let mut seen: BTreeMap<String, Value> = BTreeMap::new();
-    let mut file_for_key: BTreeMap<String, String> = BTreeMap::new();
-
-    // Get all existing files
-    let file_list = self.build_files_list(db_name, table_name, None)?;
-    let current_date = rounded_timestamp(self.bucket_interval);
-    let latest_file_path = format!("{}/{}_{}.parquet", table_path, table_name, current_date);
-    let last_three_files: Vec<String> = file_list
-      .iter()
-      .filter(|file| *file != &latest_file_path) // Exclude latest file path
-      .rev()
-      .take(3)
-      .cloned()
-      .collect();
-
-    // Read existing files and track records
-    for file in last_three_files {
-      let records = self.read_parquet_file(&file)?;
-      for record in &records {
-        let key = build_key(record);
-        if !file_for_key.contains_key(&key) {
-          seen.insert(key.clone(), record.clone());
-          file_for_key.insert(key, file.clone());
+    // Convert datetime fields to timestamps
+    new_json_values.iter_mut().for_each(|json_value| {
+      if let Some(Value::String(date_str)) = json_value.get(datetime_field) {
+        if let Ok(naive_dt) = NaiveDateTime::parse_from_str(date_str, "%Y.%m.%d %H:%M:%S") {
+          json_value[datetime_field] = json!(Utc.from_utc_datetime(&naive_dt).timestamp());
         }
       }
-      file_records.insert(file.clone(), records);
+    });
+
+    for json_value in &new_json_values {
+      self.validate_data_against_schema(&table_schema, json_value)?;
     }
 
-    let mut updated_files: HashSet<String> = HashSet::new();
-    let new_records: Vec<Value> = Vec::new();
+    let file_list = self.build_files_list(db_name, table_name, None)?;
+    let file_timestamps = precompute_file_timestamps(&file_list);
+    let latest_file_path = format!("{}/{}_{}.parquet", table_path, table_name, rounded_timestamp(self.bucket_interval));
+    let current_window_start_ts = extract_timestamp_from_filename(&latest_file_path).unwrap_or(0);
+    let min_window_ts = current_window_start_ts.sub(3600 * 6); // past 6H window
+    let current_window_end_ts = current_window_start_ts.add(self.bucket_interval * 60);
 
-    // Determine latest file path
-    let latest_file = Path::new(&latest_file_path);
-    let mut latest_file_records: Vec<Value> = if latest_file.exists() {
-      self.read_parquet_file(latest_file.to_str().unwrap())?
-    } else {
-      Vec::new()
-    };
+    // Filter and process new records
+    new_json_values.retain(|record| {
+      let record_timestamp: i64 = record.get(datetime_field).and_then(|t| t.as_i64()).unwrap_or(0);
+      record_timestamp >= min_window_ts.into() && record_timestamp <= current_window_end_ts.into()
+    });
 
-    let mut latest_keys: HashMap<String, usize> = latest_file_records
-      .iter()
-      .enumerate()
-      .map(|(idx, record)| (build_key(record), idx))
-      .collect();
+    // Load existing records into HashMap for O(1) lookup
+    let mut file_records: HashMap<String, Vec<Value>> = HashMap::new();
+    let mut record_index: HashMap<String, (String, usize)> = HashMap::new(); // key -> (file_path, record_index)
 
-    // Process new records
-    for new_record in new_json_values {
+    for file in &file_list {
+      if let Ok(existing_records) = self.read_parquet_file(file) {
+        for (index, record) in existing_records.iter().enumerate() {
+          let key = build_key(record);
+          record_index.insert(key, (file.clone(), index));
+        }
+        file_records.insert(file.clone(), existing_records);
+      }
+    }
+
+    let mut updated_files = HashSet::new();
+
+    // Process new records efficiently
+    let mut new_records_by_file: HashMap<String, Vec<Value>> = HashMap::new();
+
+    for new_record in new_json_values.into_iter() {
       let key = build_key(&new_record);
-      if let Some(existing_file) = file_for_key.get(&key) {
-        // Update the record in its respective file
-        seen.insert(key.clone(), new_record.clone());
-        updated_files.insert(existing_file.clone());
-      } else if let Some(index) = latest_keys.get(&key) {
-        // If found in the latest file, update it there
-        latest_file_records[*index] = new_record.clone();
+      let timestamp = new_record.get(datetime_field).and_then(|t| t.as_i64()).unwrap_or(0);
+
+      if let Some((file, index)) = record_index.get(&key) {
+        // Update existing record in-place
+        if let Some(records) = file_records.get_mut(file) {
+          records[*index] = new_record;
+          updated_files.insert(file.clone());
+        }
       } else {
-        // New unique record, add to the latest file **first** then store index
-        let index = latest_file_records.len();
-        latest_file_records.push(new_record.clone());
-        latest_keys.insert(key, index);
+        // Determine correct file for insertion
+        let target_file = self
+          .find_correct_file(&file_timestamps, timestamp.try_into().unwrap())
+          .unwrap_or_else(|| latest_file_path.clone());
+        new_records_by_file.entry(target_file.clone()).or_insert_with(Vec::new).push(new_record);
+        updated_files.insert(target_file);
       }
     }
 
-    // Rewrite modified files
-    let mut file_updates: BTreeMap<String, Vec<Value>> = BTreeMap::new();
-    for file in updated_files {
-      if let Some(records) = file_records.get(&file) {
-        let updated_records: Vec<Value> = records
-          .iter()
-          .map(|record| seen.get(&build_key(record)).cloned().unwrap_or_else(|| record.clone()))
-          .collect();
-
-        file_updates.insert(file.clone(), updated_records);
-      }
+    // Append new records to the correct files
+    for (file, new_records) in new_records_by_file {
+      file_records.entry(file.clone()).or_insert_with(Vec::new).extend(new_records);
     }
 
-    // Perform **batch writes** after collecting all updates
-    for (file, records) in file_updates {
+    // Write updated files
+    for (file, records) in file_records {
       let (arrays, schema) = json_to_arrow(&records)?;
       Self::parquet_file_writer(Path::new(&file), schema, arrays)?;
     }
 
-    // Rewrite latest file (only if there are updates)
-    if !latest_keys.is_empty() || !new_records.is_empty() {
-      latest_file_records.extend(new_records);
-      let (final_arrays, final_schema) = json_to_arrow(&latest_file_records)?;
-      Self::parquet_file_writer(latest_file, final_schema, final_arrays)?;
-    }
-
-    Ok(format!("Data was successfully written to '{}'", latest_file_path))
+    Ok(format!("Data successfully written to {}", latest_file_path))
   }
 
   pub async fn query(&self, db_name: &str, sql_query: &str, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
@@ -432,6 +395,13 @@ impl DatabaseManager {
 
   pub async fn query_group(&self, username: &str, db_name: &str, sql_query: &str, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
     self.execute_query(Some(username), db_name, sql_query, is_json_format).await
+  }
+
+  fn find_correct_file(&self, file_timestamps: &HashMap<String, u32>, record_timestamp: u32) -> Option<String> {
+    file_timestamps
+      .iter()
+      .find(|(_, &file_time)| file_time <= record_timestamp && file_time + self.bucket_interval > record_timestamp)
+      .map(|(file_path, _)| file_path.clone())
   }
 
   fn parquet_file_writer(path: &Path, schema: Schema, array: Vec<Arc<dyn Array>>) -> Result<String, Box<dyn Error>> {

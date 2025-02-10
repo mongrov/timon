@@ -1,4 +1,7 @@
 mod timon_engine;
+use chrono::{Duration, Local};
+use serde_json::json;
+use std::time::Instant;
 pub use timon_engine::{
   cloud_fetch_parquet, cloud_sink_parquet, create_database, create_table, delete_database, delete_table, init_bucket, init_timon, insert,
   list_databases, list_tables, query, query_bucket, query_group,
@@ -69,7 +72,7 @@ async fn test_local_storage() {
   let table_schema = r#"
     {
       "date": {
-        "type": "string",
+        "type": "int",
         "required": true,
         "unique": true,
         "datetime": true
@@ -99,24 +102,64 @@ async fn test_local_storage() {
   println!("databases_list -> {:?}", databases_list);
   println!("tables_list -> {:?}", tables_list);
 
+  struct DataPoint {
+    date: String,
+    array_steps: Vec<i32>,
+    calories: i32,
+    distance: f64,
+    step: i32,
+  }
+
+  fn generate_data(n: usize) -> String {
+    let start_time = Local::now().naive_local() - Duration::hours(6); // Set start time to now - 6hours
+    let mut data = Vec::new();
+    let mut time_counter = 0;
+    for i in 0..n {
+      time_counter += 100;
+      let date = start_time + Duration::milliseconds(time_counter);
+      let array_steps: Vec<i32> = (0..10).map(|x| (i as i32 + x) % 50).collect();
+      let calories = (i % 50) + 1;
+      let distance = (i as f64 * 0.01) % 5.0;
+      let step = array_steps.iter().sum::<i32>();
+      data.push(json!({
+          "date": date.format("%Y.%m.%d %H:%M:%S").to_string(),
+          "arraySteps": array_steps,
+          "calories": calories,
+          "distance": distance,
+          "step": step
+      }));
+    }
+    serde_json::to_string_pretty(&data).unwrap()
+  }
+
+  // let json_data = generate_data(1_000_000);
   let json_data: String = r#"
     [
-      {"arraySteps":[43,39,0,0,0,0,0,0,0,0],"calories":2.56,"date":"2025.01.01 08:32:45","distance":0.05,"step":82},
-      {"arraySteps":[20,0,0,0,0,0,0,0,0,0],"calories":0.61,"date":"2025.01.01 09:24:19","distance":0.01,"step":20},
-      {"arraySteps":[19,0,0,0,0,0,0,0,0,0],"calories":0.65,"date":"2025.01.01 10:13:45","distance":0.01,"step":19},
-      {"arraySteps":[54,33,2,0,0,0,0,0,0,0],"calories":2.83,"date":"2025.01.02 10:29:56","distance":0.06,"step":89},
-      {"arraySteps":[38,0,0,15,0,0,0,0,0,0],"calories":1.53,"date":"2025.01.02 11:58:16","distance":0.03,"step":53},
-      {"arraySteps":[50,16,0,55,23,0,0,18,46,0],"calories":6.19,"date":"2025.03.01 12:15:38","distance":0.14,"step":208},
-      {"arraySteps":[18,0,0,20,0,0,0,0,0,0],"calories":1.05,"date":"2025.01.04 13:16:51","distance":0.01,"step":38}
+      {"date":"2025.02.10 10:00:00","arraySteps":[18,0,0,20,0,0,0,0,0,0],"calories":1.05,"distance":0.01,"step":1000},
+      {"date":"2025.02.10 10:01:00","arraySteps":[43,39,0,0,0,0,0,0,0,0],"calories":2.56,"distance":0.05,"step":1001},
+      {"date":"2025.02.10 10:02:00","arraySteps":[20,0,0,0,0,0,0,0,0,0],"calories":0.61,"distance":0.01,"step":1002},
+      {"date":"2025.02.10 10:03:00","arraySteps":[19,0,0,0,0,0,0,0,0,0],"calories":0.65,"distance":0.01,"step":1003},
+      {"date":"2025.02.10 10:21:00","arraySteps":[54,33,2,0,0,0,0,0,0,0],"calories":2.83,"distance":0.06,"step":1021},
+      {"date":"2025.02.10 10:25:00","arraySteps":[38,0,0,15,0,0,0,0,0,0],"calories":1.53,"distance":0.03,"step":1025},
+      {"date":"2025.02.10 10:30:00","arraySteps":[50,16,0,55,23,0,0,18,46,0],"calories":6.19,"distance":0.14,"step":1030},
+      {"date":"2025.02.10 10:31:00","arraySteps":[18,0,0,20,0,0,0,0,0,0],"calories":1.05,"distance":0.01,"step":1031}
     ]
   "#
   .to_string();
-  let insertion_result = insert(DATABASE_NAME, TABLE_NAME, &json_data);
-  println!("insertion_result: {}", insertion_result.unwrap());
 
-  let sql_query = format!(r#"SELECT CAST(date AS TIMESTAMP) AS parsed_date FROM activitydetails ORDER BY date DESC LIMIT 25"#,);
+  let start_time = Instant::now(); // Start timing
+  let insertion_result = insert(DATABASE_NAME, TABLE_NAME, &json_data);
+  let duration = start_time.elapsed(); // Measure elapsed time
+  println!("Insertion result: {}", insertion_result.unwrap());
+  println!("Time taken for insertion: {:.3} seconds", duration.as_secs_f64());
+
+  let sql_query = format!(r#"SELECT date as dt, step FROM activitydetails ORDER BY date ASC"#,);
   let query_result = query(DATABASE_NAME, &sql_query).await;
-  println!("query_result: {}", query_result.unwrap());
+  println!("query_result: {}", query_result.unwrap()["json_value"]);
+
+  let sql_query2 = format!(r#"SELECT COUNT(*) AS count FROM activitydetails"#,);
+  let query_result2 = query(DATABASE_NAME, &sql_query2).await;
+  println!("query_result: {}", query_result2.unwrap()["json_value"]);
 
   let sql_query = format!("SELECT * FROM {} ORDER BY date DESC LIMIT 25", TABLE_NAME);
   let query_group_result = query_group("wRE3w2vJcZLaabPQs", DATABASE_NAME, &sql_query).await;

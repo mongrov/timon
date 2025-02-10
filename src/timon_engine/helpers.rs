@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose, Engine as _};
-use chrono::{DateTime, Days, Local, NaiveDate, Timelike, Utc};
+use chrono::{DateTime, Days, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc};
 use datafusion::arrow::array::{
   Array, ArrayRef, BooleanArray, BooleanBuilder, Date32Array, Float64Array, Float64Builder, Int32Array, Int64Array, Int64Builder, ListArray,
   ListBuilder, StringArray, StringBuilder, StringViewArray, TimestampMillisecondArray, TimestampNanosecondArray,
@@ -484,4 +484,24 @@ pub fn filter_files_by_date_range(files: Vec<String>, start_date: &str, end_date
     .collect();
 
   Ok(filtered_files)
+}
+
+pub fn extract_timestamp_from_filename(filename: &str) -> Option<u32> {
+  let re = Regex::new(r"_(\d{4}-\d{2}-\d{2})_(\d{2}-\d{2})\.parquet$").ok()?;
+  if let Some(captures) = re.captures(filename) {
+    let date_part = &captures[1]; // "2025-02-08"
+    let hour_min_part = &captures[2]; // "20-10"
+    let datetime_str = format!("{} {}", date_part, hour_min_part.replace("-", ":"));
+    if let Ok(naive_dt) = NaiveDateTime::parse_from_str(&datetime_str, "%Y-%m-%d %H:%M") {
+      return Some(Utc.from_utc_datetime(&naive_dt).timestamp().try_into().unwrap());
+    }
+  }
+  None
+}
+
+pub fn precompute_file_timestamps(file_list: &[String]) -> HashMap<String, u32> {
+  file_list
+    .iter()
+    .filter_map(|file_path| extract_timestamp_from_filename(file_path).map(|timestamp| (file_path.clone(), timestamp)))
+    .collect()
 }
