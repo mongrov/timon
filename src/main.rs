@@ -111,7 +111,7 @@ async fn test_local_storage() {
   }
 
   fn generate_data(n: usize) -> String {
-    let start_time = Local::now().naive_local() - Duration::hours(6); // Set start time to now - 6hours
+    let start_time = Local::now().naive_local() - Duration::hours(12); // Set start time to now - 12hours
     let mut data = Vec::new();
     let mut time_counter = 0;
     for i in 0..n {

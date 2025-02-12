@@ -379,19 +379,16 @@ pub fn extract_table_name(sql_query: &str) -> String {
     })
 }
 
-pub fn rounded_timestamp(interval: u32) -> String {
-  let now = Utc::now();
-
-  // Determine the rounded time based on the interval
+pub fn rounded_timestamp(timestamp: i64, interval: u32) -> String {
+  let dt = Utc.timestamp_opt(timestamp, 0).single().expect("Invalid timestamp");
   let rounded_time = if interval > 60 {
     // For intervals greater than 60, calculate hour buckets
-    let total_minutes = now.hour() * 60 + now.minute();
+    let total_minutes = dt.hour() * 60 + dt.minute();
     let rounded_total_minutes = (total_minutes / interval) * interval;
     let rounded_hour = rounded_total_minutes / 60;
     let rounded_minute = rounded_total_minutes % 60;
 
-    now
-      .with_hour(rounded_hour as u32)
+    dt.with_hour(rounded_hour as u32)
       .unwrap()
       .with_minute(rounded_minute as u32)
       .unwrap()
@@ -401,9 +398,8 @@ pub fn rounded_timestamp(interval: u32) -> String {
       .unwrap()
   } else {
     // For intervals within 60 minutes, calculate minute buckets
-    let rounded_minute = (now.minute() / interval) * interval;
-    now
-      .with_minute(rounded_minute)
+    let rounded_minute = (dt.minute() / interval) * interval;
+    dt.with_minute(rounded_minute)
       .unwrap()
       .with_second(0)
       .unwrap()
@@ -497,13 +493,6 @@ pub fn extract_timestamp_from_filename(filename: &str) -> Option<u32> {
     }
   }
   None
-}
-
-pub fn precompute_file_timestamps(file_list: &[String]) -> HashMap<String, u32> {
-  file_list
-    .iter()
-    .filter_map(|file_path| extract_timestamp_from_filename(file_path).map(|timestamp| (file_path.clone(), timestamp)))
-    .collect()
 }
 
 pub fn extract_query_time_range(sql_query: &str) -> Option<(i64, i64)> {

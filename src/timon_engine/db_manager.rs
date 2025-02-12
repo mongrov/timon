@@ -1,6 +1,6 @@
 use super::helpers::{
   extract_hourly_date, extract_monthly_date, extract_partition_time, extract_query_time_range, extract_table_name, extract_timestamp_from_filename,
-  get_property_fields, get_table_columns, json_to_arrow, precompute_file_timestamps, record_batches_to_json, rounded_timestamp, row_to_json,
+  get_property_fields, get_table_columns, json_to_arrow, record_batches_to_json, rounded_timestamp, row_to_json,
 };
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use datafusion::arrow::array::Array;
@@ -323,11 +323,14 @@ impl DatabaseManager {
       self.validate_data_against_schema(&table_schema, json_value)?;
     }
 
-    let file_list = self.build_files_list(db_name, table_name, None)?;
-    let file_timestamps = precompute_file_timestamps(&file_list);
-    let latest_file_path = format!("{}/{}_{}.parquet", table_path, table_name, rounded_timestamp(self.bucket_interval));
+    let latest_file_path = format!(
+      "{}/{}_{}.parquet",
+      table_path,
+      table_name,
+      rounded_timestamp(Utc::now().timestamp(), self.bucket_interval)
+    );
     let current_window_start_ts = extract_timestamp_from_filename(&latest_file_path).unwrap_or(0);
-    let min_window_ts = current_window_start_ts.sub(3600 * 6); // past 6H window
+    let min_window_ts = current_window_start_ts.sub(3600 * 24); // past 24H window
     let current_window_end_ts = current_window_start_ts.add(self.bucket_interval * 60);
 
     // Filter and process new records
@@ -336,7 +339,8 @@ impl DatabaseManager {
       record_timestamp >= min_window_ts.into() && record_timestamp <= current_window_end_ts.into()
     });
 
-    // Load existing records into HashMap for O(1) lookup
+    // Load existing records from partitioned files
+    let file_list = self.build_files_list(db_name, table_name, None)?;
     let mut file_records: HashMap<String, Vec<Value>> = HashMap::new();
     let mut record_index: HashMap<String, (String, usize)> = HashMap::new(); // key -> (file_path, record_index)
 
@@ -351,13 +355,17 @@ impl DatabaseManager {
     }
 
     let mut updated_files = HashSet::new();
-
-    // Process new records efficiently
     let mut new_records_by_file: HashMap<String, Vec<Value>> = HashMap::new();
 
     for new_record in new_json_values.into_iter() {
       let key = build_key(&new_record);
       let timestamp = new_record.get(datetime_field).and_then(|t| t.as_i64()).unwrap_or(0);
+      let partition_name = format!(
+        "{}_{}.parquet",
+        table_name,
+        rounded_timestamp(timestamp.try_into().unwrap(), self.bucket_interval)
+      );
+      let target_file = format!("{}/{}", table_path, partition_name);
 
       if let Some((file, index)) = record_index.get(&key) {
         // Update existing record in-place
@@ -366,27 +374,24 @@ impl DatabaseManager {
           updated_files.insert(file.clone());
         }
       } else {
-        // Determine correct file for insertion
-        let target_file = self
-          .find_correct_file(&file_timestamps, timestamp.try_into().unwrap())
-          .unwrap_or_else(|| latest_file_path.clone());
+        // Ensure we create the correct partitioned file instead of writing to an existing one
         new_records_by_file.entry(target_file.clone()).or_insert_with(Vec::new).push(new_record);
-        updated_files.insert(target_file);
+        updated_files.insert(target_file.clone());
       }
     }
 
-    // Append new records to the correct files
+    // Create new files if needed and insert records into the correct partition
     for (file, new_records) in new_records_by_file {
       file_records.entry(file.clone()).or_insert_with(Vec::new).extend(new_records);
     }
 
-    // Write updated files
+    // Write updated and newly created files
     for (file, records) in file_records {
       let (arrays, schema) = json_to_arrow(&records)?;
       Self::parquet_file_writer(Path::new(&file), schema, arrays)?;
     }
 
-    Ok(format!("Data successfully written to {}", latest_file_path))
+    Ok(format!("Data successfully written to {} files", updated_files.len()))
   }
 
   pub async fn query(&self, db_name: &str, sql_query: &str, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
@@ -395,13 +400,6 @@ impl DatabaseManager {
 
   pub async fn query_group(&self, username: &str, db_name: &str, sql_query: &str, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
     self.execute_query(Some(username), db_name, sql_query, is_json_format).await
-  }
-
-  fn find_correct_file(&self, file_timestamps: &HashMap<String, u32>, record_timestamp: u32) -> Option<String> {
-    file_timestamps
-      .iter()
-      .find(|(_, &file_time)| file_time <= record_timestamp && file_time + self.bucket_interval > record_timestamp)
-      .map(|(file_path, _)| file_path.clone())
   }
 
   fn parquet_file_writer(path: &Path, schema: Schema, array: Vec<Arc<dyn Array>>) -> Result<String, Box<dyn Error>> {
