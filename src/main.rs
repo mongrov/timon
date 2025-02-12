@@ -115,7 +115,7 @@ async fn test_local_storage() {
     let mut data = Vec::new();
     let mut time_counter = 0;
     for i in 0..n {
-      time_counter += 100;
+      time_counter += 10;
       let date = start_time + Duration::milliseconds(time_counter);
       let array_steps: Vec<i32> = (0..10).map(|x| (i as i32 + x) % 50).collect();
       let calories = (i % 50) + 1;
@@ -157,9 +157,12 @@ async fn test_local_storage() {
   let query_result = query(DATABASE_NAME, &sql_query).await;
   println!("query_result: {}", query_result.unwrap()["json_value"]);
 
-  let sql_query2 = format!(r#"SELECT COUNT(*) AS count FROM activitydetails"#,);
+  let start_time = Instant::now(); // Start timing
+  let sql_query2 = format!(r#"SELECT * FROM activitydetails"#); // WHERE date BETWEEN '1730016996' AND '1739209996'
   let query_result2 = query(DATABASE_NAME, &sql_query2).await;
+  let duration = start_time.elapsed(); // Measure elapsed time
   println!("query_result: {}", query_result2.unwrap()["json_value"]);
+  println!("Time taken for query: {:.3} seconds", duration.as_secs_f64());
 
   let sql_query = format!("SELECT * FROM {} ORDER BY date DESC LIMIT 25", TABLE_NAME);
   let query_group_result = query_group("wRE3w2vJcZLaabPQs", DATABASE_NAME, &sql_query).await;

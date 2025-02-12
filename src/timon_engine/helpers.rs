@@ -505,3 +505,42 @@ pub fn precompute_file_timestamps(file_list: &[String]) -> HashMap<String, u32> 
     .filter_map(|file_path| extract_timestamp_from_filename(file_path).map(|timestamp| (file_path.clone(), timestamp)))
     .collect()
 }
+
+pub fn extract_query_time_range(sql_query: &str) -> Option<(i64, i64)> {
+  let re =
+    Regex::new(r#"WHERE\s+.*?\b(date|timestamp)\b\s+BETWEEN\s+['\"]?(\d+|[\d-]+\s+[\d:]+)['\"]?\s+AND\s+['\"]?(\d+|[\d-]+\s+[\d:]+)['\"]?"#).ok()?;
+  if let Some(captures) = re.captures(sql_query) {
+    let start_time_str = &captures[2];
+    let end_time_str = &captures[3];
+    let start_timestamp = parse_timestamp(start_time_str)?;
+    let end_timestamp = parse_timestamp(end_time_str)?;
+    Some((start_timestamp, end_timestamp))
+  } else {
+    None
+  }
+}
+
+pub fn extract_partition_time(file_path: &str) -> i64 {
+  let re = Regex::new(r"(\d{4}-\d{2}-\d{2})_(\d{2}-\d{2})").unwrap(); // Ensure regex compiles
+  if let Some(captures) = re.captures(file_path) {
+    let date_part = &captures[1]; // e.g., "2025-02-10"
+    let time_part = &captures[2]; // e.g., "01-30"
+    let datetime_str = format!("{} {}", date_part, time_part.replace("-", ":"));
+    if let Ok(naive_dt) = NaiveDateTime::parse_from_str(&datetime_str, "%Y-%m-%d %H:%M") {
+      return Utc.from_utc_datetime(&naive_dt).timestamp();
+    }
+  }
+  eprintln!("Failed to extract partition time from: {}", file_path);
+  i64::MIN // Indicate failure
+}
+
+pub fn parse_timestamp(datetime_str: &str) -> Option<i64> {
+  // Parses either epoch timestamps or datetime strings
+  if let Ok(epoch) = datetime_str.parse::<i64>() {
+    Some(epoch)
+  } else {
+    NaiveDateTime::parse_from_str(datetime_str, "%Y-%m-%d %H:%M:%S")
+      .ok()
+      .map(|dt| Utc.from_utc_datetime(&dt).timestamp())
+  }
+}

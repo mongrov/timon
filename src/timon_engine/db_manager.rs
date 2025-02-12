@@ -1,6 +1,6 @@
 use super::helpers::{
-  extract_hourly_date, extract_monthly_date, extract_table_name, extract_timestamp_from_filename, get_property_fields, get_table_columns,
-  json_to_arrow, precompute_file_timestamps, record_batches_to_json, rounded_timestamp, row_to_json,
+  extract_hourly_date, extract_monthly_date, extract_partition_time, extract_query_time_range, extract_table_name, extract_timestamp_from_filename,
+  get_property_fields, get_table_columns, json_to_arrow, precompute_file_timestamps, record_batches_to_json, rounded_timestamp, row_to_json,
 };
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use datafusion::arrow::array::Array;
@@ -716,17 +716,30 @@ impl DatabaseManager {
   async fn execute_query(&self, username: Option<&str>, db_name: &str, sql_query: &str, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
     let session_context = SessionContext::new();
     let table_name = extract_table_name(sql_query);
-
+    let query_time_range = extract_query_time_range(sql_query);
     let files_list = self
       .build_files_list(db_name, &table_name, username)
       .map_err(|e| DataFusionError::Execution(format!("Error building files list: {}", e)))?;
 
-    if files_list.is_empty() {
-      return Err(DataFusionError::Plan("No valid tables found to query".to_string()));
+    // Filter partitions based on time range if specified
+    let filtered_files = if let Some((start_time, end_time)) = query_time_range {
+      files_list
+        .into_iter()
+        .filter(|file_path| {
+          let partition_time = extract_partition_time(file_path);
+          partition_time >= start_time && partition_time <= end_time
+        })
+        .collect::<Vec<_>>()
+    } else {
+      files_list
+    };
+
+    if filtered_files.is_empty() {
+      return Err(DataFusionError::Plan("No relevant partitions found for query".to_string()));
     }
 
     let mut table_names = Vec::new();
-    for (i, file_path) in files_list.iter().enumerate() {
+    for (i, file_path) in filtered_files.iter().enumerate() {
       if Path::new(file_path).exists() {
         let temp_table_name = format!("{}_{}", table_name, i);
         if let Err(e) = session_context
