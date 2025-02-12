@@ -482,19 +482,6 @@ pub fn filter_files_by_date_range(files: Vec<String>, start_date: &str, end_date
   Ok(filtered_files)
 }
 
-pub fn extract_timestamp_from_filename(filename: &str) -> Option<u32> {
-  let re = Regex::new(r"_(\d{4}-\d{2}-\d{2})_(\d{2}-\d{2})\.parquet$").ok()?;
-  if let Some(captures) = re.captures(filename) {
-    let date_part = &captures[1]; // "2025-02-08"
-    let hour_min_part = &captures[2]; // "20-10"
-    let datetime_str = format!("{} {}", date_part, hour_min_part.replace("-", ":"));
-    if let Ok(naive_dt) = NaiveDateTime::parse_from_str(&datetime_str, "%Y-%m-%d %H:%M") {
-      return Some(Utc.from_utc_datetime(&naive_dt).timestamp().try_into().unwrap());
-    }
-  }
-  None
-}
-
 pub fn extract_query_time_range(sql_query: &str) -> Option<(i64, i64)> {
   let re =
     Regex::new(r#"WHERE\s+.*?\b(date|timestamp)\b\s+BETWEEN\s+['\"]?(\d+|[\d-]+\s+[\d:]+)['\"]?\s+AND\s+['\"]?(\d+|[\d-]+\s+[\d:]+)['\"]?"#).ok()?;

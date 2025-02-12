@@ -1,6 +1,6 @@
 use super::helpers::{
-  extract_hourly_date, extract_monthly_date, extract_partition_time, extract_query_time_range, extract_table_name, extract_timestamp_from_filename,
-  get_property_fields, get_table_columns, json_to_arrow, record_batches_to_json, rounded_timestamp, row_to_json,
+  extract_hourly_date, extract_monthly_date, extract_partition_time, extract_query_time_range, extract_table_name, get_property_fields,
+  get_table_columns, json_to_arrow, record_batches_to_json, rounded_timestamp, row_to_json,
 };
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use datafusion::arrow::array::Array;
@@ -322,22 +322,6 @@ impl DatabaseManager {
     for json_value in &new_json_values {
       self.validate_data_against_schema(&table_schema, json_value)?;
     }
-
-    let latest_file_path = format!(
-      "{}/{}_{}.parquet",
-      table_path,
-      table_name,
-      rounded_timestamp(Utc::now().timestamp(), self.bucket_interval)
-    );
-    let current_window_start_ts = extract_timestamp_from_filename(&latest_file_path).unwrap_or(0);
-    let min_window_ts = current_window_start_ts.sub(3600 * 24); // past 24H window
-    let current_window_end_ts = current_window_start_ts.add(self.bucket_interval * 60);
-
-    // Filter and process new records
-    new_json_values.retain(|record| {
-      let record_timestamp: i64 = record.get(datetime_field).and_then(|t| t.as_i64()).unwrap_or(0);
-      record_timestamp >= min_window_ts.into() && record_timestamp <= current_window_end_ts.into()
-    });
 
     // Load existing records from partitioned files
     let file_list = self.build_files_list(db_name, table_name, None)?;
