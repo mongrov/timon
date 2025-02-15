@@ -1,9 +1,13 @@
 use super::db_manager::{DataFusionOutput, DatabaseManager};
-use super::helpers::{extract_table_name, filter_files_by_date_range, get_table_columns, record_batches_to_json};
-use chrono::NaiveDate;
+use super::helpers::{
+  cleanup_old_files, combine_unique_batches, extract_table_name, filter_files_by_date_range, get_property_fields, get_table_columns,
+  read_parquet_batches, record_batches_to_json,
+};
+use datafusion::arrow::array::RecordBatch;
 use datafusion::datasource::listing::{ListingTable, ListingTableConfig, ListingTableUrl};
 use datafusion::datasource::MemTable;
 use datafusion::error::Result as DataFusionResult;
+use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::prelude::*;
 use futures::{StreamExt, TryStreamExt};
 use object_store::aws::{AmazonS3, AmazonS3Builder};
@@ -12,8 +16,9 @@ use object_store::{ClientOptions, ObjectMeta, ObjectStore};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::{collections::HashMap, sync::Arc};
 use tokio::io::AsyncReadExt;
 use url::Url;
@@ -176,43 +181,110 @@ impl CloudStorageManager {
       return Err(format!("No data files found for Table '{}' in Database '{}'.", table_name, db_name).into());
     }
 
-    // Regex to match YYYY-MM-dd filenames
-    let regx = Regex::new(r"(\d{4})-(\d{2})-(\d{2})").unwrap();
+    let regx = Regex::new(r"(\d{4})-(\d{2})-(\d{2})")?;
+    let table_schema = self.db_manager.get_table_schema(db_name, table_name)?;
+    let unique_fields = get_property_fields(table_schema.clone(), "unique")?;
+    let mut batches = Vec::new();
+    let mut processed_files = Vec::new();
+    let mut merge_target_paths = Vec::new();
 
-    for file in files {
-      if let Some(filename) = Path::new(&file).file_name().and_then(|n| n.to_str()) {
-        let caps = regx
-          .captures(filename)
-          .ok_or_else(|| format!("Filename '{}' does not match the expected pattern", filename))?;
-        let year = caps.get(1).map_or("", |m| m.as_str());
-        let month = caps.get(2).map_or("", |m| m.as_str());
-        let day = caps.get(3).map_or("", |m| m.as_str());
-        let file_date_extension = caps.get(0).map_or("", |m| m.as_str());
-
-        let source_path = file.clone();
-        let target_path = format!("{}/{}/{}/{}/{}/{}/{}", username, db_name, table_name, year, month, day, filename);
-
-        self
-          .upload_to_bucket(&source_path, &target_path)
-          .await
-          .map_err(|e| format!("Failed to upload file {} to S3 path {}: {:?}", source_path, target_path, e))?;
-
-        // Remove the local file after successful upload
-        let current_date = chrono::Utc::now().naive_utc().date();
-        let date_part = file_date_extension.split('.').next().unwrap_or("");
-        match NaiveDate::parse_from_str(date_part, "%Y-%m-%d") {
-          Ok(file_date) => {
-            if file_date < current_date {
-              fs::remove_file(&source_path).map_err(|e| format!("Failed to delete local file {}: {:?}", source_path, e))?;
-            }
-          }
-          Err(e) => {
-            eprintln!("Warning: Failed to parse file date '{}': {:?}", file_date_extension, e);
-          }
-        }
+    for file in &files {
+      if let Some(target_path) = self
+        .process_file(
+          file,
+          username,
+          db_name,
+          table_name,
+          &regx,
+          &unique_fields,
+          &mut batches,
+          &mut processed_files,
+        )
+        .await?
+      {
+        merge_target_paths.push(target_path);
       }
     }
 
+    if !batches.is_empty() {
+      self.upload_merged_batches(&batches, &merge_target_paths, username).await?;
+    }
+
+    cleanup_old_files(&processed_files, &regx).await;
+
+    Ok(())
+  }
+
+  async fn process_file(
+    &self,
+    file: &str,
+    username: &str,
+    db_name: &str,
+    table_name: &str,
+    regx: &Regex,
+    unique_fields: &[String],
+    batches: &mut Vec<RecordBatch>,
+    processed_files: &mut Vec<PathBuf>,
+  ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let file_path = PathBuf::from(file);
+    let filename = file_path.file_name().and_then(|n| n.to_str());
+
+    if let Some(name) = filename {
+      if let Some(caps) = regx.captures(name) {
+        let (year, month, day) = (&caps[1], &caps[2], &caps[3]);
+        let target_path = format!("{}/{}/{}/{}/{}/{}/{}", username, db_name, table_name, year, month, day, name);
+
+        let s3_temp_path = format!("{}/merge_workspace/{}/{}", self.db_manager.storage_path, username, name);
+        let mut s3_batches = Vec::new();
+
+        let s3_available = self
+          .download_from_bucket(&target_path, &s3_temp_path)
+          .await
+          .map(|_| read_parquet_batches(Path::new(&s3_temp_path), &mut s3_batches).is_ok())
+          .unwrap_or(false);
+
+        let mut local_batches = Vec::new();
+        read_parquet_batches(&file_path, &mut local_batches)?;
+
+        if s3_available {
+          let merged_batches = combine_unique_batches(local_batches, s3_batches, unique_fields)?;
+          if !merged_batches.is_empty() {
+            batches.extend(merged_batches);
+            processed_files.push(file_path);
+            processed_files.push(PathBuf::from(&s3_temp_path));
+            return Ok(Some(target_path));
+          }
+        } else {
+          processed_files.push(PathBuf::from(&file_path));
+          self.upload_to_bucket(&file_path.to_string_lossy(), &target_path).await?;
+          println!("Successfully uploaded new: '{}'", file_path.to_string_lossy());
+        }
+      }
+    }
+    Ok(None)
+  }
+
+  async fn upload_merged_batches(
+    &self,
+    batches: &[RecordBatch],
+    merge_target_paths: &[String],
+    username: &str,
+  ) -> Result<(), Box<dyn std::error::Error>> {
+    for (index, batch) in batches.iter().enumerate() {
+      let merge_target_path = &merge_target_paths[index];
+      let file_path = PathBuf::from(merge_target_path);
+      let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap();
+      let merged_file_path = format!("{}/merge_workspace/{}/merged_{}", self.db_manager.storage_path, username, filename);
+
+      let merge_file = File::create(&merged_file_path)?;
+      let mut writer = ArrowWriter::try_new(merge_file, batch.schema(), None)?;
+      writer.write(batch)?;
+      writer.close()?;
+
+      self.upload_to_bucket(&merged_file_path, merge_target_path).await?;
+      fs::remove_file(&merged_file_path)?;
+      println!("Successfully uploaded merged: '{}'", merged_file_path);
+    }
     Ok(())
   }
 
@@ -235,7 +307,7 @@ impl CloudStorageManager {
           "{}/group/{}/{}/{}/{}",
           &self.db_manager.storage_path, username, db_name, table_name, filename
         );
-        self.fetch_from_bucket(&cloud_file, &local_path).await?;
+        self.download_from_bucket(&cloud_file, &local_path).await?;
       }
     }
     Ok(())
@@ -287,7 +359,7 @@ impl CloudStorageManager {
     Ok(())
   }
 
-  async fn fetch_from_bucket(&self, target_path: &str, local_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+  async fn download_from_bucket(&self, target_path: &str, local_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let object_store = &self.s3_store;
     let path = StorePath::from(target_path);
 
@@ -324,10 +396,7 @@ impl CloudStorageManager {
 
     writer.flush().map_err(|e| format!("Failed to flush file '{}': {}", local_path, e))?;
 
-    println!(
-      "Successfully downloaded '{}' from S3 to '{}' ({} bytes)",
-      target_path, local_path, total_bytes_written
-    );
+    println!("Successfully downloaded '{}' from S3 ({} bytes)", target_path, total_bytes_written);
 
     Ok(())
   }

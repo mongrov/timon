@@ -556,7 +556,7 @@ impl DatabaseManager {
     Ok(())
   }
 
-  fn get_table_schema(&self, db_name: &str, table_name: &str) -> Result<serde_json::Value, Box<dyn Error>> {
+  pub fn get_table_schema(&self, db_name: &str, table_name: &str) -> Result<serde_json::Value, Box<dyn Error>> {
     // Look up the schema from the metadata or wherever it is stored
     let database = self.metadata.databases.get(db_name).ok_or("Database not found")?;
     let table = database.tables.get(table_name).ok_or("Table not found")?;

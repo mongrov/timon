@@ -1,19 +1,25 @@
 use base64::{engine::general_purpose, Engine as _};
 use chrono::{DateTime, Days, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc};
 use datafusion::arrow::array::{
-  Array, ArrayRef, BooleanArray, BooleanBuilder, Date32Array, Float64Array, Float64Builder, Int32Array, Int64Array, Int64Builder, ListArray,
-  ListBuilder, StringArray, StringBuilder, StringViewArray, TimestampMillisecondArray, TimestampNanosecondArray,
+  new_null_array, Array, ArrayRef, BooleanArray, BooleanBuilder, Date32Array, Float64Array, Float64Builder, Int32Array, Int64Array, Int64Builder,
+  ListArray, ListBuilder, StringArray, StringBuilder, StringViewArray, TimestampMillisecondArray, TimestampNanosecondArray,
 };
-use datafusion::arrow::datatypes::{DataType, Field as ArrowField, Schema, TimeUnit};
+use datafusion::arrow::buffer::OffsetBuffer;
+use datafusion::arrow::datatypes::{DataType, Field, Field as ArrowField, Schema, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::Result as DataFusionResult;
+use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReader;
 use datafusion::parquet::data_type::{AsBytes, Decimal};
 use datafusion::parquet::record::{Field as ParquetField, Row};
 use datafusion::prelude::SessionContext;
+use datafusion::scalar::ScalarValue;
 use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::error::Error;
+use std::fs::{self, File};
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub fn record_batches_to_json(batches: &[RecordBatch]) -> Result<Value, serde_json::Error> {
@@ -510,7 +516,7 @@ pub fn extract_partition_time(file_path: &str) -> i64 {
   i64::MIN // Indicate failure
 }
 
-pub fn parse_timestamp(datetime_str: &str) -> Option<i64> {
+fn parse_timestamp(datetime_str: &str) -> Option<i64> {
   // Parses either epoch timestamps or datetime strings
   if let Ok(epoch) = datetime_str.parse::<i64>() {
     Some(epoch)
@@ -518,5 +524,117 @@ pub fn parse_timestamp(datetime_str: &str) -> Option<i64> {
     NaiveDateTime::parse_from_str(datetime_str, "%Y-%m-%d %H:%M:%S")
       .ok()
       .map(|dt| Utc.from_utc_datetime(&dt).timestamp())
+  }
+}
+
+pub fn combine_unique_batches(
+  local_batches: Vec<RecordBatch>,
+  s3_batches: Vec<RecordBatch>,
+  unique_fields: &[String],
+) -> Result<Vec<RecordBatch>, Box<dyn std::error::Error>> {
+  let schema = local_batches
+    .first()
+    .map(|b| b.schema())
+    .or_else(|| s3_batches.first().map(|b| b.schema()))
+    .ok_or("No batches provided")?;
+
+  let unique_indices: Vec<usize> = unique_fields
+    .iter()
+    .map(|field| schema.index_of(field).map_err(|e| format!("Field '{}' not found: {:?}", field, e)))
+    .collect::<Result<Vec<_>, _>>()?;
+
+  let mut unique_map: HashMap<Vec<ScalarValue>, Vec<ScalarValue>> = HashMap::new();
+
+  for batch in s3_batches.into_iter().chain(local_batches) {
+    let unified_batch = convert_batch_schema(&batch, &schema)?; // Fixed type mismatch
+
+    for row_index in 0..unified_batch.num_rows() {
+      let unique_key: Vec<ScalarValue> = unique_indices
+        .iter()
+        .map(|&index| ScalarValue::try_from_array(unified_batch.column(index), row_index).unwrap())
+        .collect();
+
+      let row_values: Vec<ScalarValue> = (0..unified_batch.num_columns())
+        .map(|col_index| ScalarValue::try_from_array(unified_batch.column(col_index), row_index).unwrap())
+        .collect();
+
+      unique_map.insert(unique_key, row_values);
+    }
+  }
+
+  let mut column_values: Vec<Vec<ScalarValue>> = vec![Vec::new(); schema.fields().len()];
+  for row_values in unique_map.values() {
+    for (col_idx, value) in row_values.iter().enumerate() {
+      column_values[col_idx].push(value.clone());
+    }
+  }
+
+  let mut final_columns = Vec::new();
+  for (col_idx, _field) in schema.fields().iter().enumerate() {
+    let column_data = &column_values[col_idx];
+    let array = ScalarValue::iter_to_array(column_data.iter().cloned())?;
+    final_columns.push(array);
+  }
+
+  let combined_unique_batches = RecordBatch::try_new(schema.clone(), final_columns)?;
+  Ok(vec![combined_unique_batches])
+}
+
+fn convert_batch_schema(batch: &RecordBatch, target_schema: &Schema) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+  let mut new_columns = Vec::new();
+  for field in target_schema.fields() {
+    let column = if let Some(existing_column) = batch.column_by_name(field.name()) {
+      if existing_column.data_type() != field.data_type() {
+        match field.data_type() {
+          DataType::List(inner_field) if *inner_field.data_type() == DataType::Int64 => {
+            let int_column = existing_column
+              .as_any()
+              .downcast_ref::<Int64Array>()
+              .ok_or("Failed to downcast column to Int64Array")?;
+
+            // Convert Int64Array into a ListArray
+            let values = Arc::new(int_column.clone()) as ArrayRef;
+            let offsets: Vec<i32> = (0..=int_column.len() as i32).collect();
+            let offset_buffer = OffsetBuffer::new(offsets.into());
+            let list_array = ListArray::new(Arc::new(Field::new("item", DataType::Int64, true)), offset_buffer, values, None);
+            Arc::new(list_array) as ArrayRef
+          }
+          _ => {
+            eprintln!("Warning: Cannot auto-convert {} to {}", existing_column.data_type(), field.data_type());
+            existing_column.clone()
+          }
+        }
+      } else {
+        existing_column.clone()
+      }
+    } else {
+      new_null_array(field.data_type(), batch.num_rows())
+    };
+    new_columns.push(column);
+  }
+  Ok(RecordBatch::try_new(Arc::new(target_schema.clone()), new_columns)?)
+}
+
+pub fn read_parquet_batches(file_path: &Path, batches: &mut Vec<RecordBatch>) -> Result<bool, Box<dyn std::error::Error>> {
+  let mut buffer = Vec::new();
+  File::open(file_path)?.read_to_end(&mut buffer)?;
+  let reader = ParquetRecordBatchReader::try_new(bytes::Bytes::from(buffer), 1024)?;
+  batches.extend(reader.collect::<Result<Vec<_>, _>>()?);
+  Ok(true)
+}
+
+pub async fn cleanup_old_files(processed_files: &[PathBuf], regx: &Regex) {
+  let current_date = chrono::Utc::now().naive_utc().date();
+  for file_path in processed_files {
+    if let Some(filename) = file_path.file_name().and_then(|n| n.to_str()) {
+      if let Some(caps) = regx.captures(filename) {
+        let file_date_str = format!("{}-{}-{}", &caps[1], &caps[2], &caps[3]);
+        if NaiveDate::parse_from_str(&file_date_str, "%Y-%m-%d").map_or(false, |file_date| file_date < current_date) {
+          if let Err(e) = fs::remove_file(file_path) {
+            eprintln!("Warning: Failed to delete file {}: {:?}", file_path.display(), e);
+          }
+        }
+      }
+    }
   }
 }

@@ -115,7 +115,7 @@ async fn test_local_storage() {
     let mut data = Vec::new();
     let mut time_counter = 0;
     for i in 0..n {
-      time_counter += 10;
+      time_counter += 1000;
       let date = start_time + Duration::milliseconds(time_counter);
       let array_steps: Vec<i32> = (0..10).map(|x| (i as i32 + x) % 50).collect();
       let calories = (i % 50) + 1;
