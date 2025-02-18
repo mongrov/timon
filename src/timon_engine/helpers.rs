@@ -446,7 +446,7 @@ pub fn extract_monthly_date(filename: &str) -> Option<String> {
   None
 }
 
-pub fn get_property_fields(schema: Value, property: &str) -> Result<Vec<String>, Box<dyn Error>> {
+pub fn get_property_fields(schema: &Value, property: &str) -> Result<Vec<String>, Box<dyn Error>> {
   let mut fields = Vec::new();
   if let Some(properties) = schema.as_object() {
     for (field_name, field_properties) in properties {

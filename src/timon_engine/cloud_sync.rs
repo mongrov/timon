@@ -183,7 +183,7 @@ impl CloudStorageManager {
 
     let regx = Regex::new(r"(\d{4})-(\d{2})-(\d{2})")?;
     let table_schema = self.db_manager.get_table_schema(db_name, table_name)?;
-    let unique_fields = get_property_fields(table_schema.clone(), "unique")?;
+    let unique_fields = get_property_fields(&table_schema, "unique")?;
     let mut batches = Vec::new();
     let mut processed_files = Vec::new();
     let mut merge_target_paths = Vec::new();

@@ -45,9 +45,6 @@ external fun insert(dbName: String, tableName: String, jsonData: String): String
 
 // Query a database with SQL query
 external fun query(dbName: String, sqlQuery: String): String
-
-// Query a database for a given user with SQL query
-external fun queryGroup(userName: String, dbName: String, sqlQuery: String): String
 ```
 
 ## S3-Compatible Storage Functions

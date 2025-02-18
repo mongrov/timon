@@ -18,7 +18,6 @@ use std::sync::OnceLock;
 * @ delete_database(db_name) & delete_table(db_name, table_name)
 * @ insert(db_name, table_name, json_data)
 * @ query(db_name, sql_query)
-* @ query_group(username, db_name, sql_query)
  */
 #[derive(Serialize)]
 pub struct TimonResult {
@@ -221,39 +220,14 @@ pub fn insert(db_name: &str, table_name: &str, json_data: &str) -> Result<Value,
 }
 
 #[allow(dead_code)]
-pub async fn query(db_name: &str, sql_query: &str) -> Result<Value, String> {
+pub async fn query(db_name: &str, sql_query: &str, username: Option<&str>) -> Result<Value, String> {
   let database_manager = get_database_manager();
-  match database_manager.query(db_name, sql_query, true).await {
+  match database_manager.query(db_name, sql_query, username, true).await {
     Ok(db_manager::DataFusionOutput::Json(data)) => {
       let json_value = serde_json::to_value(&data).map_err(|e| e.to_string())?;
       let result = TimonResult {
         status: 200,
         message: format!("query data with success from '{}' with '{}'", db_name, sql_query),
-        json_value: Some(json_value),
-      };
-      serde_json::to_value(&result).map_err(|e| e.to_string())
-    }
-    Ok(db_manager::DataFusionOutput::DataFrame(_df)) => Err("DataFrame output is not directly convertible to string".to_owned()),
-    Err(err) => {
-      let result = TimonResult {
-        status: 400,
-        message: err.to_string(),
-        json_value: None,
-      };
-      serde_json::to_value(&result).map_err(|e| e.to_string())
-    }
-  }
-}
-
-#[allow(dead_code)]
-pub async fn query_group(username: &str, db_name: &str, sql_query: &str) -> Result<Value, String> {
-  let database_manager = get_database_manager();
-  match database_manager.query_group(username, db_name, sql_query, true).await {
-    Ok(db_manager::DataFusionOutput::Json(data)) => {
-      let json_value = serde_json::to_value(&data).map_err(|e| e.to_string())?;
-      let result = TimonResult {
-        status: 200,
-        message: format!("query_group data with success from '{}' with '{}'", db_name, sql_query),
         json_value: Some(json_value),
       };
       serde_json::to_value(&result).map_err(|e| e.to_string())

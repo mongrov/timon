@@ -17,7 +17,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
-use std::ops::Index;
 use std::path::Path;
 use std::sync::Arc;
 use std::{fmt, fs};
@@ -298,9 +297,11 @@ impl DatabaseManager {
       .ok_or_else(|| format!("Database '{}' or Table '{}' does not exist.", db_name, table_name))?;
     let table_schema = self.get_table_schema(db_name, table_name)?;
 
-    let datetime_binding = get_property_fields(table_schema.clone(), "datetime")?;
-    let datetime_field = datetime_binding.index(0);
-    let unique_fields = get_property_fields(table_schema.clone(), "unique")?;
+    let datetime_binding = get_property_fields(&table_schema, "datetime")?;
+    let datetime_field = datetime_binding
+      .get(0)
+      .ok_or_else(|| format!("No 'datetime' field found in the table schema."))?;
+    let unique_fields = get_property_fields(&table_schema, "unique")?;
 
     let build_key = |record: &Value| -> String {
       unique_fields
@@ -310,14 +311,26 @@ impl DatabaseManager {
         .join("-")
     };
 
-    // Convert datetime fields to timestamps
-    new_json_values.iter_mut().for_each(|json_value| {
-      if let Some(Value::String(date_str)) = json_value.get(datetime_field) {
-        if let Ok(naive_dt) = NaiveDateTime::parse_from_str(date_str, "%Y.%m.%d %H:%M:%S") {
-          json_value[datetime_field] = json!(Utc.from_utc_datetime(&naive_dt).timestamp());
+    // Ensure datetime fields are present and convert them to timestamps
+    for json_value in new_json_values.iter_mut() {
+      match json_value.get(datetime_field) {
+        Some(Value::String(date_str)) => {
+          let parsed_timestamp = NaiveDateTime::parse_from_str(date_str, "%Y.%m.%d %H:%M:%S")
+            .or_else(|_| NaiveDateTime::parse_from_str(date_str, "%Y-%m-%dT%H:%M:%S%.3fZ"))
+            .or_else(|_| NaiveDateTime::parse_from_str(date_str, "%Y-%m-%dT%H:%M:%S%.fZ"))
+            .or_else(|_| NaiveDateTime::parse_from_str(date_str, "%Y-%m-%d %H:%M:%S"))
+            .map(|naive_dt| Utc.from_utc_datetime(&naive_dt).timestamp());
+
+          match parsed_timestamp {
+            Ok(timestamp) => {
+              json_value[datetime_field] = json!(timestamp);
+            }
+            Err(_) => return Err(format!("Invalid datetime format for field '{}'.", datetime_field).into()),
+          }
         }
+        _ => return Err(format!("Missing required datetime field: '{}'.", datetime_field).into()),
       }
-    });
+    }
 
     for json_value in &new_json_values {
       self.validate_data_against_schema(&table_schema, json_value)?;
@@ -378,12 +391,80 @@ impl DatabaseManager {
     Ok(format!("Data successfully written to {} files", updated_files.len()))
   }
 
-  pub async fn query(&self, db_name: &str, sql_query: &str, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
-    self.execute_query(None, db_name, sql_query, is_json_format).await
-  }
+  pub async fn query(&self, db_name: &str, sql_query: &str, username: Option<&str>, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
+    let session_context = SessionContext::new();
+    let table_name = extract_table_name(sql_query);
+    let query_time_range = extract_query_time_range(sql_query);
+    let files_list = self
+      .build_files_list(db_name, &table_name, username)
+      .map_err(|e| DataFusionError::Execution(format!("Error building files list: {}", e)))?;
 
-  pub async fn query_group(&self, username: &str, db_name: &str, sql_query: &str, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
-    self.execute_query(Some(username), db_name, sql_query, is_json_format).await
+    // Filter partitions based on time range if specified
+    let filtered_files = if let Some((start_time, end_time)) = query_time_range {
+      files_list
+        .into_iter()
+        .filter(|file_path| {
+          let partition_time = extract_partition_time(file_path);
+          partition_time >= start_time && partition_time <= end_time
+        })
+        .collect::<Vec<_>>()
+    } else {
+      files_list
+    };
+
+    if filtered_files.is_empty() {
+      return Err(DataFusionError::Plan("No relevant partitions found for query".to_string()));
+    }
+
+    let mut table_names = Vec::new();
+    for (i, file_path) in filtered_files.iter().enumerate() {
+      if Path::new(file_path).exists() {
+        let temp_table_name = format!("{}_{}", table_name, i);
+        if let Err(e) = session_context
+          .register_parquet(&temp_table_name, file_path, ParquetReadOptions::default())
+          .await
+        {
+          eprintln!("Failed to register {}: {:?}", file_path, e);
+        } else {
+          table_names.push(temp_table_name);
+        }
+      }
+    }
+
+    if table_names.is_empty() {
+      return Err(DataFusionError::Plan("No valid tables found to query.".to_string()));
+    }
+
+    let column_names = get_table_columns(&session_context, &table_names[0]).await?;
+    let combined_query = format!(
+      "SELECT {} FROM ({}) AS combined_table",
+      column_names,
+      table_names
+        .iter()
+        .map(|name| format!("SELECT {} FROM {}", column_names, name))
+        .collect::<Vec<_>>()
+        .join(" UNION ALL ")
+    );
+
+    let combined_df = session_context.sql(&combined_query).await?;
+    let combined_results = combined_df.collect().await?;
+    let schema = combined_results[0].schema();
+    let mem_table = MemTable::try_new(schema, vec![combined_results])?;
+    session_context.register_table("combined_table", Arc::new(mem_table))?;
+
+    let adjusted_sql_query = sql_query.replace(&table_name, "combined_table");
+    let final_df = session_context.sql(&adjusted_sql_query).await?;
+    let final_results = final_df.collect().await?;
+
+    if is_json_format {
+      let json_result = record_batches_to_json(&final_results).unwrap();
+      Ok(DataFusionOutput::Json(json_result))
+    } else {
+      let final_schema = final_results[0].schema();
+      let final_mem_table = MemTable::try_new(final_schema, vec![final_results])?;
+      let final_df = session_context.read_table(Arc::new(final_mem_table))?;
+      Ok(DataFusionOutput::DataFrame(final_df))
+    }
   }
 
   fn parquet_file_writer(path: &Path, schema: Schema, array: Vec<Arc<dyn Array>>) -> Result<String, Box<dyn Error>> {
@@ -693,81 +774,5 @@ impl DatabaseManager {
       }
     }
     None
-  }
-
-  async fn execute_query(&self, username: Option<&str>, db_name: &str, sql_query: &str, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
-    let session_context = SessionContext::new();
-    let table_name = extract_table_name(sql_query);
-    let query_time_range = extract_query_time_range(sql_query);
-    let files_list = self
-      .build_files_list(db_name, &table_name, username)
-      .map_err(|e| DataFusionError::Execution(format!("Error building files list: {}", e)))?;
-
-    // Filter partitions based on time range if specified
-    let filtered_files = if let Some((start_time, end_time)) = query_time_range {
-      files_list
-        .into_iter()
-        .filter(|file_path| {
-          let partition_time = extract_partition_time(file_path);
-          partition_time >= start_time && partition_time <= end_time
-        })
-        .collect::<Vec<_>>()
-    } else {
-      files_list
-    };
-
-    if filtered_files.is_empty() {
-      return Err(DataFusionError::Plan("No relevant partitions found for query".to_string()));
-    }
-
-    let mut table_names = Vec::new();
-    for (i, file_path) in filtered_files.iter().enumerate() {
-      if Path::new(file_path).exists() {
-        let temp_table_name = format!("{}_{}", table_name, i);
-        if let Err(e) = session_context
-          .register_parquet(&temp_table_name, file_path, ParquetReadOptions::default())
-          .await
-        {
-          eprintln!("Failed to register {}: {:?}", file_path, e);
-        } else {
-          table_names.push(temp_table_name);
-        }
-      }
-    }
-
-    if table_names.is_empty() {
-      return Err(DataFusionError::Plan("No valid tables found to query.".to_string()));
-    }
-
-    let column_names = get_table_columns(&session_context, &table_names[0]).await?;
-    let combined_query = format!(
-      "SELECT {} FROM ({}) AS combined_table",
-      column_names,
-      table_names
-        .iter()
-        .map(|name| format!("SELECT {} FROM {}", column_names, name))
-        .collect::<Vec<_>>()
-        .join(" UNION ALL ")
-    );
-
-    let combined_df = session_context.sql(&combined_query).await?;
-    let combined_results = combined_df.collect().await?;
-    let schema = combined_results[0].schema();
-    let mem_table = MemTable::try_new(schema, vec![combined_results])?;
-    session_context.register_table("combined_table", Arc::new(mem_table))?;
-
-    let adjusted_sql_query = sql_query.replace(&table_name, "combined_table");
-    let final_df = session_context.sql(&adjusted_sql_query).await?;
-    let final_results = final_df.collect().await?;
-
-    if is_json_format {
-      let json_result = record_batches_to_json(&final_results).unwrap();
-      Ok(DataFusionOutput::Json(json_result))
-    } else {
-      let final_schema = final_results[0].schema();
-      let final_mem_table = MemTable::try_new(final_schema, vec![final_results])?;
-      let final_df = session_context.read_table(Arc::new(final_mem_table))?;
-      Ok(DataFusionOutput::DataFrame(final_df))
-    }
   }
 }
