@@ -421,31 +421,6 @@ pub fn rounded_timestamp(timestamp: i64, interval: u32) -> String {
   }
 }
 
-pub fn extract_hourly_date(filename: &str) -> Option<String> {
-  // Example filename format: test_table_2025-01-15_14-30.parquet
-  let parts: Vec<&str> = filename.split('_').collect();
-  if parts.len() >= 3 {
-    let date = parts[parts.len() - 2]; // "2025-01-15"
-    let time_str = parts[parts.len() - 1]; // "14-30.parquet"
-    let time_parts: Vec<&str> = time_str.strip_suffix(".parquet")?.split('-').collect();
-    if time_parts.len() == 2 {
-      // Combine date and hour
-      return Some(format!("{}_{}", date, time_parts[0])); // "2025-01-15_14"
-    }
-  }
-  None
-}
-
-pub fn extract_monthly_date(filename: &str) -> Option<String> {
-  // Example filename format: test_table_2025-01-15_14.parquet
-  let parts: Vec<&str> = filename.split('_').collect();
-  if parts.len() >= 3 {
-    let date = parts[parts.len() - 2]; // "2025-01-15"
-    return Some(date.to_string()); // Return the date part
-  }
-  None
-}
-
 pub fn get_property_fields(schema: &Value, property: &str) -> Result<Vec<String>, Box<dyn Error>> {
   let mut fields = Vec::new();
   if let Some(properties) = schema.as_object() {

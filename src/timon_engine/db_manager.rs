@@ -1,6 +1,6 @@
 use super::helpers::{
-  extract_hourly_date, extract_monthly_date, extract_partition_time, extract_query_time_range, extract_table_name, get_property_fields,
-  get_table_columns, json_to_arrow, record_batches_to_json, rounded_timestamp, row_to_json,
+  extract_partition_time, extract_query_time_range, extract_table_name, get_property_fields, get_table_columns, json_to_arrow,
+  record_batches_to_json, rounded_timestamp, row_to_json,
 };
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use datafusion::arrow::array::Array;
@@ -478,81 +478,6 @@ impl DatabaseManager {
     // Close the writer to ensure data is written to the file
     writer.close()?;
     Ok(format!("Data was successfully written to '{}'", path.to_string_lossy()))
-  }
-
-  #[allow(dead_code)] // TODO: Remove this code or make the logic merge files on the cloud
-  fn merge_files<F>(&mut self, group_extractor: F) -> Result<(), Box<dyn std::error::Error>>
-  where
-    F: Fn(&str) -> Option<String>,
-  {
-    let databases_list = self.list_databases()?;
-    for db_name in databases_list {
-      let tables_list = self.list_tables(&db_name)?;
-      for table_name in tables_list {
-        let files = self.build_files_list(&db_name, &table_name, None)?;
-        if files.is_empty() {
-          return Err("No files to merge".into());
-        }
-
-        // Group files based on the extractor function
-        let mut grouped_files: HashMap<String, Vec<String>> = HashMap::new();
-        for file in files {
-          if self.is_valid_parquet_file(&file) {
-            if let Some(group_key) = group_extractor(&file) {
-              grouped_files.entry(group_key).or_default().push(file);
-            }
-          } else {
-            eprintln!("Skipping invalid Parquet file: {}", file);
-          }
-        }
-
-        // Merge files for each group
-        for (group, files_in_group) in grouped_files {
-          let mut all_records = Vec::new();
-
-          for file in files_in_group.clone() {
-            let json_records = self.read_parquet_file(&file)?;
-            all_records.extend(json_records);
-          }
-
-          let (arrays, schema) = json_to_arrow(&all_records)?;
-          let record_batch = RecordBatch::try_new(Arc::new(schema), arrays)?;
-
-          let table_path = self.get_table_path(&db_name, &table_name);
-          let output_file = format!("{}/{}_{}.parquet", table_path.unwrap(), &table_name, group);
-          let file = fs::File::create(output_file)?;
-          let props = WriterProperties::builder().build();
-          let mut writer = ArrowWriter::try_new(file, record_batch.schema().clone(), Some(props))?;
-          writer.write(&record_batch)?;
-          writer.close()?;
-
-          for file in files_in_group {
-            fs::remove_file(file)?;
-          }
-        }
-      }
-    }
-    Ok(())
-  }
-
-  #[allow(dead_code)] // TODO: Remove this code or make the logic merge files on the cloud
-  pub fn merge_files_by_hour(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-    self.merge_files(extract_hourly_date)
-  }
-
-  #[allow(dead_code)] // TODO: Remove this code or make the logic merge files on the cloud
-  pub fn merge_files_by_day(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-    self.merge_files(extract_monthly_date)
-  }
-
-  fn is_valid_parquet_file(&self, file_path: &str) -> bool {
-    match self.read_parquet_file(file_path) {
-      Ok(_) => true,
-      Err(err) => {
-        eprintln!("Invalid Parquet file {}: {}", file_path, err);
-        false
-      }
-    }
   }
 
   pub fn build_files_list(&self, db_name: &str, table_name: &str, username: Option<&str>) -> Result<Vec<String>, Box<dyn Error>> {
