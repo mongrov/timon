@@ -1,3 +1,4 @@
+mod tests;
 pub mod timon_engine;
 
 // cbindgen:ignore
