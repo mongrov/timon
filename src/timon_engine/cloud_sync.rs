@@ -168,7 +168,7 @@ impl CloudStorageManager {
             }
           }
         } else {
-          println!("Local file is older or identical to S3, skipping download.");
+          println!("Local file is older or identical to S3, '{}' skipping download", name);
         }
       }
     }

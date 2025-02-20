@@ -384,8 +384,10 @@ impl DatabaseManager {
 
     // Write updated and newly created files
     for (file, records) in file_records {
-      let (arrays, schema) = json_to_arrow(&records)?;
-      Self::parquet_file_writer(Path::new(&file), schema, arrays)?;
+      if updated_files.contains(&file) {
+        let (arrays, schema) = json_to_arrow(&records)?;
+        Self::parquet_file_writer(Path::new(&file), schema, arrays)?;
+      }
     }
 
     Ok(format!("Data successfully written to {} files", updated_files.len()))
