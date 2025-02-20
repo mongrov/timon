@@ -163,7 +163,6 @@ impl CloudStorageManager {
             let merged_batches = combine_unique_batches(local_batches, s3_batches, unique_fields)?;
             if !merged_batches.is_empty() {
               batches.extend(merged_batches);
-              processed_files.push(file_path);
               processed_files.push(PathBuf::from(&s3_temp_path));
               return Ok(Some(target_path));
             }
