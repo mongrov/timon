@@ -4,7 +4,7 @@ use serde_json::json;
 use std::time::Instant;
 pub use timon_engine::{
   cloud_fetch_parquet, cloud_sink_parquet, create_database, create_table, delete_database, delete_table, init_bucket, init_timon, insert,
-  list_databases, list_tables, query, query_bucket,
+  list_databases, list_tables, query,
 };
 #[cfg(feature = "dev_cli")]
 mod cli;
@@ -191,11 +191,6 @@ async fn test_s3_sync() {
 
   // let cloud_sink_parquet_result = cloud_sink_parquet(USERNAME, DATABASE_NAME, TABLE_NAME).await;
   // println!("{}", cloud_sink_parquet_result.unwrap());
-
-  // let query_range = std::collections::HashMap::from([("start_date", "2025-01-10"), ("end_date", "2025-01-30")]);
-  // let sql_query = format!("SELECT * FROM {} ORDER BY date DESC LIMIT 25", TABLE_NAME);
-  // let df_result = query_bucket(USERNAME, "zivaring", &sql_query, query_range).await.unwrap();
-  // println!("query_bucket {:?}", df_result);
 }
 
 // This block is executed for local development testing(run async tests for local_storage and S3 cloud_sync).

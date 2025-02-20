@@ -246,7 +246,6 @@ pub async fn query(db_name: &str, sql_query: &str, username: Option<&str>) -> Re
 
 /* ******************************** S3 Compatible Storage ********************************
 * @ init_bucket(bucket_endpoint, bucket_name, access_key_id, secret_access_key)
-* @ query_bucket(bucket_name, date_range, sql_query)
 * @ cloud_sink_parquet(username, db_name, table_name)
 * @ cloud_fetch_parquet(username, db_name, table_name)
  */
@@ -286,40 +285,6 @@ pub fn init_bucket(
       let result = TimonResult {
         status: 400,
         message: "CloudStorageManager already initialized".to_string(),
-        json_value: None,
-      };
-      serde_json::to_value(&result).map_err(|e| e.to_string())
-    }
-  }
-}
-
-pub async fn query_bucket(username: &str, db_name: &str, sql_query: &str, date_range: HashMap<&str, &str>) -> Result<Value, String> {
-  let cloud_storage_manager = get_cloud_storage_manager();
-  match cloud_storage_manager.query_bucket(&username, db_name, &sql_query, date_range, true).await {
-    Ok(db_manager::DataFusionOutput::Json(data)) => {
-      let json_value = serde_json::to_value(&data).map_err(|e| e.to_string())?;
-      let result = TimonResult {
-        status: 200,
-        message: format!(
-          "query data with success from '{}' with '{}'",
-          cloud_storage_manager.bucket_name, sql_query
-        ),
-        json_value: Some(json_value),
-      };
-      serde_json::to_value(&result).map_err(|e| e.to_string())
-    }
-    Ok(db_manager::DataFusionOutput::DataFrame(_df)) => {
-      let result = TimonResult {
-        status: 400,
-        message: "DataFrame output is not directly convertible to string".to_owned(),
-        json_value: None,
-      };
-      serde_json::to_value(&result).map_err(|e| e.to_string())
-    }
-    Err(err) => {
-      let result = TimonResult {
-        status: 400,
-        message: err.to_string(),
         json_value: None,
       };
       serde_json::to_value(&result).map_err(|e| e.to_string())

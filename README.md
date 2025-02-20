@@ -55,9 +55,6 @@ These functions manage data stored in an S3-compatible bucket, allowing for quer
 // Initialize S3-compatible storage with endpoint and credentials
 external fun initBucket(bucket_endpoint: String, bucket_name: String, access_key_id: String, secret_access_key: String, bucket_region: String): String
 
-// Query the bucket with a date range and SQL query
-external fun queryBucket(userName: String, dbName: String, sqlQuery: String, dateRange: Map<String, String>): String
-
 // Sink daily data to Parquet format in the bucket
 external fun cloudSinkParquet(userName: String, dbName: String, tableName: String): String
 
@@ -96,9 +93,6 @@ Executes an SQL query on the specified database.
 
 - **initBucket(bucket_endpoint: String, bucket_name: String, access_key_id: String, secret_access_key: String, bucket_region: String)**
 Initializes an S3-compatible bucket for data storage.
-
-- **queryBucket(userName: String, dbName: String, sqlQuery: String, dateRange: Map<String, String>)**
-Queries data in the S3 bucket based on the given date range and SQL query.
 
 - **cloudSinkParquet(userName: String, dbName: String, tableName: String)**
 Upload data from the specified database and table as Parquet files, organized by day into S3-compatible bucket.

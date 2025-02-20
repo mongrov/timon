@@ -6,7 +6,7 @@ pub mod timon_engine;
 pub mod android {
   use crate::timon_engine::{
     cloud_fetch_parquet, cloud_sink_parquet, create_database, create_table, delete_database, delete_table, init_bucket, init_timon, insert,
-    list_databases, list_tables, query, query_bucket,
+    list_databases, list_tables, query,
   };
   use jni::objects::{JClass, JObject, JString, JValue};
   use jni::sys::{jint, jstring};
@@ -294,44 +294,6 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_queryBucket(
-    mut env: JNIEnv,
-    _class: JClass,
-    username: JString,
-    db_name: JString,
-    sql_query: JString,
-    date_range: JObject,
-  ) -> jstring {
-    // Convert Java strings to Rust strings
-    let rust_username: String = env.get_string(&username).expect("Couldn't get java string!").into();
-    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
-    let rust_sql_query: String = env.get_string(&sql_query).expect("Couldn't get java string!").into();
-
-    let mut rust_date_range: HashMap<&str, &str> = HashMap::new();
-    let rust_start = get_date_range_value(&mut env, &date_range, "start");
-    let rust_end = get_date_range_value(&mut env, &date_range, "end");
-    rust_date_range.insert("start_date", &rust_start);
-    rust_date_range.insert("end_date", &rust_end);
-
-    match Runtime::new()
-      .unwrap()
-      .block_on(query_bucket(&rust_username, &rust_db_name, &rust_sql_query, rust_date_range))
-    {
-      Ok(result) => {
-        let json_string = result.to_string();
-        let output = env.new_string(json_string).expect("Couldn't create success string!");
-        output.into_raw()
-      }
-      Err(e) => {
-        let error_message = env
-          .new_string(format!("Error querying Parquet files: {:?}", e))
-          .expect("Couldn't create java string!");
-        error_message.into_raw()
-      }
-    }
-  }
-
-  #[no_mangle]
   pub unsafe extern "C" fn Java_com_rustexample_TimonModule_cloudSinkParquet(
     mut env: JNIEnv,
     _class: JClass,
@@ -401,7 +363,7 @@ pub mod android {
 pub mod ios {
   use crate::timon_engine::{
     cloud_fetch_parquet, cloud_sink_parquet, create_database, create_table, delete_database, delete_table, init_bucket, init_timon, insert,
-    list_databases, list_tables, query, query_bucket,
+    list_databases, list_tables, query,
   };
   use libc::c_char;
   use std::collections::HashMap;
@@ -668,52 +630,6 @@ pub mod ios {
             }
             Err(err) => {
               let err_message = serde_json::json!({ "error": format!("Failed to initialize S3 bucket: {:?}", err) }).to_string();
-              string_to_c_str(err_message)
-            }
-          }
-        }
-        _ => {
-          let err_message = serde_json::json!({ "error": "Invalid arguments" }).to_string();
-          string_to_c_str(err_message)
-        }
-      }
-    }
-  }
-
-  #[no_mangle]
-  pub extern "C" fn Java_com_rustexample_TimonModule_queryBucket(
-    username: *const c_char,
-    db_name: *const c_char,
-    sql_query: *const c_char,
-    date_range_json: *const c_char,
-  ) -> *mut c_char {
-    unsafe {
-      match (
-        c_str_to_string(username),
-        c_str_to_string(db_name),
-        c_str_to_string(sql_query),
-        c_str_to_string(date_range_json),
-      ) {
-        (Ok(rust_username), Ok(rust_db_name), Ok(rust_sql_query), Ok(rust_date_range_json)) => {
-          // Parse date_range_json into HashMap
-          let rust_date_range: HashMap<String, String> = serde_json::from_str(&rust_date_range_json).unwrap_or_default();
-          let start_date = rust_date_range.get("start").cloned().unwrap_or_else(|| "1970-01-01".to_string());
-          let end_date = rust_date_range.get("end").cloned().unwrap_or_else(|| "1970-01-02".to_string());
-
-          let mut date_range_map = HashMap::new();
-          date_range_map.insert("start_date", start_date.as_str());
-          date_range_map.insert("end_date", end_date.as_str());
-
-          match Runtime::new()
-            .unwrap()
-            .block_on(query_bucket(&rust_username, &rust_db_name, &rust_sql_query, date_range_map))
-          {
-            Ok(result) => {
-              let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "[]".to_string());
-              string_to_c_str(json_string)
-            }
-            Err(err) => {
-              let err_message = serde_json::json!({ "error": format!("Error querying bucket: {:?}", err) }).to_string();
               string_to_c_str(err_message)
             }
           }

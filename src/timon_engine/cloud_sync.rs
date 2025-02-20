@@ -1,14 +1,7 @@
-use super::db_manager::{DataFusionOutput, DatabaseManager};
-use super::helpers::{
-  cleanup_old_files, combine_unique_batches, extract_table_name, filter_files_by_date_range, get_property_fields, get_table_columns,
-  read_parquet_batches, record_batches_to_json,
-};
+use super::db_manager::DatabaseManager;
+use super::helpers::{cleanup_old_files, combine_unique_batches, filter_files_by_date_range, get_property_fields, read_parquet_batches};
 use datafusion::arrow::array::RecordBatch;
-use datafusion::datasource::listing::{ListingTable, ListingTableConfig, ListingTableUrl};
-use datafusion::datasource::MemTable;
-use datafusion::error::Result as DataFusionResult;
 use datafusion::parquet::arrow::ArrowWriter;
-use datafusion::prelude::*;
 use futures::{StreamExt, TryStreamExt};
 use object_store::aws::{AmazonS3, AmazonS3Builder};
 use object_store::path::Path as StorePath;
@@ -21,7 +14,6 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::{collections::HashMap, sync::Arc};
 use tokio::io::AsyncReadExt;
-use url::Url;
 
 pub struct CloudStorageManager {
   s3_store: Arc<AmazonS3>,
@@ -70,108 +62,6 @@ impl CloudStorageManager {
       s3_store: Arc::new(s3_store),
       db_manager,
       bucket_name,
-    }
-  }
-
-  pub async fn query_bucket(
-    &self,
-    username: &str,
-    db_name: &str,
-    sql_query: &str,
-    date_range: HashMap<&str, &str>,
-    is_json_format: bool,
-  ) -> DataFusionResult<DataFusionOutput> {
-    let session_context = SessionContext::new();
-    let table_name = &extract_table_name(sql_query);
-
-    // Parse the date_range and generate Parquet file paths
-    let file_list = match self.generate_s3_paths(username, db_name, table_name, date_range).await {
-      Ok(files) => files.iter().map(|file| format!("s3://{}/{}", self.bucket_name, file)).collect::<Vec<_>>(),
-      Err(e) => {
-        eprintln!("Error generating S3 paths: {:?}", e);
-        return Err(datafusion::error::DataFusionError::Execution(format!(
-          "Failed to generate S3 paths: {:?}",
-          e
-        )));
-      }
-    };
-
-    // Register the object store with the session context
-    let store_url = Url::parse(&format!("s3://{}", &self.bucket_name)).unwrap();
-    session_context.runtime_env().register_object_store(&store_url, self.s3_store.clone());
-
-    // Create a list of table names and register Parquet files
-    let mut table_names = Vec::new();
-    for (i, file_url) in file_list.iter().enumerate() {
-      let table_name = format!("{}_{}", table_name, i);
-      let file_url_parsed = match ListingTableUrl::parse(file_url) {
-        Ok(url) => url,
-        Err(e) => {
-          eprintln!("Warning: Failed to parse file URL {}: {:?}", file_url, e);
-          continue;
-        }
-      };
-
-      let config = match ListingTableConfig::new(file_url_parsed).infer(&session_context.state()).await {
-        Ok(cfg) => cfg,
-        Err(_) => {
-          eprintln!("Warning: Failed to infer schema for {}", file_url);
-          continue;
-        }
-      };
-
-      match ListingTable::try_new(config) {
-        Ok(table) => match session_context.register_table(&table_name, Arc::new(table)) {
-          Ok(_) => {
-            table_names.push(table_name);
-          }
-          Err(e) => {
-            eprintln!("Warning: Failed to register table {}: {:?}", table_name, e);
-          }
-        },
-        Err(e) => {
-          eprintln!("Warning: Failed to create ListingTable for {}: {:?}", file_url, e);
-        }
-      }
-    }
-
-    if table_names.is_empty() {
-      return Err(datafusion::error::DataFusionError::Plan("No valid tables found to query.".to_string()));
-    }
-
-    let column_names = get_table_columns(&session_context, &table_names[0]).await?;
-    // Combine tables using UNION ALL with explicit column selection
-    let combined_query = format!(
-      "SELECT {} FROM ({}) AS combined_table",
-      column_names,
-      table_names
-        .iter()
-        .map(|name| format!("SELECT {} FROM {}", column_names, name))
-        .collect::<Vec<_>>()
-        .join(" UNION ALL ")
-    );
-
-    // Execute the combined query
-    let combined_df = session_context.sql(&combined_query).await?;
-    let combined_results = combined_df.collect().await?;
-    // Create an in-memory table from the combined results
-    let schema = combined_results[0].schema();
-    let mem_table = MemTable::try_new(schema, vec![combined_results])?;
-    session_context.register_table("combined_table", Arc::new(mem_table))?;
-    // Adjust the user-provided SQL query to run on the combined table
-    let adjusted_sql_query = sql_query.replace(table_name, "combined_table");
-    // Execute the user-provided SQL query on the combined table
-    let final_df = session_context.sql(&adjusted_sql_query).await?;
-    let final_results = final_df.collect().await?;
-
-    if is_json_format {
-      let json_result = record_batches_to_json(&final_results).unwrap();
-      Ok(DataFusionOutput::Json(json_result))
-    } else {
-      let final_schema = final_results[0].schema();
-      let final_mem_table = MemTable::try_new(final_schema, vec![final_results])?;
-      let final_df = session_context.read_table(Arc::new(final_mem_table))?;
-      Ok(DataFusionOutput::DataFrame(final_df))
     }
   }
 
@@ -311,26 +201,6 @@ impl CloudStorageManager {
       }
     }
     Ok(())
-  }
-
-  async fn generate_s3_paths(
-    &self,
-    username: &str,
-    db_name: &str,
-    table_name: &str,
-    date_range: HashMap<&str, &str>,
-  ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    // Construct the prefix (path) to list files from
-    let prefix_path = format!("{}/{}/{}", username, db_name, table_name);
-
-    // Extract file paths from the collected ObjectMeta
-    let files: Vec<String> = self.list_cloud_files(&prefix_path).await?;
-    // object_metas.into_iter().map(|object_meta| object_meta.location.to_string()).collect(); // Filter files by date range
-    let start_date = date_range.get("start_date").ok_or("Missing start_date")?;
-    let end_date = date_range.get("end_date").ok_or("Missing end_date")?;
-    let filtered_files = filter_files_by_date_range(files, start_date, end_date)?;
-
-    Ok(filtered_files)
   }
 
   async fn list_cloud_files(&self, prefix_path: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
