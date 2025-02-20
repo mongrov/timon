@@ -1,17 +1,20 @@
 use super::db_manager::DatabaseManager;
 use super::helpers::{cleanup_old_files, combine_unique_batches, filter_files_by_date_range, get_property_fields, read_parquet_batches};
+use chrono::{DateTime, Utc};
 use datafusion::arrow::array::RecordBatch;
 use datafusion::parquet::arrow::ArrowWriter;
 use futures::{StreamExt, TryStreamExt};
 use object_store::aws::{AmazonS3, AmazonS3Builder};
 use object_store::path::Path as StorePath;
-use object_store::{ClientOptions, ObjectMeta, ObjectStore};
+use object_store::ObjectStore;
+use object_store::{ClientOptions, ObjectMeta};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 use std::{collections::HashMap, sync::Arc};
 use tokio::io::AsyncReadExt;
 
@@ -116,6 +119,7 @@ impl CloudStorageManager {
     batches: &mut Vec<RecordBatch>,
     processed_files: &mut Vec<PathBuf>,
   ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let s3_store = &self.s3_store;
     let file_path = PathBuf::from(file);
     let filename = file_path.file_name().and_then(|n| n.to_str());
 
@@ -127,27 +131,45 @@ impl CloudStorageManager {
         let s3_temp_path = format!("{}/merge_workspace/{}/{}", self.db_manager.storage_path, username, name);
         let mut s3_batches = Vec::new();
 
-        let s3_available = self
-          .download_from_bucket(&target_path, &s3_temp_path)
-          .await
-          .map(|_| read_parquet_batches(Path::new(&s3_temp_path), &mut s3_batches).is_ok())
-          .unwrap_or(false);
+        // Get local file's last modified time
+        let local_metadata = fs::metadata(&file_path)?;
+        let local_modified_time = local_metadata.modified()?.duration_since(UNIX_EPOCH)?.as_secs();
+        let local_modified_datetime = DateTime::<Utc>::from(UNIX_EPOCH + std::time::Duration::from_secs(local_modified_time));
 
-        let mut local_batches = Vec::new();
-        read_parquet_batches(&file_path, &mut local_batches)?;
+        // Use `head()` to check if file exists and get metadata
+        let s3_modified_datetime = match s3_store.head(&StorePath::from(target_path.clone())).await {
+          Ok(meta) => meta.last_modified,
+          Err(_) => {
+            println!("S3 file does not exist, uploading local file...");
+            self.upload_to_bucket(&file_path.to_string_lossy(), &target_path).await?;
+            println!("Successfully uploaded new: '{}'", file_path.to_string_lossy());
+            return Ok(None);
+          }
+        };
 
-        if s3_available {
-          let merged_batches = combine_unique_batches(local_batches, s3_batches, unique_fields)?;
-          if !merged_batches.is_empty() {
-            batches.extend(merged_batches);
-            processed_files.push(file_path);
-            processed_files.push(PathBuf::from(&s3_temp_path));
-            return Ok(Some(target_path));
+        // Compare timestamps before downloading
+        if local_modified_datetime > s3_modified_datetime {
+          println!("Local file is newer than S3, downloading S3 version for merge...");
+          let s3_available = self
+            .download_from_bucket(&target_path, &s3_temp_path)
+            .await
+            .map(|_| read_parquet_batches(Path::new(&s3_temp_path), &mut s3_batches).is_ok())
+            .unwrap_or(false);
+
+          let mut local_batches = Vec::new();
+          read_parquet_batches(&file_path, &mut local_batches)?;
+
+          if s3_available {
+            let merged_batches = combine_unique_batches(local_batches, s3_batches, unique_fields)?;
+            if !merged_batches.is_empty() {
+              batches.extend(merged_batches);
+              processed_files.push(file_path);
+              processed_files.push(PathBuf::from(&s3_temp_path));
+              return Ok(Some(target_path));
+            }
           }
         } else {
-          processed_files.push(PathBuf::from(&file_path));
-          self.upload_to_bucket(&file_path.to_string_lossy(), &target_path).await?;
-          println!("Successfully uploaded new: '{}'", file_path.to_string_lossy());
+          println!("Local file is older or identical to S3, skipping download.");
         }
       }
     }
