@@ -20,7 +20,7 @@ fn cleanup_temp_dir(path: PathBuf) {
 fn test_create_and_list_databases() {
   let temp_dir = create_temp_dir();
   let storage_path = temp_dir.to_str().unwrap();
-  let mut db_manager = DatabaseManager::new(storage_path, 30);
+  let mut db_manager = DatabaseManager::new(storage_path, 30, "ahmed_test");
 
   // Test creating a database
   assert!(db_manager.create_database("test_db").is_ok());
@@ -36,7 +36,7 @@ fn test_create_and_list_databases() {
 fn test_create_and_list_tables() {
   let temp_dir = create_temp_dir();
   let storage_path = temp_dir.to_str().unwrap();
-  let mut db_manager = DatabaseManager::new(storage_path, 30);
+  let mut db_manager = DatabaseManager::new(storage_path, 30, "ahmed_test");
 
   // Create a database
   db_manager.create_database("test_db").unwrap();
@@ -59,7 +59,7 @@ fn test_create_and_list_tables() {
 fn test_insert_and_query_data() {
   let temp_dir = create_temp_dir();
   let storage_path = temp_dir.to_str().unwrap();
-  let mut db_manager = DatabaseManager::new(storage_path, 30);
+  let mut db_manager = DatabaseManager::new(storage_path, 30, "ahmed_test");
 
   // Create a database and table
   db_manager.create_database("test_db").unwrap();
@@ -101,7 +101,7 @@ fn test_insert_and_query_data() {
 fn test_schema_validation() {
   let temp_dir = create_temp_dir();
   let storage_path = temp_dir.to_str().unwrap();
-  let mut db_manager = DatabaseManager::new(storage_path, 30);
+  let mut db_manager = DatabaseManager::new(storage_path, 30, "ahmed_test");
 
   // Create a database and table
   db_manager.create_database("test_db").unwrap();
@@ -131,7 +131,7 @@ fn test_schema_validation() {
 fn test_delete_database_and_table() {
   let temp_dir = create_temp_dir();
   let storage_path = temp_dir.to_str().unwrap();
-  let mut db_manager = DatabaseManager::new(storage_path, 30);
+  let mut db_manager = DatabaseManager::new(storage_path, 30, "ahmed_test");
 
   // Create a database and table
   db_manager.create_database("test_db").unwrap();

@@ -21,13 +21,15 @@ pub mod android {
     _class: JClass,
     storage_path: JString,
     bucket_interval: jint,
+    username: JString,
   ) -> jstring {
     // Convert `storage_path` from Java `String` to Rust `String`
     let rust_storage_path: String = env.get_string(&storage_path).expect("Couldn't get java string!").into();
     // Convert `bucket_interval` from Java `int` to Rust `u32`
     let rust_bucket_interval: u32 = bucket_interval as u32;
+    let rust_username: String = env.get_string(&username).expect("Couldn't get java string!").into();
 
-    match init_timon(&rust_storage_path, rust_bucket_interval) {
+    match init_timon(&rust_storage_path, rust_bucket_interval, rust_username) {
       Ok(result) => {
         let json_string = result.to_string();
         let output = env.new_string(json_string).expect("Couldn't create success string!");
@@ -397,20 +399,24 @@ pub mod ios {
   }
 
   #[no_mangle]
-  pub extern "C" fn Java_com_rustexample_TimonModule_initTimon(storage_path: *const c_char, bucket_interval: u32) -> *mut c_char {
+  pub extern "C" fn Java_com_rustexample_TimonModule_initTimon(
+    storage_path: *const c_char,
+    bucket_interval: u32,
+    username: *const c_char,
+  ) -> *mut c_char {
     unsafe {
-      match c_str_to_string(storage_path) {
-        Ok(rust_storage_path) => match init_timon(&rust_storage_path, bucket_interval) {
+      match (c_str_to_string(storage_path), c_str_to_string(username)) {
+        (Ok(rust_storage_path), Ok(rust_username)) => match init_timon(&rust_storage_path, bucket_interval, &rust_username) {
           Ok(result) => {
             let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
             string_to_c_str(json_string)
           }
           Err(err) => {
-            let err_message = serde_json::json!({ "error": format!("Failed to initialize Timon: {:?}", err)}).to_string();
+            let err_message = serde_json::json!({ "error": format!("Failed to initialize Timon: {:?}", err) }).to_string();
             string_to_c_str(err_message)
           }
         },
-        Err(err) => {
+        (Err(err), _) | (_, Err(err)) => {
           let err_message = serde_json::json!({ "error": err }).to_string();
           string_to_c_str(err_message)
         }

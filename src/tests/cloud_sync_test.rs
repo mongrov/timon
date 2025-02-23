@@ -2,7 +2,7 @@ use crate::timon_engine::{cloud_sync::CloudStorageManager, db_manager::DatabaseM
 
 #[tokio::test]
 async fn test_new_cloud_storage_manager() {
-  let db_manager = DatabaseManager::new("tmp/tests", 30); // Assuming a constructor exists
+  let db_manager = DatabaseManager::new("tmp/tests", 30, "ahmed_test"); // Assuming a constructor exists
   let manager = CloudStorageManager::new(db_manager, None, None, None, Some("test-bucket"), None);
   assert_eq!(manager.bucket_name, "test-bucket");
 }

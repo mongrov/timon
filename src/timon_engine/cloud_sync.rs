@@ -71,12 +71,13 @@ impl CloudStorageManager {
     }
   }
 
-  pub async fn cloud_sink_parquet(&self, username: &str, db_name: &str, table_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+  pub async fn cloud_sink_parquet(&self, db_name: &str, table_name: &str) -> Result<(), Box<dyn std::error::Error>> {
     let files = self.db_manager.build_files_list(db_name, table_name, None)?;
     if files.is_empty() {
       return Err(format!("No data files found for Table '{}' in Database '{}'.", table_name, db_name).into());
     }
 
+    let username = &self.db_manager.username;
     let regx = Regex::new(r"(\d{4})-(\d{2})-(\d{2})")?;
     let table_schema = self.db_manager.get_table_schema(db_name, table_name)?;
     let unique_fields = get_property_fields(&table_schema, "unique")?;

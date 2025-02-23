@@ -61,7 +61,8 @@ fn main() {
 #[allow(dead_code)]
 async fn test_local_storage() {
   const STORAGE_PATH: &str = "tmp/timon";
-  let timon_result = init_timon(STORAGE_PATH, 5).unwrap();
+  const USERNAME: &str = "ahmed_test";
+  let timon_result = init_timon(STORAGE_PATH, 5, USERNAME).unwrap();
   println!("init_timon -> {}", timon_result);
 
   const DATABASE_NAME: &str = "zivaring";
@@ -153,7 +154,7 @@ async fn test_local_storage() {
   println!("Insertion result: {}", insertion_result.unwrap());
   println!("Time taken for insertion: {:.3} seconds", duration.as_secs_f64());
 
-  let sql_query = format!(r#"SELECT date as dt, step FROM activitydetails ORDER BY date ASC"#,);
+  let sql_query = format!(r#"SELECT * FROM activitydetails ORDER BY date ASC LIMIT 5"#);
   let query_result = query(DATABASE_NAME, &sql_query, None).await;
   println!("query_result: {}", query_result.unwrap()["json_value"]);
 
@@ -172,25 +173,25 @@ async fn test_local_storage() {
 
 #[allow(dead_code)]
 async fn test_s3_sync() {
-  const USERNAME: &str = "wRE3w2vJcZLaabPQs";
+  const USERNAME: &str = "ahmed_test";
   const DATABASE_NAME: &str = "zivaring";
   const TABLE_NAME: &str = "activitydetails";
-  init_timon("tmp/timon", 5).unwrap();
+  init_timon("tmp/timon", 5, USERNAME).unwrap();
 
   let bucket_endpoint = "https://s3.us-west-2.amazonaws.com";
   let bucket_name = "zivaoneapp";
-  let access_key_id = "xx";
-  let secret_access_key = "xx";
+  let access_key_id = "AKIASXLNFKSVBDW4IAMJ";
+  let secret_access_key = "REMOVED_SECRET";
   let bucket_region = "us-west-2";
   let init_bucket_result = init_bucket(bucket_endpoint, bucket_name, access_key_id, secret_access_key, bucket_region).unwrap();
   println!("init_bucket_result: {}", init_bucket_result);
 
-  let fetch_range = std::collections::HashMap::from([("start_date", "2025-01-10"), ("end_date", "2025-01-31")]);
+  let fetch_range = std::collections::HashMap::from([("start_date", "2025-01-01"), ("end_date", "2025-12-30")]);
   let cloud_fetch_parquet_result = cloud_fetch_parquet(USERNAME, DATABASE_NAME, TABLE_NAME, fetch_range).await;
   println!("{}", cloud_fetch_parquet_result.unwrap());
 
-  // let cloud_sink_parquet_result = cloud_sink_parquet(USERNAME, DATABASE_NAME, TABLE_NAME).await;
-  // println!("{}", cloud_sink_parquet_result.unwrap());
+  let cloud_sink_parquet_result: Result<serde_json::Value, String> = cloud_sink_parquet(DATABASE_NAME, TABLE_NAME).await;
+  println!("{}", cloud_sink_parquet_result.unwrap());
 }
 
 // This block is executed for local development testing(run async tests for local_storage and S3 cloud_sync).

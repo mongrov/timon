@@ -33,8 +33,8 @@ fn get_database_manager() -> &'static DatabaseManager {
 }
 
 #[allow(dead_code)]
-pub fn init_timon(storage_path: &str, bucket_interval: u32) -> Result<Value, String> {
-  let db_manager = DatabaseManager::new(storage_path, bucket_interval);
+pub fn init_timon(storage_path: &str, bucket_interval: u32, username: &str) -> Result<Value, String> {
+  let db_manager = DatabaseManager::new(storage_path, bucket_interval, username);
 
   match DATABASE_MANAGER.set(db_manager) {
     Ok(_) => {
@@ -292,9 +292,9 @@ pub fn init_bucket(
   }
 }
 
-pub async fn cloud_sink_parquet(username: &str, db_name: &str, table_name: &str) -> Result<Value, String> {
+pub async fn cloud_sink_parquet(db_name: &str, table_name: &str) -> Result<Value, String> {
   let cloud_storage_manager = get_cloud_storage_manager();
-  match cloud_storage_manager.cloud_sink_parquet(username, db_name, table_name).await {
+  match cloud_storage_manager.cloud_sink_parquet(db_name, table_name).await {
     Ok(_) => {
       let result = TimonResult {
         status: 200,

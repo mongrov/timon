@@ -20,7 +20,7 @@ These functions manage databases and tables stored locally on the file system. D
 
 ```kotlin
 // Initialize Timon with a local storage path
-external fun initTimon(storagePath: String, bucketInterval: Number): String
+external fun initTimon(storagePath: String, bucketInterval: Number, userName: String): String
 
 // Create a new database
 external fun createDatabase(dbName: String): String
@@ -56,47 +56,11 @@ These functions manage data stored in an S3-compatible bucket, allowing for quer
 external fun initBucket(bucket_endpoint: String, bucket_name: String, access_key_id: String, secret_access_key: String, bucket_region: String): String
 
 // Sink daily data to Parquet format in the bucket
-external fun cloudSinkParquet(userName: String, dbName: String, tableName: String): String
+external fun cloudSinkParquet(dbName: String, tableName: String): String
 
 // Fetch data from a given user and save it locally
 external fun cloudFetchParquet(userName: String, dbName: String, tableName: String, dateRange: Map<String, String>): String
 ```
-
-## Function Descriptions
-
-- **initTimon(storagePath: String, bucketInterval: Number)**
-Initializes the local file storage at the specified path.
-
-- **createDatabase(dbName: String)**
-Creates a new database with the specified name.
-
-- **createTable(dbName: String, tableName: String)**
-Creates a new table in the specified database.
-
-- **listDatabases()**
-Lists all databases in the local storage.
-
-- **listTables(dbName: String)**
-Lists all tables in the specified database.
-
-- **deleteDatabase(dbName: String)**
-Deletes the specified database.
-
-- **deleteTable(dbName: String, tableName: String)**
-Deletes the specified table from the given database.
-
-- **insert(dbName: String, tableName: String, jsonData: String)**
-Inserts JSON-formatted data into the specified table.
-
-- **query(dbName: String, sqlQuery: String)**
-Executes an SQL query on the specified database.
-
-- **initBucket(bucket_endpoint: String, bucket_name: String, access_key_id: String, secret_access_key: String, bucket_region: String)**
-Initializes an S3-compatible bucket for data storage.
-
-- **cloudSinkParquet(userName: String, dbName: String, tableName: String)**
-Upload data from the specified database and table as Parquet files, organized by day into S3-compatible bucket.
-
 
 ## Get The Latest Utility Build
 

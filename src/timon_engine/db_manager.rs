@@ -67,6 +67,7 @@ struct DatabaseInfo {
 #[derive(Clone)]
 pub struct DatabaseManager {
   pub storage_path: String,
+  pub username: String,
   metadata: Metadata,
   data_path: String,
   metadata_path: String,
@@ -74,7 +75,7 @@ pub struct DatabaseManager {
 }
 
 impl DatabaseManager {
-  pub fn new(storage_path: &str, bucket_interval: u32) -> Self {
+  pub fn new(storage_path: &str, bucket_interval: u32, username: &str) -> Self {
     let data_path = format!("{}/data", storage_path);
     let metadata_path = format!("{}/metadata.json", storage_path);
 
@@ -113,6 +114,7 @@ impl DatabaseManager {
       data_path,
       metadata_path,
       bucket_interval,
+      username: username.to_string(),
     };
 
     // Update metadata with the provided storage_path
@@ -397,13 +399,31 @@ impl DatabaseManager {
     let session_context = SessionContext::new();
     let table_name = extract_table_name(sql_query);
     let query_time_range = extract_query_time_range(sql_query);
-    let files_list = self
+
+    let files_list_default_path = self
       .build_files_list(db_name, &table_name, username)
       .map_err(|e| DataFusionError::Execution(format!("Error building files list: {}", e)))?;
 
-    // Filter partitions based on time range if specified
+    let files_list_group_path = username.map(|_| Vec::new()).unwrap_or_else(|| {
+      self
+        .build_files_list(db_name, &table_name, Some(&self.username))
+        .map_err(|e| DataFusionError::Execution(format!("Error building files list: {}", e)))
+        .unwrap_or_default()
+    });
+
+    let mut unique_files: HashSet<String> = HashSet::new();
+    let mut merged_files = Vec::new();
+
+    // Prioritize group path files, then add default path files if not present
+    for file in files_list_group_path.iter().chain(files_list_default_path.iter()) {
+      let file_name = Path::new(file).file_name().unwrap().to_string_lossy().to_string();
+      if unique_files.insert(file_name.clone()) {
+        merged_files.push(file.clone());
+      }
+    }
+
     let filtered_files = if let Some((start_time, end_time)) = query_time_range {
-      files_list
+      merged_files
         .into_iter()
         .filter(|file_path| {
           let partition_time = extract_partition_time(file_path);
@@ -411,7 +431,7 @@ impl DatabaseManager {
         })
         .collect::<Vec<_>>()
     } else {
-      files_list
+      merged_files
     };
 
     if filtered_files.is_empty() {
