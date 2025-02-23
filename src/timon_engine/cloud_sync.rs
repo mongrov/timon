@@ -1,5 +1,7 @@
 use super::db_manager::DatabaseManager;
-use super::helpers::{cleanup_old_files, combine_unique_batches, filter_files_by_date_range, get_property_fields, read_parquet_batches};
+use super::helpers::{
+  cleanup_old_files, combine_unique_batches, filter_files_by_date_range, get_local_file_modified_time, get_property_fields, read_parquet_batches,
+};
 use chrono::{DateTime, Utc};
 use datafusion::arrow::array::RecordBatch;
 use datafusion::parquet::arrow::ArrowWriter;
@@ -10,11 +12,12 @@ use object_store::ObjectStore;
 use object_store::{ClientOptions, ObjectMeta};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::collections::HashSet;
 use std::fs::File;
+use std::fs::{self};
 use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::path::Path;
+use std::path::PathBuf;
 use std::{collections::HashMap, sync::Arc};
 use tokio::io::AsyncReadExt;
 
@@ -131,10 +134,7 @@ impl CloudStorageManager {
         let s3_temp_path = format!("{}/merge_workspace/{}/{}", self.db_manager.storage_path, username, name);
         let mut s3_batches = Vec::new();
 
-        // Get local file's last modified time
-        let local_metadata = fs::metadata(&file_path)?;
-        let local_modified_time = local_metadata.modified()?.duration_since(UNIX_EPOCH)?.as_secs();
-        let local_modified_datetime = DateTime::<Utc>::from(UNIX_EPOCH + std::time::Duration::from_secs(local_modified_time));
+        let local_modified_datetime = get_local_file_modified_time(&file_path.to_string_lossy()).unwrap_or_default();
 
         // Use `head()` to check if file exists and get metadata
         let s3_modified_datetime = match s3_store.head(&StorePath::from(target_path.clone())).await {
@@ -207,24 +207,41 @@ impl CloudStorageManager {
     date_range: HashMap<&str, &str>,
   ) -> Result<(), Box<dyn std::error::Error>> {
     let prefix_path = format!("{}/{}/{}", username, db_name, table_name);
-    let cloud_files = &self.list_cloud_files(&prefix_path).await?;
+    let cloud_files = self.list_cloud_files(&prefix_path).await?;
     let start_date = date_range.get("start_date").ok_or("Missing start_date")?;
     let end_date = date_range.get("end_date").ok_or("Missing end_date")?;
-    let filtered_cloud_files = filter_files_by_date_range(cloud_files.to_vec(), start_date, end_date)?;
+    let filtered_files: HashSet<_> = filter_files_by_date_range(cloud_files.iter().map(|(path, _)| path.clone()).collect(), start_date, end_date)?
+      .into_iter()
+      .collect();
 
-    for cloud_file in filtered_cloud_files {
+    for (cloud_file, cloud_modified_time) in cloud_files {
+      if !filtered_files.contains(&cloud_file) {
+        continue;
+      }
+
       if let Some(filename) = Path::new(&cloud_file).file_name().and_then(|n| n.to_str()) {
         let local_path = format!(
           "{}/group/{}/{}/{}/{}",
-          &self.db_manager.storage_path, username, db_name, table_name, filename
+          self.db_manager.storage_path, username, db_name, table_name, filename
         );
-        self.download_from_bucket(&cloud_file, &local_path).await?;
+
+        match get_local_file_modified_time(&local_path) {
+          Some(local_modified_time) if local_modified_time >= cloud_modified_time => {
+            println!("Skipping {} (Up to date)", filename);
+            continue;
+          }
+          _ => {
+            println!("Downloading {}", filename);
+            self.download_from_bucket(&cloud_file, &local_path).await?;
+          }
+        }
       }
     }
+
     Ok(())
   }
 
-  async fn list_cloud_files(&self, prefix_path: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+  async fn list_cloud_files(&self, prefix_path: &str) -> Result<Vec<(String, DateTime<Utc>)>, Box<dyn std::error::Error>> {
     // List all objects under the prefix
     let objects = self.s3_store.list(Some(&StorePath::from(prefix_path)));
     // Collect the stream of ObjectMeta into a Vec<ObjectMeta>
@@ -232,8 +249,17 @@ impl CloudStorageManager {
       .map(|result| result.map_err(|e| Box::new(e) as Box<dyn std::error::Error>))
       .try_collect()
       .await?;
-    // Extract file paths from the collected ObjectMeta
-    let files: Vec<String> = object_metas.into_iter().map(|object_meta| object_meta.location.to_string()).collect();
+
+    // Extract file paths and last modified timestamps
+    let files: Vec<(String, DateTime<Utc>)> = object_metas
+      .into_iter()
+      .map(|object_meta| {
+        let path = object_meta.location.to_string();
+        let modified = object_meta.last_modified;
+        (path, modified)
+      })
+      .collect();
+
     Ok(files)
   }
 

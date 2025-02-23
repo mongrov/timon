@@ -17,10 +17,11 @@ use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::error::Error;
-use std::fs::{self, File};
+use std::fs::{self, metadata, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, UNIX_EPOCH};
 
 pub fn record_batches_to_json(batches: &[RecordBatch]) -> Result<Value, serde_json::Error> {
   fn array_value_to_json(array: &ArrayRef, row_index: usize) -> serde_json::Value {
@@ -500,6 +501,16 @@ fn parse_timestamp(datetime_str: &str) -> Option<i64> {
       .ok()
       .map(|dt| Utc.from_utc_datetime(&dt).timestamp())
   }
+}
+
+pub fn get_local_file_modified_time(local_path: &str) -> Option<DateTime<Utc>> {
+  if let Ok(metadata) = metadata(local_path) {
+    if let Ok(modified) = metadata.modified() {
+      let duration_since_epoch = modified.duration_since(UNIX_EPOCH).unwrap_or_default();
+      return Some(DateTime::<Utc>::from(UNIX_EPOCH + Duration::from_secs(duration_since_epoch.as_secs())));
+    }
+  }
+  None
 }
 
 pub fn combine_unique_batches(
