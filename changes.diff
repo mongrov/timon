@@ -1,0 +1,403 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index 170560f..2a56211 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -5,8 +5,8 @@ pub mod timon_engine;
+ #[cfg(target_os = "android")]
+ pub mod android {
+   use crate::timon_engine::{
+-    cloud_fetch_parquet, cloud_sink_parquet, create_database, create_table, delete_database, delete_table, init_bucket, init_timon, insert,
+-    list_databases, list_tables, query,
++    cloud_fetch_parquet, cloud_sink_parquet, cloud_sync_parquet, create_database, create_table, delete_database, delete_table, init_bucket,
++    init_timon, insert, list_databases, list_tables, query,
+   };
+   use jni::objects::{JClass, JObject, JString, JValue};
+   use jni::sys::{jint, jstring};
+@@ -295,6 +295,49 @@ pub mod android {
+     }
+   }
+ 
++  #[no_mangle]
++  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_cloudSyncParquet(
++    mut env: JNIEnv,
++    _class: JClass,
++    db_name: JString,
++    table_name: JString,
++    date_range: JObject,
++    username: JString,
++  ) -> jstring {
++    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
++    let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
++
++    let mut rust_date_range: HashMap<&str, &str> = HashMap::new();
++    let rust_start = get_date_range_value(&mut env, &date_range, "start");
++    let rust_end = get_date_range_value(&mut env, &date_range, "end");
++    rust_date_range.insert("start_date", &rust_start);
++    rust_date_range.insert("end_date", &rust_end);
++
++    let rust_username: Option<String> = if username.is_null() {
++      None
++    } else {
++      Some(env.get_string(&username).expect("Couldn't get username java string!").into())
++    };
++
++    match Runtime::new().unwrap().block_on(cloud_sync_parquet(
++      &rust_db_name,
++      &rust_table_name,
++      rust_date_range,
++      rust_username.as_deref(),
++    )) {
++      Ok(result) => {
++        let json_string = result.to_string();
++        let output = env.new_string(json_string).expect("Couldn't create success string!");
++        output.into_raw()
++      }
++      Err(err) => {
++        let err_message = format!("Failed fetch s3 parquet files: {:?}", err);
++        let output = env.new_string(err_message).expect("Couldn't create error string!");
++        output.into_raw()
++      }
++    }
++  }
++
+   #[no_mangle]
+   pub unsafe extern "C" fn Java_com_rustexample_TimonModule_cloudSinkParquet(
+     mut env: JNIEnv,
+@@ -364,8 +407,8 @@ pub mod android {
+ #[cfg(target_os = "ios")]
+ pub mod ios {
+   use crate::timon_engine::{
+-    cloud_fetch_parquet, cloud_sink_parquet, create_database, create_table, delete_database, delete_table, init_bucket, init_timon, insert,
+-    list_databases, list_tables, query,
++    cloud_fetch_parquet, cloud_sink_parquet, cloud_sync_parquet, create_database, create_table, delete_database, delete_table, init_bucket,
++    init_timon, insert, list_databases, list_tables, query,
+   };
+   use libc::c_char;
+   use std::collections::HashMap;
+@@ -648,6 +691,54 @@ pub mod ios {
+     }
+   }
+ 
++  #[no_mangle]
++  pub extern "C" fn Java_com_rustexample_TimonModule_cloudSyncParquet(
++    db_name: *const c_char,
++    table_name: *const c_char,
++    date_range_json: *const c_char,
++    username: *const c_char,
++  ) -> *mut c_char {
++    unsafe {
++      match (
++        c_str_to_string(db_name),
++        c_str_to_string(table_name),
++        c_str_to_string(date_range_json),
++        c_str_to_string(username).ok(),
++      ) {
++        (Ok(rust_db_name), Ok(rust_table_name), Ok(rust_date_range_json), rust_username) => {
++          // Parse date_range_json into HashMap
++          let rust_date_range: HashMap<String, String> = serde_json::from_str(&rust_date_range_json).unwrap_or_default();
++          let start_date = rust_date_range.get("start").cloned().unwrap_or_else(|| "1970-01-01".to_string());
++          let end_date = rust_date_range.get("end").cloned().unwrap_or_else(|| "1970-01-02".to_string());
++
++          let mut date_range_map = HashMap::new();
++          date_range_map.insert("start_date", start_date.as_str());
++          date_range_map.insert("end_date", end_date.as_str());
++
++          match Runtime::new().unwrap().block_on(cloud_sync_parquet(
++            &rust_db_name,
++            &rust_table_name,
++            date_range_map,
++            rust_username.as_deref(),
++          )) {
++            Ok(result) => {
++              let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
++              string_to_c_str(json_string)
++            }
++            Err(err) => {
++              let err_message = serde_json::json!({ "error": err }).to_string();
++              string_to_c_str(err_message)
++            }
++          }
++        }
++        _ => {
++          let err_message = serde_json::json!({ "error": "Invalid arguments" }).to_string();
++          string_to_c_str(err_message)
++        }
++      }
++    }
++  }
++
+   #[no_mangle]
+   pub extern "C" fn Java_com_rustexample_TimonModule_cloudSinkParquet(
+     username: *const c_char,
+diff --git a/src/main.rs b/src/main.rs
+index b2c6b5a..7fd3925 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -3,8 +3,8 @@ use chrono::{Duration, Local};
+ use serde_json::json;
+ use std::time::Instant;
+ pub use timon_engine::{
+-  cloud_fetch_parquet, cloud_sink_parquet, create_database, create_table, delete_database, delete_table, init_bucket, init_timon, insert,
+-  list_databases, list_tables, query,
++  cloud_fetch_parquet, cloud_sink_parquet, cloud_sync_parquet, create_database, create_table, delete_database, delete_table, init_bucket, init_timon,
++  insert, list_databases, list_tables, query,
+ };
+ #[cfg(feature = "dev_cli")]
+ mod cli;
+@@ -180,18 +180,21 @@ async fn test_s3_sync() {
+ 
+   let bucket_endpoint = "https://s3.us-west-2.amazonaws.com";
+   let bucket_name = "zivaoneapp";
+-  let access_key_id = "AKIASXLNFKSVBDW4IAMJ";
+-  let secret_access_key = "REMOVED_SECRET";
++  let access_key_id = "xxx";
++  let secret_access_key = "xxx";
+   let bucket_region = "us-west-2";
+   let init_bucket_result = init_bucket(bucket_endpoint, bucket_name, access_key_id, secret_access_key, bucket_region).unwrap();
+   println!("init_bucket_result: {}", init_bucket_result);
+ 
+   let fetch_range = std::collections::HashMap::from([("start_date", "2025-01-01"), ("end_date", "2025-12-30")]);
+-  let cloud_fetch_parquet_result = cloud_fetch_parquet(USERNAME, DATABASE_NAME, TABLE_NAME, fetch_range).await;
++  let cloud_fetch_parquet_result = cloud_fetch_parquet(USERNAME, DATABASE_NAME, TABLE_NAME, fetch_range.clone()).await;
+   println!("{}", cloud_fetch_parquet_result.unwrap());
+ 
+   let cloud_sink_parquet_result: Result<serde_json::Value, String> = cloud_sink_parquet(DATABASE_NAME, TABLE_NAME).await;
+   println!("{}", cloud_sink_parquet_result.unwrap());
++
++  let cloud_sync_parquet_result = cloud_sync_parquet(DATABASE_NAME, TABLE_NAME, fetch_range.clone(), None);
++  println!("{}", cloud_sync_parquet_result.await.unwrap());
+ }
+ 
+ // This block is executed for local development testing(run async tests for local_storage and S3 cloud_sync).
+diff --git a/src/timon_engine/cloud_sync.rs b/src/timon_engine/cloud_sync.rs
+index 2a699b1..e642805 100644
+--- a/src/timon_engine/cloud_sync.rs
++++ b/src/timon_engine/cloud_sync.rs
+@@ -71,6 +71,25 @@ impl CloudStorageManager {
+     }
+   }
+ 
++  pub async fn cloud_sync_parquet(
++    &self,
++    db_name: &str,
++    table_name: &str,
++    date_range: &HashMap<&str, &str>,
++    username: Option<&str>,
++  ) -> Result<(), Box<dyn std::error::Error>> {
++    let default_username = &self.db_manager.username;
++
++    self.cloud_sink_parquet(db_name, table_name).await?;
++    self.cloud_fetch_parquet(default_username, db_name, table_name, date_range).await?;
++
++    if let Some(group_username) = username {
++      self.cloud_fetch_parquet(group_username, db_name, table_name, date_range).await?;
++    }
++
++    Ok(())
++  }
++
+   pub async fn cloud_sink_parquet(&self, db_name: &str, table_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+     let files = self.db_manager.build_files_list(db_name, table_name, None)?;
+     if files.is_empty() {
+@@ -87,7 +106,7 @@ impl CloudStorageManager {
+ 
+     for file in &files {
+       if let Some(target_path) = self
+-        .process_file(
++        .process_sink_parquet_file(
+           file,
+           username,
+           db_name,
+@@ -112,7 +131,49 @@ impl CloudStorageManager {
+     Ok(())
+   }
+ 
+-  async fn process_file(
++  pub async fn cloud_fetch_parquet(
++    &self,
++    username: &str,
++    db_name: &str,
++    table_name: &str,
++    date_range: &HashMap<&str, &str>,
++  ) -> Result<(), Box<dyn std::error::Error>> {
++    let prefix_path = format!("{}/{}/{}", username, db_name, table_name);
++    let cloud_files = self.list_cloud_files(&prefix_path).await?;
++    let start_date = date_range.get("start_date").ok_or("Missing start_date")?;
++    let end_date = date_range.get("end_date").ok_or("Missing end_date")?;
++    let filtered_files: HashSet<_> = filter_files_by_date_range(cloud_files.iter().map(|(path, _)| path.clone()).collect(), start_date, end_date)?
++      .into_iter()
++      .collect();
++
++    for (cloud_file, cloud_modified_time) in cloud_files {
++      if !filtered_files.contains(&cloud_file) {
++        continue;
++      }
++
++      if let Some(filename) = Path::new(&cloud_file).file_name().and_then(|n| n.to_str()) {
++        let local_path = format!(
++          "{}/group/{}/{}/{}/{}",
++          self.db_manager.storage_path, username, db_name, table_name, filename
++        );
++
++        match get_local_file_modified_time(&local_path) {
++          Some(local_modified_time) if local_modified_time >= cloud_modified_time => {
++            println!("Skipping {} (Up to date)", filename);
++            continue;
++          }
++          _ => {
++            println!("Downloading {}", filename);
++            self.download_from_bucket(&cloud_file, &local_path).await?;
++          }
++        }
++      }
++    }
++
++    Ok(())
++  }
++
++  async fn process_sink_parquet_file(
+     &self,
+     file: &str,
+     username: &str,
+@@ -200,44 +261,15 @@ impl CloudStorageManager {
+     Ok(())
+   }
+ 
+-  pub async fn cloud_fetch_parquet(
+-    &self,
+-    username: &str,
+-    db_name: &str,
+-    table_name: &str,
+-    date_range: HashMap<&str, &str>,
+-  ) -> Result<(), Box<dyn std::error::Error>> {
+-    let prefix_path = format!("{}/{}/{}", username, db_name, table_name);
+-    let cloud_files = self.list_cloud_files(&prefix_path).await?;
+-    let start_date = date_range.get("start_date").ok_or("Missing start_date")?;
+-    let end_date = date_range.get("end_date").ok_or("Missing end_date")?;
+-    let filtered_files: HashSet<_> = filter_files_by_date_range(cloud_files.iter().map(|(path, _)| path.clone()).collect(), start_date, end_date)?
+-      .into_iter()
+-      .collect();
+-
+-    for (cloud_file, cloud_modified_time) in cloud_files {
+-      if !filtered_files.contains(&cloud_file) {
+-        continue;
+-      }
+-
+-      if let Some(filename) = Path::new(&cloud_file).file_name().and_then(|n| n.to_str()) {
+-        let local_path = format!(
+-          "{}/group/{}/{}/{}/{}",
+-          self.db_manager.storage_path, username, db_name, table_name, filename
+-        );
++  async fn upload_to_bucket(&self, source_path: &str, target_path: &str) -> Result<(), Box<dyn std::error::Error>> {
++    let s3_store = &self.s3_store;
++    let object_store = Arc::new(s3_store);
+ 
+-        match get_local_file_modified_time(&local_path) {
+-          Some(local_modified_time) if local_modified_time >= cloud_modified_time => {
+-            println!("Skipping {} (Up to date)", filename);
+-            continue;
+-          }
+-          _ => {
+-            println!("Downloading {}", filename);
+-            self.download_from_bucket(&cloud_file, &local_path).await?;
+-          }
+-        }
+-      }
+-    }
++    // Prepare the file for upload
++    let mut file = tokio::fs::File::open(source_path).await?;
++    let mut data = Vec::new();
++    file.read_to_end(&mut data).await?;
++    object_store.put(&StorePath::from(target_path), data.into()).await?;
+ 
+     Ok(())
+   }
+@@ -264,19 +296,6 @@ impl CloudStorageManager {
+     Ok(files)
+   }
+ 
+-  async fn upload_to_bucket(&self, source_path: &str, target_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+-    let s3_store = &self.s3_store;
+-    let object_store = Arc::new(s3_store);
+-
+-    // Prepare the file for upload
+-    let mut file = tokio::fs::File::open(source_path).await?;
+-    let mut data = Vec::new();
+-    file.read_to_end(&mut data).await?;
+-    object_store.put(&StorePath::from(target_path), data.into()).await?;
+-
+-    Ok(())
+-  }
+-
+   async fn download_from_bucket(&self, target_path: &str, local_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+     let object_store = &self.s3_store;
+     let path = StorePath::from(target_path);
+diff --git a/src/timon_engine/mod.rs b/src/timon_engine/mod.rs
+index 69eac0b..552cd1a 100644
+--- a/src/timon_engine/mod.rs
++++ b/src/timon_engine/mod.rs
+@@ -17,7 +17,7 @@ use std::sync::OnceLock;
+ * @ list_databases() & list_tables(db_name)
+ * @ delete_database(db_name) & delete_table(db_name, table_name)
+ * @ insert(db_name, table_name, json_data)
+-* @ query(db_name, sql_query)
++* @ query(db_name, sql_query, username?)
+  */
+ #[derive(Serialize)]
+ pub struct TimonResult {
+@@ -246,8 +246,9 @@ pub async fn query(db_name: &str, sql_query: &str, username: Option<&str>) -> Re
+ 
+ /* ******************************** S3 Compatible Storage ********************************
+ * @ init_bucket(bucket_endpoint, bucket_name, access_key_id, secret_access_key)
+-* @ cloud_sink_parquet(username, db_name, table_name)
+-* @ cloud_fetch_parquet(username, db_name, table_name)
++* @ cloud_sync_parquet(db_name, table_name, date_range, username?)
++* @ cloud_sink_parquet(db_name, table_name, date_range)
++* @ cloud_fetch_parquet(username, db_name, table_name, date_range)
+  */
+ 
+ static CLOUD_STORAGE_MANAGER: OnceLock<CloudStorageManager> = OnceLock::new();
+@@ -292,6 +293,31 @@ pub fn init_bucket(
+   }
+ }
+ 
++pub async fn cloud_sync_parquet(db_name: &str, table_name: &str, date_range: HashMap<&str, &str>, username: Option<&str>) -> Result<Value, String> {
++  let cloud_storage_manager = get_cloud_storage_manager();
++  match cloud_storage_manager.cloud_sync_parquet(db_name, table_name, &date_range, username).await {
++    Ok(_) => {
++      let result = TimonResult {
++        status: 200,
++        message: format!(
++          "successfully synced '{}.{}.{}' data",
++          cloud_storage_manager.bucket_name, db_name, table_name
++        ),
++        json_value: None,
++      };
++      serde_json::to_value(&result).map_err(|e| e.to_string())
++    }
++    Err(err) => {
++      let result = TimonResult {
++        status: 400,
++        message: err.to_string(),
++        json_value: None,
++      };
++      serde_json::to_value(&result).map_err(|e| e.to_string())
++    }
++  }
++}
++
+ pub async fn cloud_sink_parquet(db_name: &str, table_name: &str) -> Result<Value, String> {
+   let cloud_storage_manager = get_cloud_storage_manager();
+   match cloud_storage_manager.cloud_sink_parquet(db_name, table_name).await {
+@@ -319,7 +345,10 @@ pub async fn cloud_sink_parquet(db_name: &str, table_name: &str) -> Result<Value
+ 
+ pub async fn cloud_fetch_parquet(username: &str, db_name: &str, table_name: &str, date_range: HashMap<&str, &str>) -> Result<Value, String> {
+   let cloud_storage_manager = get_cloud_storage_manager();
+-  match cloud_storage_manager.cloud_fetch_parquet(username, db_name, table_name, date_range).await {
++  match cloud_storage_manager
++    .cloud_fetch_parquet(username, db_name, table_name, &date_range)
++    .await
++  {
+     Ok(_) => {
+       let result = TimonResult {
+         status: 200,
