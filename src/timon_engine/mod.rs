@@ -17,7 +17,7 @@ use std::sync::OnceLock;
 * @ list_databases() & list_tables(db_name)
 * @ delete_database(db_name) & delete_table(db_name, table_name)
 * @ insert(db_name, table_name, json_data)
-* @ query(db_name, sql_query)
+* @ query(db_name, sql_query, username?)
  */
 #[derive(Serialize)]
 pub struct TimonResult {
@@ -246,8 +246,9 @@ pub async fn query(db_name: &str, sql_query: &str, username: Option<&str>) -> Re
 
 /* ******************************** S3 Compatible Storage ********************************
 * @ init_bucket(bucket_endpoint, bucket_name, access_key_id, secret_access_key)
-* @ cloud_sink_parquet(username, db_name, table_name)
-* @ cloud_fetch_parquet(username, db_name, table_name)
+* @ cloud_sync_parquet(db_name, table_name, date_range, username?)
+* @ cloud_sink_parquet(db_name, table_name, date_range)
+* @ cloud_fetch_parquet(username, db_name, table_name, date_range)
  */
 
 static CLOUD_STORAGE_MANAGER: OnceLock<CloudStorageManager> = OnceLock::new();
@@ -292,6 +293,31 @@ pub fn init_bucket(
   }
 }
 
+pub async fn cloud_sync_parquet(db_name: &str, table_name: &str, date_range: HashMap<&str, &str>, username: Option<&str>) -> Result<Value, String> {
+  let cloud_storage_manager = get_cloud_storage_manager();
+  match cloud_storage_manager.cloud_sync_parquet(db_name, table_name, &date_range, username).await {
+    Ok(_) => {
+      let result = TimonResult {
+        status: 200,
+        message: format!(
+          "successfully synced '{}.{}.{}' data",
+          cloud_storage_manager.bucket_name, db_name, table_name
+        ),
+        json_value: None,
+      };
+      serde_json::to_value(&result).map_err(|e| e.to_string())
+    }
+    Err(err) => {
+      let result = TimonResult {
+        status: 400,
+        message: err.to_string(),
+        json_value: None,
+      };
+      serde_json::to_value(&result).map_err(|e| e.to_string())
+    }
+  }
+}
+
 pub async fn cloud_sink_parquet(db_name: &str, table_name: &str) -> Result<Value, String> {
   let cloud_storage_manager = get_cloud_storage_manager();
   match cloud_storage_manager.cloud_sink_parquet(db_name, table_name).await {
@@ -319,7 +345,10 @@ pub async fn cloud_sink_parquet(db_name: &str, table_name: &str) -> Result<Value
 
 pub async fn cloud_fetch_parquet(username: &str, db_name: &str, table_name: &str, date_range: HashMap<&str, &str>) -> Result<Value, String> {
   let cloud_storage_manager = get_cloud_storage_manager();
-  match cloud_storage_manager.cloud_fetch_parquet(username, db_name, table_name, date_range).await {
+  match cloud_storage_manager
+    .cloud_fetch_parquet(username, db_name, table_name, &date_range)
+    .await
+  {
     Ok(_) => {
       let result = TimonResult {
         status: 200,

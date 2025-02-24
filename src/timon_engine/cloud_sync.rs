@@ -71,6 +71,25 @@ impl CloudStorageManager {
     }
   }
 
+  pub async fn cloud_sync_parquet(
+    &self,
+    db_name: &str,
+    table_name: &str,
+    date_range: &HashMap<&str, &str>,
+    username: Option<&str>,
+  ) -> Result<(), Box<dyn std::error::Error>> {
+    let default_username = &self.db_manager.username;
+
+    self.cloud_sink_parquet(db_name, table_name).await?;
+    self.cloud_fetch_parquet(default_username, db_name, table_name, date_range).await?;
+
+    if let Some(group_username) = username {
+      self.cloud_fetch_parquet(group_username, db_name, table_name, date_range).await?;
+    }
+
+    Ok(())
+  }
+
   pub async fn cloud_sink_parquet(&self, db_name: &str, table_name: &str) -> Result<(), Box<dyn std::error::Error>> {
     let files = self.db_manager.build_files_list(db_name, table_name, None)?;
     if files.is_empty() {
@@ -87,7 +106,7 @@ impl CloudStorageManager {
 
     for file in &files {
       if let Some(target_path) = self
-        .process_file(
+        .process_sink_parquet_file(
           file,
           username,
           db_name,
@@ -112,7 +131,49 @@ impl CloudStorageManager {
     Ok(())
   }
 
-  async fn process_file(
+  pub async fn cloud_fetch_parquet(
+    &self,
+    username: &str,
+    db_name: &str,
+    table_name: &str,
+    date_range: &HashMap<&str, &str>,
+  ) -> Result<(), Box<dyn std::error::Error>> {
+    let prefix_path = format!("{}/{}/{}", username, db_name, table_name);
+    let cloud_files = self.list_cloud_files(&prefix_path).await?;
+    let start_date = date_range.get("start_date").ok_or("Missing start_date")?;
+    let end_date = date_range.get("end_date").ok_or("Missing end_date")?;
+    let filtered_files: HashSet<_> = filter_files_by_date_range(cloud_files.iter().map(|(path, _)| path.clone()).collect(), start_date, end_date)?
+      .into_iter()
+      .collect();
+
+    for (cloud_file, cloud_modified_time) in cloud_files {
+      if !filtered_files.contains(&cloud_file) {
+        continue;
+      }
+
+      if let Some(filename) = Path::new(&cloud_file).file_name().and_then(|n| n.to_str()) {
+        let local_path = format!(
+          "{}/group/{}/{}/{}/{}",
+          self.db_manager.storage_path, username, db_name, table_name, filename
+        );
+
+        match get_local_file_modified_time(&local_path) {
+          Some(local_modified_time) if local_modified_time >= cloud_modified_time => {
+            println!("Skipping {} (Up to date)", filename);
+            continue;
+          }
+          _ => {
+            println!("Downloading {}", filename);
+            self.download_from_bucket(&cloud_file, &local_path).await?;
+          }
+        }
+      }
+    }
+
+    Ok(())
+  }
+
+  async fn process_sink_parquet_file(
     &self,
     file: &str,
     username: &str,
@@ -200,44 +261,15 @@ impl CloudStorageManager {
     Ok(())
   }
 
-  pub async fn cloud_fetch_parquet(
-    &self,
-    username: &str,
-    db_name: &str,
-    table_name: &str,
-    date_range: HashMap<&str, &str>,
-  ) -> Result<(), Box<dyn std::error::Error>> {
-    let prefix_path = format!("{}/{}/{}", username, db_name, table_name);
-    let cloud_files = self.list_cloud_files(&prefix_path).await?;
-    let start_date = date_range.get("start_date").ok_or("Missing start_date")?;
-    let end_date = date_range.get("end_date").ok_or("Missing end_date")?;
-    let filtered_files: HashSet<_> = filter_files_by_date_range(cloud_files.iter().map(|(path, _)| path.clone()).collect(), start_date, end_date)?
-      .into_iter()
-      .collect();
+  async fn upload_to_bucket(&self, source_path: &str, target_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let s3_store = &self.s3_store;
+    let object_store = Arc::new(s3_store);
 
-    for (cloud_file, cloud_modified_time) in cloud_files {
-      if !filtered_files.contains(&cloud_file) {
-        continue;
-      }
-
-      if let Some(filename) = Path::new(&cloud_file).file_name().and_then(|n| n.to_str()) {
-        let local_path = format!(
-          "{}/group/{}/{}/{}/{}",
-          self.db_manager.storage_path, username, db_name, table_name, filename
-        );
-
-        match get_local_file_modified_time(&local_path) {
-          Some(local_modified_time) if local_modified_time >= cloud_modified_time => {
-            println!("Skipping {} (Up to date)", filename);
-            continue;
-          }
-          _ => {
-            println!("Downloading {}", filename);
-            self.download_from_bucket(&cloud_file, &local_path).await?;
-          }
-        }
-      }
-    }
+    // Prepare the file for upload
+    let mut file = tokio::fs::File::open(source_path).await?;
+    let mut data = Vec::new();
+    file.read_to_end(&mut data).await?;
+    object_store.put(&StorePath::from(target_path), data.into()).await?;
 
     Ok(())
   }
@@ -262,19 +294,6 @@ impl CloudStorageManager {
       .collect();
 
     Ok(files)
-  }
-
-  async fn upload_to_bucket(&self, source_path: &str, target_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let s3_store = &self.s3_store;
-    let object_store = Arc::new(s3_store);
-
-    // Prepare the file for upload
-    let mut file = tokio::fs::File::open(source_path).await?;
-    let mut data = Vec::new();
-    file.read_to_end(&mut data).await?;
-    object_store.put(&StorePath::from(target_path), data.into()).await?;
-
-    Ok(())
   }
 
   async fn download_from_bucket(&self, target_path: &str, local_path: &str) -> Result<(), Box<dyn std::error::Error>> {

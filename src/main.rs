@@ -3,8 +3,8 @@ use chrono::{Duration, Local};
 use serde_json::json;
 use std::time::Instant;
 pub use timon_engine::{
-  cloud_fetch_parquet, cloud_sink_parquet, create_database, create_table, delete_database, delete_table, init_bucket, init_timon, insert,
-  list_databases, list_tables, query,
+  cloud_fetch_parquet, cloud_sink_parquet, cloud_sync_parquet, create_database, create_table, delete_database, delete_table, init_bucket, init_timon,
+  insert, list_databases, list_tables, query,
 };
 #[cfg(feature = "dev_cli")]
 mod cli;
@@ -180,18 +180,21 @@ async fn test_s3_sync() {
 
   let bucket_endpoint = "https://s3.us-west-2.amazonaws.com";
   let bucket_name = "zivaoneapp";
-  let access_key_id = "AKIASXLNFKSVBDW4IAMJ";
-  let secret_access_key = "REMOVED_SECRET";
+  let access_key_id = "xxx";
+  let secret_access_key = "xxx";
   let bucket_region = "us-west-2";
   let init_bucket_result = init_bucket(bucket_endpoint, bucket_name, access_key_id, secret_access_key, bucket_region).unwrap();
   println!("init_bucket_result: {}", init_bucket_result);
 
   let fetch_range = std::collections::HashMap::from([("start_date", "2025-01-01"), ("end_date", "2025-12-30")]);
-  let cloud_fetch_parquet_result = cloud_fetch_parquet(USERNAME, DATABASE_NAME, TABLE_NAME, fetch_range).await;
+  let cloud_fetch_parquet_result = cloud_fetch_parquet(USERNAME, DATABASE_NAME, TABLE_NAME, fetch_range.clone()).await;
   println!("{}", cloud_fetch_parquet_result.unwrap());
 
   let cloud_sink_parquet_result: Result<serde_json::Value, String> = cloud_sink_parquet(DATABASE_NAME, TABLE_NAME).await;
   println!("{}", cloud_sink_parquet_result.unwrap());
+
+  let cloud_sync_parquet_result = cloud_sync_parquet(DATABASE_NAME, TABLE_NAME, fetch_range.clone(), None);
+  println!("{}", cloud_sync_parquet_result.await.unwrap());
 }
 
 // This block is executed for local development testing(run async tests for local_storage and S3 cloud_sync).

@@ -5,8 +5,8 @@ pub mod timon_engine;
 #[cfg(target_os = "android")]
 pub mod android {
   use crate::timon_engine::{
-    cloud_fetch_parquet, cloud_sink_parquet, create_database, create_table, delete_database, delete_table, init_bucket, init_timon, insert,
-    list_databases, list_tables, query,
+    cloud_fetch_parquet, cloud_sink_parquet, cloud_sync_parquet, create_database, create_table, delete_database, delete_table, init_bucket,
+    init_timon, insert, list_databases, list_tables, query,
   };
   use jni::objects::{JClass, JObject, JString, JValue};
   use jni::sys::{jint, jstring};
@@ -296,6 +296,49 @@ pub mod android {
   }
 
   #[no_mangle]
+  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_cloudSyncParquet(
+    mut env: JNIEnv,
+    _class: JClass,
+    db_name: JString,
+    table_name: JString,
+    date_range: JObject,
+    username: JString,
+  ) -> jstring {
+    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
+    let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
+
+    let mut rust_date_range: HashMap<&str, &str> = HashMap::new();
+    let rust_start = get_date_range_value(&mut env, &date_range, "start");
+    let rust_end = get_date_range_value(&mut env, &date_range, "end");
+    rust_date_range.insert("start_date", &rust_start);
+    rust_date_range.insert("end_date", &rust_end);
+
+    let rust_username: Option<String> = if username.is_null() {
+      None
+    } else {
+      Some(env.get_string(&username).expect("Couldn't get username java string!").into())
+    };
+
+    match Runtime::new().unwrap().block_on(cloud_sync_parquet(
+      &rust_db_name,
+      &rust_table_name,
+      rust_date_range,
+      rust_username.as_deref(),
+    )) {
+      Ok(result) => {
+        let json_string = result.to_string();
+        let output = env.new_string(json_string).expect("Couldn't create success string!");
+        output.into_raw()
+      }
+      Err(err) => {
+        let err_message = format!("Failed fetch s3 parquet files: {:?}", err);
+        let output = env.new_string(err_message).expect("Couldn't create error string!");
+        output.into_raw()
+      }
+    }
+  }
+
+  #[no_mangle]
   pub unsafe extern "C" fn Java_com_rustexample_TimonModule_cloudSinkParquet(
     mut env: JNIEnv,
     _class: JClass,
@@ -364,8 +407,8 @@ pub mod android {
 #[cfg(target_os = "ios")]
 pub mod ios {
   use crate::timon_engine::{
-    cloud_fetch_parquet, cloud_sink_parquet, create_database, create_table, delete_database, delete_table, init_bucket, init_timon, insert,
-    list_databases, list_tables, query,
+    cloud_fetch_parquet, cloud_sink_parquet, cloud_sync_parquet, create_database, create_table, delete_database, delete_table, init_bucket,
+    init_timon, insert, list_databases, list_tables, query,
   };
   use libc::c_char;
   use std::collections::HashMap;
@@ -636,6 +679,54 @@ pub mod ios {
             }
             Err(err) => {
               let err_message = serde_json::json!({ "error": format!("Failed to initialize S3 bucket: {:?}", err) }).to_string();
+              string_to_c_str(err_message)
+            }
+          }
+        }
+        _ => {
+          let err_message = serde_json::json!({ "error": "Invalid arguments" }).to_string();
+          string_to_c_str(err_message)
+        }
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub extern "C" fn Java_com_rustexample_TimonModule_cloudSyncParquet(
+    db_name: *const c_char,
+    table_name: *const c_char,
+    date_range_json: *const c_char,
+    username: *const c_char,
+  ) -> *mut c_char {
+    unsafe {
+      match (
+        c_str_to_string(db_name),
+        c_str_to_string(table_name),
+        c_str_to_string(date_range_json),
+        c_str_to_string(username).ok(),
+      ) {
+        (Ok(rust_db_name), Ok(rust_table_name), Ok(rust_date_range_json), rust_username) => {
+          // Parse date_range_json into HashMap
+          let rust_date_range: HashMap<String, String> = serde_json::from_str(&rust_date_range_json).unwrap_or_default();
+          let start_date = rust_date_range.get("start").cloned().unwrap_or_else(|| "1970-01-01".to_string());
+          let end_date = rust_date_range.get("end").cloned().unwrap_or_else(|| "1970-01-02".to_string());
+
+          let mut date_range_map = HashMap::new();
+          date_range_map.insert("start_date", start_date.as_str());
+          date_range_map.insert("end_date", end_date.as_str());
+
+          match Runtime::new().unwrap().block_on(cloud_sync_parquet(
+            &rust_db_name,
+            &rust_table_name,
+            date_range_map,
+            rust_username.as_deref(),
+          )) {
+            Ok(result) => {
+              let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
+              string_to_c_str(json_string)
+            }
+            Err(err) => {
+              let err_message = serde_json::json!({ "error": err }).to_string();
               string_to_c_str(err_message)
             }
           }
