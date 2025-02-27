@@ -83,7 +83,7 @@ impl CloudStorageManager {
     self.cloud_sink_parquet(db_name, table_name).await?;
     self.cloud_fetch_parquet(default_username, db_name, table_name, date_range).await?;
 
-    if let Some(group_username) = username {
+    if let Some(group_username) = username.filter(|u| *u != self.db_manager.username) {
       self.cloud_fetch_parquet(group_username, db_name, table_name, date_range).await?;
     }
 

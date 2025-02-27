@@ -353,11 +353,16 @@ impl DatabaseManager {
       }
     }
 
+    let mut seen_records: HashMap<String, Value> = HashMap::new();
     let mut updated_files = HashSet::new();
     let mut new_records_by_file: HashMap<String, Vec<Value>> = HashMap::new();
 
     for new_record in new_json_values.into_iter() {
       let key = build_key(&new_record);
+      if seen_records.insert(key.clone(), new_record.clone()).is_some() {
+        continue;
+      }
+
       let timestamp = new_record.get(datetime_field).and_then(|t| t.as_i64()).unwrap_or(0);
       let partition_name = format!(
         "{}_{}.parquet",
