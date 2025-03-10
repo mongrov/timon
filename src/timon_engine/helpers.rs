@@ -445,20 +445,35 @@ pub async fn get_table_columns(session_context: &SessionContext, table_name: &st
 pub fn filter_files_by_date_range(files: Vec<String>, start_date: &str, end_date: &str) -> Result<Vec<String>, Box<dyn Error>> {
   let start_date = NaiveDate::parse_from_str(start_date, "%Y-%m-%d")?;
   let end_date = NaiveDate::parse_from_str(end_date, "%Y-%m-%d")?;
+  // Regex to match different file formats: YYYY-MM-DD, YYYY-MM, YYYY
+  let regx = Regex::new(r"(?P<year>\d{4})(?:-(?P<month>\d{2})(?:-(?P<day>\d{2}))?)?").expect("Invalid regex pattern");
 
-  let filtered_files = files
-    .into_iter()
+  let filtered_files: Vec<String> = files
+    .iter()
     .filter(|file| {
-      // Extract the date part from the file path
       if let Some(date_str) = file.split('/').last() {
-        if let Some(date_part) = date_str.split('_').nth(1) {
-          if let Ok(file_date) = NaiveDate::parse_from_str(date_part, "%Y-%m-%d") {
-            return file_date >= start_date && file_date <= end_date;
+        if let Some(caps) = regx.captures(date_str) {
+          let year = caps["year"].parse::<i32>().ok();
+          let month = caps.name("month").map(|m| m.as_str().parse::<u32>().ok()).flatten();
+          let day = caps.name("day").map(|d| d.as_str().parse::<u32>().ok()).flatten();
+
+          if let Some(year) = year {
+            let file_date = match (month, day) {
+              (Some(m), Some(d)) => NaiveDate::from_ymd_opt(year, m, d),
+              (Some(m), None) => NaiveDate::from_ymd_opt(year, m, 1),
+              (None, None) => NaiveDate::from_ymd_opt(year, 1, 1),
+              (None, Some(_)) => todo!(),
+            };
+
+            if let Some(file_date) = file_date {
+              return file_date >= start_date && file_date <= end_date;
+            }
           }
         }
       }
       false
     })
+    .cloned()
     .collect();
 
   Ok(filtered_files)
@@ -609,7 +624,8 @@ pub fn read_parquet_batches(file_path: &Path, batches: &mut Vec<RecordBatch>) ->
   Ok(true)
 }
 
-pub async fn cleanup_old_files(processed_files: &[PathBuf], regx: &Regex) {
+pub async fn cleanup_old_files(processed_files: &[PathBuf]) {
+  let regx = Regex::new(r"(\d{4})-(\d{2})-(\d{2})").expect("Invalid regex pattern");
   let current_date = chrono::Utc::now().naive_utc().date();
   for file_path in processed_files {
     if let Some(filename) = file_path.file_name().and_then(|n| n.to_str()) {

@@ -159,7 +159,7 @@ async fn test_local_storage() {
   println!("query_result: {}", query_result.unwrap()["json_value"]);
 
   let start_time = Instant::now(); // Start timing
-  let sql_query2 = format!(r#"SELECT * FROM activitydetails"#); // WHERE date BETWEEN '1730016996' AND '1739209996'
+  let sql_query2 = format!(r#"SELECT * FROM activitydetails LIMIT 10"#); // WHERE date BETWEEN '1730016996' AND '1739209996'
   let query_result2 = query(DATABASE_NAME, &sql_query2, None).await;
   let duration = start_time.elapsed(); // Measure elapsed time
   println!("query_result: {}", query_result2.unwrap()["json_value"]);

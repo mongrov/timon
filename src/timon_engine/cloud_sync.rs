@@ -97,7 +97,6 @@ impl CloudStorageManager {
     }
 
     let username = &self.db_manager.username;
-    let regx = Regex::new(r"(\d{4})-(\d{2})-(\d{2})")?;
     let table_schema = self.db_manager.get_table_schema(db_name, table_name)?;
     let unique_fields = get_property_fields(&table_schema, "unique")?;
     let mut batches = Vec::new();
@@ -106,16 +105,7 @@ impl CloudStorageManager {
 
     for file in &files {
       if let Some(target_path) = self
-        .process_sink_parquet_file(
-          file,
-          username,
-          db_name,
-          table_name,
-          &regx,
-          &unique_fields,
-          &mut batches,
-          &mut processed_files,
-        )
+        .process_sink_parquet_file(file, username, db_name, table_name, &unique_fields, &mut batches, &mut processed_files)
         .await?
       {
         merge_target_paths.push(target_path);
@@ -126,7 +116,7 @@ impl CloudStorageManager {
       self.upload_merged_batches(&batches, &merge_target_paths, username).await?;
     }
 
-    cleanup_old_files(&processed_files, &regx).await;
+    cleanup_old_files(&processed_files).await;
 
     Ok(())
   }
@@ -142,20 +132,43 @@ impl CloudStorageManager {
     let cloud_files = self.list_cloud_files(&prefix_path).await?;
     let start_date = date_range.get("start_date").ok_or("Missing start_date")?;
     let end_date = date_range.get("end_date").ok_or("Missing end_date")?;
-    let filtered_files: HashSet<_> = filter_files_by_date_range(cloud_files.iter().map(|(path, _)| path.clone()).collect(), start_date, end_date)?
-      .into_iter()
-      .collect();
+    let filtered_cloud_files: HashSet<_> =
+      filter_files_by_date_range(cloud_files.iter().map(|(path, _)| path.clone()).collect(), start_date, end_date)?
+        .into_iter()
+        .collect();
 
+    let local_dir = format!("{}/group/{}/{}/{}", self.db_manager.storage_path, username, db_name, table_name);
+    if fs::metadata(&local_dir).is_err() {
+      println!("Directory does not exist, skipping deletion.");
+    } else {
+      let local_files: HashSet<String> = fs::read_dir(&local_dir)?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| entry.path().file_name()?.to_str().map(String::from))
+        .collect();
+
+      let cloud_filenames: HashSet<String> = filtered_cloud_files
+        .iter()
+        .filter_map(|cloud_path| Path::new(cloud_path).file_name()?.to_str().map(String::from))
+        .collect();
+
+      // Delete local files that are NOT present in the cloud
+      for local_file in &local_files {
+        if !cloud_filenames.contains(local_file) {
+          let local_file_path = format!("{}/{}", local_dir, local_file);
+          println!("Deleting out of sync file: {}", local_file);
+          fs::remove_file(&local_file_path)?;
+        }
+      }
+    }
+
+    // Download missing or outdated files
     for (cloud_file, cloud_modified_time) in cloud_files {
-      if !filtered_files.contains(&cloud_file) {
+      if !filtered_cloud_files.contains(&cloud_file) {
         continue;
       }
 
       if let Some(filename) = Path::new(&cloud_file).file_name().and_then(|n| n.to_str()) {
-        let local_path = format!(
-          "{}/group/{}/{}/{}/{}",
-          self.db_manager.storage_path, username, db_name, table_name, filename
-        );
+        let local_path = format!("{}/{}", local_dir, filename);
 
         match get_local_file_modified_time(&local_path) {
           Some(local_modified_time) if local_modified_time >= cloud_modified_time => {
@@ -179,7 +192,6 @@ impl CloudStorageManager {
     username: &str,
     db_name: &str,
     table_name: &str,
-    regx: &Regex,
     unique_fields: &[String],
     batches: &mut Vec<RecordBatch>,
     processed_files: &mut Vec<PathBuf>,
@@ -188,10 +200,24 @@ impl CloudStorageManager {
     let file_path = PathBuf::from(file);
     let filename = file_path.file_name().and_then(|n| n.to_str());
 
+    let regx =
+      Regex::new(r"^(?P<table>.+?)_(?P<year>\d{4})-(?P<month>\d{2})(?:-(?P<day>\d{2})?(?:_(?P<hour>\d{2})?(?:-(?P<minute>\d{2}))?)?)?\.parquet$")
+        .expect("Invalid regex pattern");
+
     if let Some(name) = filename {
       if let Some(caps) = regx.captures(name) {
-        let (year, month, day) = (&caps[1], &caps[2], &caps[3]);
-        let target_path = format!("{}/{}/{}/{}/{}/{}/{}", username, db_name, table_name, year, month, day, name);
+        let year = caps.name("year").map(|m| m.as_str()).unwrap_or("0000");
+        let month = caps.name("month").map(|m| m.as_str()).unwrap_or("00");
+        let day = caps.name("day").map(|m| m.as_str()).unwrap_or("00");
+        let hour = caps.name("hour").map(|m| m.as_str()).unwrap_or("00");
+
+        let target_path = match (caps.name("day"), caps.name("hour"), caps.name("minute")) {
+          (Some(_), Some(_), Some(_)) => format!("{}/{}/{}/{}/{}/{}/{}/{}", username, db_name, table_name, year, month, day, hour, name),
+          (Some(_), Some(_), None) => format!("{}/{}/{}/{}/{}/{}/{}", username, db_name, table_name, year, month, day, name),
+          (Some(_), None, None) => format!("{}/{}/{}/{}/{}/{}", username, db_name, table_name, year, month, name),
+          (None, None, None) => format!("{}/{}/{}/{}/{}", username, db_name, table_name, year, name),
+          _ => unreachable!(),
+        };
 
         let s3_temp_path = format!("{}/merge_workspace/{}/{}", self.db_manager.storage_path, username, name);
         let mut s3_batches = Vec::new();
@@ -234,6 +260,7 @@ impl CloudStorageManager {
         }
       }
     }
+
     Ok(None)
   }
 
