@@ -3,6 +3,7 @@ pub mod db_manager;
 pub mod helpers;
 
 use cloud_sync::CloudStorageManager;
+use datafusion::prelude::DataFrame;
 use db_manager::DatabaseManager;
 use serde::Serialize;
 use serde_json;
@@ -18,6 +19,7 @@ use std::sync::OnceLock;
 * @ delete_database(db_name) & delete_table(db_name, table_name)
 * @ insert(db_name, table_name, json_data)
 * @ query(db_name, sql_query, username?)
+* @ query_df(db_name, sql_query, username?)
  */
 #[derive(Serialize)]
 pub struct TimonResult {
@@ -241,6 +243,16 @@ pub async fn query(db_name: &str, sql_query: &str, username: Option<&str>) -> Re
       };
       serde_json::to_value(&result).map_err(|e| e.to_string())
     }
+  }
+}
+
+#[allow(dead_code)]
+pub async fn query_df(db_name: &str, sql_query: &str, username: Option<&str>) -> Result<DataFrame, String> {
+  let database_manager = get_database_manager();
+  match database_manager.query(db_name, sql_query, username, false).await {
+    Ok(db_manager::DataFusionOutput::DataFrame(df)) => Ok(df),
+    Ok(db_manager::DataFusionOutput::Json(_)) => Err("Expected DataFrame output, but got JSON".to_string()),
+    Err(err) => Err(err.to_string()),
   }
 }
 

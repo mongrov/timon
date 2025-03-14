@@ -4,7 +4,7 @@ use serde_json::json;
 use std::time::Instant;
 pub use timon_engine::{
   cloud_fetch_parquet, cloud_sink_parquet, cloud_sync_parquet, create_database, create_table, delete_database, delete_table, init_bucket, init_timon,
-  insert, list_databases, list_tables, query,
+  insert, list_databases, list_tables, query, query_df,
 };
 #[cfg(feature = "dev_cli")]
 mod cli;
@@ -158,12 +158,16 @@ async fn test_local_storage() {
   let query_result = query(DATABASE_NAME, &sql_query, None).await;
   println!("query_result: {}", query_result.unwrap()["json_value"]);
 
-  let start_time = Instant::now(); // Start timing
-  let sql_query2 = format!(r#"SELECT * FROM activitydetails LIMIT 10"#); // WHERE date BETWEEN '1730016996' AND '1739209996'
-  let query_result2 = query(DATABASE_NAME, &sql_query2, None).await;
-  let duration = start_time.elapsed(); // Measure elapsed time
-  println!("query_result: {}", query_result2.unwrap()["json_value"]);
-  println!("Time taken for query: {:.3} seconds", duration.as_secs_f64());
+  // let start_time = Instant::now(); // Start timing
+  // let sql_query2 = format!(r#"SELECT * FROM activitydetails LIMIT 10"#); // WHERE date BETWEEN '1730016996' AND '1739209996'
+  // let query_result2 = query(DATABASE_NAME, &sql_query2, None).await;
+  // let duration = start_time.elapsed(); // Measure elapsed time
+  // println!("query_result: {}", query_result2.unwrap()["json_value"]);
+  // println!("Time taken for query: {:.3} seconds", duration.as_secs_f64());
+
+  // let sql_query3 = format!(r#"SELECT * FROM activitydetails ORDER BY date ASC LIMIT 5"#);
+  // let query_df_result = query_df(DATABASE_NAME, &sql_query3, None).await;
+  // println!("query_df_result: {:?}", query_df_result.unwrap());
 
   // let delete_table_result = delete_table(DATABASE_NAME, "iot").unwrap();
   // println!("delete_table_result -> {}", delete_table_result);
