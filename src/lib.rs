@@ -29,7 +29,7 @@ pub mod android {
     let rust_bucket_interval: u32 = bucket_interval as u32;
     let rust_username: String = env.get_string(&username).expect("Couldn't get java string!").into();
 
-    match init_timon(&rust_storage_path, rust_bucket_interval, rust_username) {
+    match init_timon(&rust_storage_path, rust_bucket_interval, &rust_username) {
       Ok(result) => {
         let json_string = result.to_string();
         let output = env.new_string(json_string).expect("Couldn't create success string!");
@@ -342,18 +342,13 @@ pub mod android {
   pub unsafe extern "C" fn Java_com_rustexample_TimonModule_cloudSinkParquet(
     mut env: JNIEnv,
     _class: JClass,
-    username: JString,
     db_name: JString,
     table_name: JString,
   ) -> jstring {
-    let rust_username: String = env.get_string(&username).expect("Couldn't get java string!").into();
     let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
     let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
 
-    match Runtime::new()
-      .unwrap()
-      .block_on(cloud_sink_parquet(&rust_username, &rust_db_name, &rust_table_name))
-    {
+    match Runtime::new().unwrap().block_on(cloud_sink_parquet(&rust_db_name, &rust_table_name)) {
       Ok(result) => {
         let json_string = result.to_string();
         let output = env.new_string(json_string).expect("Couldn't create success string!");
@@ -740,28 +735,19 @@ pub mod ios {
   }
 
   #[no_mangle]
-  pub extern "C" fn Java_com_rustexample_TimonModule_cloudSinkParquet(
-    username: *const c_char,
-    db_name: *const c_char,
-    table_name: *const c_char,
-  ) -> *mut c_char {
+  pub extern "C" fn Java_com_rustexample_TimonModule_cloudSinkParquet(db_name: *const c_char, table_name: *const c_char) -> *mut c_char {
     unsafe {
-      match (c_str_to_string(username), c_str_to_string(db_name), c_str_to_string(table_name)) {
-        (Ok(rust_username), Ok(rust_db_name), Ok(rust_table_name)) => {
-          match Runtime::new()
-            .unwrap()
-            .block_on(cloud_sink_parquet(&rust_username, &rust_db_name, &rust_table_name))
-          {
-            Ok(result) => {
-              let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
-              string_to_c_str(json_string)
-            }
-            Err(err) => {
-              let err_message = serde_json::json!({ "error": format!("Failed to sink Parquet files: {:?}", err) }).to_string();
-              string_to_c_str(err_message)
-            }
+      match (c_str_to_string(db_name), c_str_to_string(table_name)) {
+        (Ok(rust_db_name), Ok(rust_table_name)) => match Runtime::new().unwrap().block_on(cloud_sink_parquet(&rust_db_name, &rust_table_name)) {
+          Ok(result) => {
+            let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
+            string_to_c_str(json_string)
           }
-        }
+          Err(err) => {
+            let err_message = serde_json::json!({ "error": format!("Failed to sink Parquet files: {:?}", err) }).to_string();
+            string_to_c_str(err_message)
+          }
+        },
         _ => {
           let err_message = serde_json::json!({ "error": "Invalid arguments" }).to_string();
           string_to_c_str(err_message)
