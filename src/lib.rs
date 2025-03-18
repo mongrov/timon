@@ -11,12 +11,14 @@ pub mod android {
   use jni::objects::{JClass, JObject, JString, JValue};
   use jni::sys::{jint, jstring};
   use jni::JNIEnv;
+  use jni::NativeMethod;
   use std::collections::HashMap;
+  use std::ffi::c_void;
   use tokio::runtime::Runtime;
 
   // ******************************** File Storage ********************************
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_initTimon(
+  pub unsafe extern "C" fn nativeInitTimon(
     mut env: JNIEnv,
     _class: JClass,
     storage_path: JString,
@@ -44,7 +46,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_createDatabase(mut env: JNIEnv, _class: JClass, db_name: JString) -> jstring {
+  pub unsafe extern "C" fn nativeCreateDatabase(mut env: JNIEnv, _class: JClass, db_name: JString) -> jstring {
     let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
 
     match create_database(&rust_db_name) {
@@ -62,13 +64,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_createTable(
-    mut env: JNIEnv,
-    _class: JClass,
-    db_name: JString,
-    table_name: JString,
-    schema: JString,
-  ) -> jstring {
+  pub unsafe extern "C" fn nativeCreateTable(mut env: JNIEnv, _class: JClass, db_name: JString, table_name: JString, schema: JString) -> jstring {
     let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
     let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
     let rust_schema: String = env.get_string(&schema).expect("Couldn't get java string!").into();
@@ -88,7 +84,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_listDatabases(env: JNIEnv, _class: JClass) -> jstring {
+  pub unsafe extern "C" fn nativeListDatabases(env: JNIEnv, _class: JClass) -> jstring {
     match list_databases() {
       Ok(result) => {
         let json_string = result.to_string();
@@ -104,7 +100,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_listTables(mut env: JNIEnv, _class: JClass, db_name: JString) -> jstring {
+  pub unsafe extern "C" fn nativeListTables(mut env: JNIEnv, _class: JClass, db_name: JString) -> jstring {
     let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
 
     match list_tables(&rust_db_name) {
@@ -122,7 +118,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_deleteDatabase(mut env: JNIEnv, _class: JClass, db_name: JString) -> jstring {
+  pub unsafe extern "C" fn nativeDeleteDatabase(mut env: JNIEnv, _class: JClass, db_name: JString) -> jstring {
     let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
 
     match delete_database(&rust_db_name) {
@@ -140,12 +136,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_deleteTable(
-    mut env: JNIEnv,
-    _class: JClass,
-    db_name: JString,
-    table_name: JString,
-  ) -> jstring {
+  pub unsafe extern "C" fn nativeDeleteTable(mut env: JNIEnv, _class: JClass, db_name: JString, table_name: JString) -> jstring {
     let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
     let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
 
@@ -164,13 +155,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_insert(
-    mut env: JNIEnv,
-    _class: JClass,
-    db_name: JString,
-    table_name: JString,
-    json_data: JString,
-  ) -> jstring {
+  pub unsafe extern "C" fn nativeInsert(mut env: JNIEnv, _class: JClass, db_name: JString, table_name: JString, json_data: JString) -> jstring {
     let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
     let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
     let rust_json_data: String = env.get_string(&json_data).expect("Couldn't get java string!").into();
@@ -223,13 +208,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_query(
-    mut env: JNIEnv,
-    _class: JClass,
-    db_name: JString,
-    sql_query: JString,
-    username: JString,
-  ) -> jstring {
+  pub unsafe extern "C" fn nativeQuery(mut env: JNIEnv, _class: JClass, db_name: JString, sql_query: JString, username: JString) -> jstring {
     // Convert Java strings to Rust strings
     let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get db_name java string!").into();
     let rust_sql_query: String = env.get_string(&sql_query).expect("Couldn't get sql_query java string!").into();
@@ -260,7 +239,7 @@ pub mod android {
 
   // ******************************** S3 Compatible Storage ********************************
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_initBucket(
+  pub unsafe extern "C" fn nativeInitBucket(
     mut env: JNIEnv,
     _class: JClass,
     bucket_endpoint: JString,
@@ -296,7 +275,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_cloudSyncParquet(
+  pub unsafe extern "C" fn nativeCloudSyncParquet(
     mut env: JNIEnv,
     _class: JClass,
     db_name: JString,
@@ -339,12 +318,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_cloudSinkParquet(
-    mut env: JNIEnv,
-    _class: JClass,
-    db_name: JString,
-    table_name: JString,
-  ) -> jstring {
+  pub unsafe extern "C" fn nativeCloudSinkParquet(mut env: JNIEnv, _class: JClass, db_name: JString, table_name: JString) -> jstring {
     let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
     let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
 
@@ -363,7 +337,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_cloudFetchParquet(
+  pub unsafe extern "C" fn nativeCloudFetchParquet(
     mut env: JNIEnv,
     _class: JClass,
     username: JString,
@@ -396,6 +370,110 @@ pub mod android {
         output.into_raw()
       }
     }
+  }
+
+  #[no_mangle]
+  pub extern "C" fn JNI_OnLoad(vm: jni::JavaVM, _reserved: *mut std::ffi::c_void) -> jni::sys::jint {
+    let mut env = vm.get_env().expect("Failed to get JNIEnv");
+
+    // Get the Application Context
+    let activity_thread = env.find_class("android/app/ActivityThread").expect("Failed to find ActivityThread");
+    let current_activity_thread = env
+      .call_static_method(activity_thread, "currentActivityThread", "()Landroid/app/ActivityThread;", &[])
+      .expect("Failed to get currentActivityThread")
+      .l()
+      .expect("Failed to convert to object");
+    let app_context = env
+      .call_method(current_activity_thread, "getApplication", "()Landroid/app/Application;", &[])
+      .expect("Failed to get Application context")
+      .l()
+      .expect("Failed to convert to object");
+
+    // Get the Package Name
+    let package_name = env
+      .call_method(app_context, "getPackageName", "()Ljava/lang/String;", &[])
+      .expect("Failed to get package name")
+      .l()
+      .expect("Failed to convert to object");
+    let package_name: String = env
+      .get_string(&JString::from(package_name))
+      .expect("Failed to convert package name to Rust string")
+      .into();
+
+    // Construct the Dynamic Class Name
+    let class_name = format!("{}/TimonModule", package_name.replace(".", "/"));
+    let class = env.find_class(&class_name).expect(&format!("Failed to find class: {}", class_name));
+
+    let methods = [
+      NativeMethod {
+        name: "nativeInitTimon".into(),
+        sig: "(Ljava/lang/String;ILjava/lang/String;)Ljava/lang/String;".into(),
+        fn_ptr: nativeInitTimon as *mut c_void,
+      },
+      NativeMethod {
+        name: "nativeCreateDatabase".into(),
+        sig: "(Ljava/lang/String;)Ljava/lang/String;".into(),
+        fn_ptr: nativeCreateDatabase as *mut c_void,
+      },
+      NativeMethod {
+        name: "nativeCreateTable".into(),
+        sig: "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;".into(),
+        fn_ptr: nativeCreateTable as *mut c_void,
+      },
+      NativeMethod {
+        name: "nativeListDatabases".into(),
+        sig: "()Ljava/lang/String;".into(),
+        fn_ptr: nativeListDatabases as *mut c_void,
+      },
+      NativeMethod {
+        name: "nativeListTables".into(),
+        sig: "(Ljava/lang/String;)Ljava/lang/String;".into(),
+        fn_ptr: nativeListTables as *mut c_void,
+      },
+      NativeMethod {
+        name: "nativeDeleteDatabase".into(),
+        sig: "(Ljava/lang/String;)Ljava/lang/String;".into(),
+        fn_ptr: nativeDeleteDatabase as *mut c_void,
+      },
+      NativeMethod {
+        name: "nativeDeleteTable".into(),
+        sig: "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;".into(),
+        fn_ptr: nativeDeleteTable as *mut c_void,
+      },
+      NativeMethod {
+        name: "nativeInsert".into(),
+        sig: "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;".into(),
+        fn_ptr: nativeInsert as *mut c_void,
+      },
+      NativeMethod {
+        name: "nativeQuery".into(),
+        sig: "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;".into(),
+        fn_ptr: nativeQuery as *mut c_void,
+      },
+      NativeMethod {
+        name: "nativeInitBucket".into(),
+        sig: "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;".into(),
+        fn_ptr: nativeInitBucket as *mut c_void,
+      },
+      NativeMethod {
+        name: "nativeCloudSyncParquet".into(),
+        sig: "(Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;Ljava/lang/String;)Ljava/lang/String;".into(),
+        fn_ptr: nativeCloudSyncParquet as *mut c_void,
+      },
+      NativeMethod {
+        name: "nativeCloudSinkParquet".into(),
+        sig: "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;".into(),
+        fn_ptr: nativeCloudSinkParquet as *mut c_void,
+      },
+      NativeMethod {
+        name: "nativeCloudFetchParquet".into(),
+        sig: "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;)Ljava/lang/String;".into(),
+        fn_ptr: nativeCloudFetchParquet as *mut c_void,
+      },
+    ];
+
+    env.register_native_methods(class, &methods).expect("Failed to register native methods");
+    jni::sys::JNI_VERSION_1_8
   }
 }
 
