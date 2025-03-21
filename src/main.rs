@@ -79,13 +79,18 @@ async fn test_local_storage() {
         "datetime": true
       },
       "distance": {
-        "type": "int|float"
+        "type": "int|float",
+        "max": 2500
       },
       "step": {
-        "type": "int"
+        "type": "int",
+        "min": 10,
+        "max": 100
       },
       "calories": {
-        "type": "int|float"
+        "type": "int|float",
+        "min": 50,
+        "max": 1200
       },
       "arraySteps": {
         "type": "array"
@@ -136,14 +141,14 @@ async fn test_local_storage() {
   // let json_data = generate_data(1_000_000);
   let json_data: String = r#"
     [
-      {"date":"2025.02.10 10:00:00","arraySteps":[18,0,0,20,0,0,0,0,0,0],"calories":1.05,"distance":0.01,"step":1000},
-      {"date":"2025.02.10 10:01:00","arraySteps":[43,39,0,0,0,0,0,0,0,0],"calories":2.56,"distance":0.05,"step":1001},
-      {"date":"2025.02.10 10:02:00","arraySteps":[20,0,0,0,0,0,0,0,0,0],"calories":0.61,"distance":0.01,"step":1002},
-      {"date":"2025.02.10 10:03:00","arraySteps":[19,0,0,0,0,0,0,0,0,0],"calories":0.65,"distance":0.01,"step":1003},
-      {"date":"2025.02.10 10:21:00","arraySteps":[54,33,2,0,0,0,0,0,0,0],"calories":2.83,"distance":0.06,"step":1021},
-      {"date":"2025.02.10 10:25:00","arraySteps":[38,0,0,15,0,0,0,0,0,0],"calories":1.53,"distance":0.03,"step":1025},
-      {"date":"2025.02.10 10:30:00","arraySteps":[50,16,0,55,23,0,0,18,46,0],"calories":6.19,"distance":0.14,"step":1030},
-      {"date":"2025.02.10 10:31:00","arraySteps":[18,0,0,20,0,0,0,0,0,0],"calories":1.05,"distance":0.01,"step":1031}
+      {"date":"2025.02.10 10:00:00","arraySteps":[18,0,0,20,0,0,0,0,0,0],"calories":111,"distance":0.01,"step":10},
+      {"date":"2025.02.10 10:01:00","arraySteps":[43,39,0,0,0,0,0,0,0,0],"calories":200,"distance":0.05,"step":11},
+      {"date":"2025.02.10 10:02:00","arraySteps":[20,0,0,0,0,0,0,0,0,0],"calories":160,"distance":0.01,"step":12},
+      {"date":"2025.02.10 10:03:00","arraySteps":[19,0,0,0,0,0,0,0,0,0],"calories":111,"distance":0.01,"step":1013},
+      {"date":"2025.02.10 10:21:00","arraySteps":[54,33,2,0,0,0,0,0,0,0],"calories":180,"distance":0.06,"step":21},
+      {"date":"2025.02.10 10:25:00","arraySteps":[38,0,0,15,0,0,0,0,0,0],"calories":120,"distance":0.03,"step":25},
+      {"date":"2025.02.10 10:30:00","arraySteps":[50,16,0,55,23,0,0,18,46,0],"calories":6,"distance":140,"step":30},
+      {"date":"2025.02.10 10:31:00","arraySteps":[18,0,0,20,0,0,0,0,0,0],"calories":170,"distance":2530.5,"step":1031}
     ]
   "#
   .to_string();
@@ -154,7 +159,7 @@ async fn test_local_storage() {
   println!("Insertion result: {}", insertion_result.unwrap());
   println!("Time taken for insertion: {:.3} seconds", duration.as_secs_f64());
 
-  let sql_query = format!(r#"SELECT * FROM activitydetails ORDER BY date ASC LIMIT 5"#);
+  let sql_query = format!(r#"SELECT * FROM activitydetails ORDER BY date ASC"#);
   let query_result = query(DATABASE_NAME, &sql_query, None).await;
   println!("query_result: {}", query_result.unwrap()["json_value"]);
 

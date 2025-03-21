@@ -13,6 +13,7 @@ use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::parquet::file::properties::WriterProperties;
 use datafusion::parquet::file::reader::{FileReader, SerializedFileReader};
 use datafusion::prelude::*;
+use json_rules_engine::{float_greater_than, float_less_than, int_greater_than, int_less_than, Condition};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -72,6 +73,49 @@ pub struct DatabaseManager {
   data_path: String,
   metadata_path: String,
   bucket_interval: u32,
+}
+
+fn get_tree(table_schema: Value) -> Vec<Condition> {
+  let mut conditions = Vec::new();
+
+  if let Some(schema_map) = table_schema.as_object() {
+    for (field, properties) in schema_map {
+      if let Some(field_type) = properties.get("type").and_then(|v| v.as_str()) {
+        let min = properties.get("min").and_then(|v| v.as_f64());
+        let max = properties.get("max").and_then(|v| v.as_f64());
+
+        match field_type {
+          "int" => {
+            if let Some(min_val) = min {
+              conditions.push(int_greater_than(field, min_val as i64));
+            }
+            if let Some(max_val) = max {
+              conditions.push(int_less_than(field, max_val as i64));
+            }
+          }
+          "float" => {
+            if let Some(min_val) = min {
+              conditions.push(float_greater_than(field, min_val));
+            }
+            if let Some(max_val) = max {
+              conditions.push(float_less_than(field, max_val));
+            }
+          }
+          "int|float" => {
+            if let Some(min_val) = min {
+              conditions.push(float_greater_than(field, min_val));
+            }
+            if let Some(max_val) = max {
+              conditions.push(float_less_than(field, max_val));
+            }
+          }
+          _ => {}
+        }
+      }
+    }
+  }
+
+  conditions
 }
 
 impl DatabaseManager {
@@ -289,15 +333,38 @@ impl DatabaseManager {
     }
   }
 
-  pub fn insert(&mut self, db_name: &str, table_name: &str, json_data: &str) -> Result<String, Box<dyn Error>> {
+  pub fn insert(&mut self, db_name: &str, table_name: &str, json_data: &str) -> Result<Vec<Value>, Box<dyn Error>> {
     // Reload metadata
     self.metadata = self.read_metadata()?;
 
-    let mut new_json_values: Vec<Value> = serde_json::from_str(json_data)?;
+    let new_json_values: Vec<Value> = serde_json::from_str(json_data)?;
     let table_path = self
       .get_table_path(db_name, table_name)
       .ok_or_else(|| format!("Database '{}' or Table '{}' does not exist.", db_name, table_name))?;
     let table_schema = self.get_table_schema(db_name, table_name)?;
+
+    let conditions = get_tree(table_schema.clone());
+    if conditions.is_empty() {
+      return Err(format!("No conditions generated").into());
+    }
+    let tree = json_rules_engine::and(conditions);
+
+    let mut valid_json_values = Vec::new();
+    let mut invalid_json_values = Vec::new();
+    for json_value in &new_json_values {
+      let result = tree.check_value(json_value);
+      if result.status == json_rules_engine::Status::Met {
+        valid_json_values.push(json_value.clone());
+      } else {
+        println!("Skipping record: {} due to condition mismatch", json_value);
+        invalid_json_values.push(json_value.clone());
+      }
+    }
+
+    // If all records are invalid, return them
+    if valid_json_values.is_empty() {
+      return Ok(invalid_json_values);
+    }
 
     let datetime_binding = get_property_fields(&table_schema, "datetime")?;
     let datetime_field = datetime_binding
@@ -314,7 +381,7 @@ impl DatabaseManager {
     };
 
     // Ensure datetime fields are present and convert them to timestamps
-    for json_value in new_json_values.iter_mut() {
+    for json_value in valid_json_values.iter_mut() {
       match json_value.get(datetime_field) {
         Some(Value::String(date_str)) => {
           let parsed_timestamp = NaiveDateTime::parse_from_str(date_str, "%Y.%m.%d %H:%M:%S")
@@ -334,7 +401,7 @@ impl DatabaseManager {
       }
     }
 
-    for json_value in &new_json_values {
+    for json_value in &valid_json_values {
       self.validate_data_against_schema(&table_schema, json_value)?;
     }
 
@@ -357,7 +424,7 @@ impl DatabaseManager {
     let mut updated_files = HashSet::new();
     let mut new_records_by_file: HashMap<String, Vec<Value>> = HashMap::new();
 
-    for new_record in new_json_values.into_iter() {
+    for new_record in valid_json_values.into_iter() {
       let key = build_key(&new_record);
       if seen_records.insert(key.clone(), new_record.clone()).is_some() {
         continue;
@@ -397,7 +464,7 @@ impl DatabaseManager {
       }
     }
 
-    Ok(format!("Data successfully written to {} files", updated_files.len()))
+    Ok(invalid_json_values)
   }
 
   pub async fn query(&self, db_name: &str, sql_query: &str, username: Option<&str>, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {

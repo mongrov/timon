@@ -6,8 +6,8 @@ use cloud_sync::CloudStorageManager;
 use datafusion::prelude::DataFrame;
 use db_manager::DatabaseManager;
 use serde::Serialize;
-use serde_json;
 use serde_json::Value;
+use serde_json::{self, json};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -202,11 +202,11 @@ pub fn delete_table(db_name: &str, table_name: &str) -> Result<Value, String> {
 pub fn insert(db_name: &str, table_name: &str, json_data: &str) -> Result<Value, String> {
   let database_manager = get_database_manager();
   match database_manager.clone().insert(db_name, table_name, json_data) {
-    Ok(message) => {
+    Ok(value) => {
       let result = TimonResult {
         status: 200,
-        message,
-        json_value: None,
+        message: "Records that violated (min, max) constraints will be logged and returned".to_string(),
+        json_value: Some(json!(value)),
       };
       serde_json::to_value(&result).map_err(|e| e.to_string())
     }
