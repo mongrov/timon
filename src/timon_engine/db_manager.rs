@@ -344,26 +344,20 @@ impl DatabaseManager {
     let table_schema = self.get_table_schema(db_name, table_name)?;
 
     let conditions = get_tree(table_schema.clone());
-    if conditions.is_empty() {
-      return Err(format!("No conditions generated").into());
-    }
-    let tree = json_rules_engine::and(conditions);
-
     let mut valid_json_values = Vec::new();
     let mut invalid_json_values = Vec::new();
-    for json_value in &new_json_values {
-      let result = tree.check_value(json_value);
-      if result.status == json_rules_engine::Status::Met {
-        valid_json_values.push(json_value.clone());
-      } else {
-        println!("Skipping record: {} due to condition mismatch", json_value);
-        invalid_json_values.push(json_value.clone());
-      }
-    }
 
-    // If all records are invalid, return them
-    if valid_json_values.is_empty() {
-      return Ok(invalid_json_values);
+    if !conditions.is_empty() {
+      let tree = json_rules_engine::and(conditions);
+      for json_value in &new_json_values {
+        let result = tree.check_value(json_value);
+        if result.status == json_rules_engine::Status::Met {
+          valid_json_values.push(json_value.clone());
+        } else {
+          println!("Skipping record: {} due to condition mismatch", json_value);
+          invalid_json_values.push(json_value.clone());
+        }
+      }
     }
 
     let datetime_binding = get_property_fields(&table_schema, "datetime")?;
