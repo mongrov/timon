@@ -13,6 +13,7 @@ use datafusion::parquet::data_type::{AsBytes, Decimal};
 use datafusion::parquet::record::{Field as ParquetField, Row};
 use datafusion::prelude::SessionContext;
 use datafusion::scalar::ScalarValue;
+use json_rules_engine::{float_greater_than, float_less_than, int_greater_than, int_less_than, Condition};
 use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -639,4 +640,47 @@ pub async fn cleanup_old_files(processed_files: &[PathBuf]) {
       }
     }
   }
+}
+
+pub fn build_rules_tree(table_schema: Value) -> Vec<Condition> {
+  let mut conditions = Vec::new();
+
+  if let Some(schema_map) = table_schema.as_object() {
+    for (field, properties) in schema_map {
+      if let Some(field_type) = properties.get("type").and_then(|v| v.as_str()) {
+        let min = properties.get("min").and_then(|v| v.as_f64());
+        let max = properties.get("max").and_then(|v| v.as_f64());
+
+        match field_type {
+          "int" => {
+            if let Some(min_val) = min {
+              conditions.push(int_greater_than(field, min_val as i64));
+            }
+            if let Some(max_val) = max {
+              conditions.push(int_less_than(field, max_val as i64));
+            }
+          }
+          "float" => {
+            if let Some(min_val) = min {
+              conditions.push(float_greater_than(field, min_val));
+            }
+            if let Some(max_val) = max {
+              conditions.push(float_less_than(field, max_val));
+            }
+          }
+          "int|float" => {
+            if let Some(min_val) = min {
+              conditions.push(float_greater_than(field, min_val));
+            }
+            if let Some(max_val) = max {
+              conditions.push(float_less_than(field, max_val));
+            }
+          }
+          _ => {}
+        }
+      }
+    }
+  }
+
+  conditions
 }

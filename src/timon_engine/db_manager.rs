@@ -1,5 +1,5 @@
 use super::helpers::{
-  extract_partition_time, extract_query_time_range, extract_table_name, get_property_fields, get_table_columns, json_to_arrow,
+  build_rules_tree, extract_partition_time, extract_query_time_range, extract_table_name, get_property_fields, get_table_columns, json_to_arrow,
   record_batches_to_json, rounded_timestamp, row_to_json,
 };
 use chrono::{NaiveDateTime, TimeZone, Utc};
@@ -13,7 +13,6 @@ use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::parquet::file::properties::WriterProperties;
 use datafusion::parquet::file::reader::{FileReader, SerializedFileReader};
 use datafusion::prelude::*;
-use json_rules_engine::{float_greater_than, float_less_than, int_greater_than, int_less_than, Condition};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -73,49 +72,6 @@ pub struct DatabaseManager {
   data_path: String,
   metadata_path: String,
   bucket_interval: u32,
-}
-
-fn get_tree(table_schema: Value) -> Vec<Condition> {
-  let mut conditions = Vec::new();
-
-  if let Some(schema_map) = table_schema.as_object() {
-    for (field, properties) in schema_map {
-      if let Some(field_type) = properties.get("type").and_then(|v| v.as_str()) {
-        let min = properties.get("min").and_then(|v| v.as_f64());
-        let max = properties.get("max").and_then(|v| v.as_f64());
-
-        match field_type {
-          "int" => {
-            if let Some(min_val) = min {
-              conditions.push(int_greater_than(field, min_val as i64));
-            }
-            if let Some(max_val) = max {
-              conditions.push(int_less_than(field, max_val as i64));
-            }
-          }
-          "float" => {
-            if let Some(min_val) = min {
-              conditions.push(float_greater_than(field, min_val));
-            }
-            if let Some(max_val) = max {
-              conditions.push(float_less_than(field, max_val));
-            }
-          }
-          "int|float" => {
-            if let Some(min_val) = min {
-              conditions.push(float_greater_than(field, min_val));
-            }
-            if let Some(max_val) = max {
-              conditions.push(float_less_than(field, max_val));
-            }
-          }
-          _ => {}
-        }
-      }
-    }
-  }
-
-  conditions
 }
 
 impl DatabaseManager {
@@ -343,7 +299,7 @@ impl DatabaseManager {
       .ok_or_else(|| format!("Database '{}' or Table '{}' does not exist.", db_name, table_name))?;
     let table_schema = self.get_table_schema(db_name, table_name)?;
 
-    let conditions = get_tree(table_schema.clone());
+    let conditions = build_rules_tree(table_schema.clone());
     let mut invalid_json_values = Vec::new();
     if !conditions.is_empty() {
       let tree = json_rules_engine::and(conditions);

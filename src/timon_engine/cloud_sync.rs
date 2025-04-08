@@ -5,11 +5,11 @@ use super::helpers::{
 use chrono::{DateTime, Utc};
 use datafusion::arrow::array::RecordBatch;
 use datafusion::parquet::arrow::ArrowWriter;
-use futures::{StreamExt, TryStreamExt};
+use futures::{stream, StreamExt, TryStreamExt};
 use object_store::aws::{AmazonS3, AmazonS3Builder};
 use object_store::path::Path as StorePath;
-use object_store::ObjectStore;
-use object_store::{ClientOptions, ObjectMeta};
+use object_store::{Attributes, ClientOptions, GetResultPayload, ObjectMeta};
+use object_store::{GetResult, ObjectStore};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -21,9 +21,140 @@ use std::path::PathBuf;
 use std::{collections::HashMap, sync::Arc};
 use tokio::io::AsyncReadExt;
 
-pub struct CloudStorageManager {
-  s3_store: Arc<AmazonS3>,
-  db_manager: DatabaseManager,
+pub trait DatabaseManagerInterface: Send + Sync {
+  fn build_files_list(&self, db_name: &str, table_name: &str, username: Option<&str>) -> Result<Vec<String>, Box<dyn std::error::Error>>;
+  fn get_table_schema(&self, db_name: &str, table_name: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>>;
+  fn get_username(&self) -> &str;
+  fn get_storage_path(&self) -> &str;
+}
+
+impl DatabaseManagerInterface for DatabaseManager {
+  fn build_files_list(&self, db_name: &str, table_name: &str, username: Option<&str>) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    self.build_files_list(db_name, table_name, username)
+  }
+
+  fn get_table_schema(&self, db_name: &str, table_name: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    self.get_table_schema(db_name, table_name)
+  }
+
+  fn get_username(&self) -> &str {
+    &self.username
+  }
+
+  fn get_storage_path(&self) -> &str {
+    &self.storage_path
+  }
+}
+
+pub trait S3StoreInterface: Send + Sync {
+  fn store_list(&self, prefix: Option<&StorePath>) -> futures::stream::BoxStream<'_, Result<ObjectMeta, object_store::Error>>;
+  fn store_head(&self, path: &StorePath) -> impl std::future::Future<Output = Result<ObjectMeta, Box<dyn std::error::Error>>> + Send;
+  fn store_get(&self, path: &StorePath) -> impl std::future::Future<Output = Result<GetResult, Box<dyn std::error::Error>>> + Send;
+  fn store_put(&self, path: &StorePath, data: bytes::Bytes) -> impl std::future::Future<Output = Result<(), Box<dyn std::error::Error>>> + Send;
+}
+
+impl S3StoreInterface for AmazonS3 {
+  fn store_list(&self, prefix: Option<&StorePath>) -> futures::stream::BoxStream<'_, Result<ObjectMeta, object_store::Error>> {
+    self.list(prefix)
+  }
+
+  async fn store_head(&self, path: &StorePath) -> Result<ObjectMeta, Box<dyn std::error::Error>> {
+    let result = self.head(path).await;
+    match result {
+      Ok(meta) => Ok(meta),
+      Err(e) => Err(Box::new(e)),
+    }
+  }
+
+  async fn store_get(&self, path: &StorePath) -> Result<GetResult, Box<dyn std::error::Error>> {
+    let result = self.get(path).await;
+    match result {
+      Ok(get_result) => Ok(get_result),
+      Err(e) => Err(Box::new(e)),
+    }
+  }
+
+  async fn store_put(&self, path: &StorePath, data: bytes::Bytes) -> Result<(), Box<dyn std::error::Error>> {
+    let result = self.put(path, data.into()).await;
+    match result {
+      Ok(_) => Ok(()),
+      Err(e) => Err(Box::new(e)),
+    }
+  }
+}
+
+pub struct MockS3Store {
+  pub cloud_files: HashMap<String, Vec<u8>>,
+  pub modified_times: HashMap<String, DateTime<Utc>>,
+}
+
+impl S3StoreInterface for MockS3Store {
+  fn store_list(&self, prefix: Option<&StorePath>) -> futures::stream::BoxStream<'_, Result<ObjectMeta, object_store::Error>> {
+    let prefix_str = prefix.map(|p| p.to_string()).unwrap_or_default();
+    let files = self
+      .cloud_files
+      .keys()
+      .filter(|k| k.starts_with(&prefix_str))
+      .map(|k| {
+        let meta = ObjectMeta {
+          location: StorePath::from(k.clone()),
+          last_modified: self.modified_times.get(k).unwrap_or(&Utc::now()).clone(),
+          size: self.cloud_files.get(k).unwrap().len(),
+          e_tag: None,
+          version: None,
+        };
+        Ok(meta)
+      })
+      .collect::<Vec<_>>();
+
+    stream::iter(files).boxed()
+  }
+
+  async fn store_head(&self, path: &StorePath) -> Result<ObjectMeta, Box<dyn std::error::Error>> {
+    let path_str = path.to_string();
+    if self.cloud_files.contains_key(&path_str) {
+      let last_modified = self.modified_times.get(&path_str).unwrap_or(&Utc::now()).clone();
+      Ok(ObjectMeta {
+        location: path.clone(),
+        last_modified,
+        size: self.cloud_files.get(&path_str).unwrap().len(),
+        e_tag: None,
+        version: None,
+      })
+    } else {
+      Err("NotFound".into())
+    }
+  }
+
+  async fn store_get(&self, path: &StorePath) -> Result<GetResult, Box<dyn std::error::Error>> {
+    let path_str = path.to_string();
+    if let Some(data) = self.cloud_files.get(&path_str) {
+      let data_clone = data.clone();
+      Ok(GetResult {
+        payload: GetResultPayload::Stream(Box::pin(futures::stream::once(async move { Ok(bytes::Bytes::from(data_clone)) }))),
+        meta: ObjectMeta {
+          location: path.clone(),
+          last_modified: self.modified_times.get(&path_str).unwrap_or(&Utc::now()).clone(),
+          size: data.len(),
+          e_tag: None,
+          version: None,
+        },
+        range: 0..data.len(),
+        attributes: Attributes::default(),
+      })
+    } else {
+      Err("NotFound".into())
+    }
+  }
+
+  async fn store_put(&self, _path: &StorePath, _data: bytes::Bytes) -> Result<(), Box<dyn std::error::Error>> {
+    Ok(())
+  }
+}
+
+pub struct CloudStorageManager<S: S3StoreInterface> {
+  pub(crate) s3_store: Arc<S>,
+  db_manager: Arc<dyn DatabaseManagerInterface>,
   pub bucket_name: String,
 }
 
@@ -32,15 +163,15 @@ struct Metadata {
   files: Vec<String>,
 }
 
-impl CloudStorageManager {
+impl<S: S3StoreInterface> CloudStorageManager<S> {
   pub fn new(
-    db_manager: DatabaseManager,
+    db_manager: impl DatabaseManagerInterface + 'static,
     bucket_endpoint: Option<&str>,
     access_key_id: Option<&str>,
     secret_access_key: Option<&str>,
     bucket_name: Option<&str>,
     bucket_region: Option<&str>,
-  ) -> Self {
+  ) -> CloudStorageManager<AmazonS3> {
     let bucket_endpoint = bucket_endpoint.unwrap_or("http://localhost:9000").to_owned();
     let bucket_name = bucket_name.unwrap_or("timon").to_owned();
     let access_key_id = access_key_id.unwrap_or("ahmed").to_owned();
@@ -66,8 +197,21 @@ impl CloudStorageManager {
 
     CloudStorageManager {
       s3_store: Arc::new(s3_store),
-      db_manager,
+      db_manager: Arc::new(db_manager),
       bucket_name,
+    }
+  }
+
+  #[allow(dead_code)]
+  pub fn new_with_mock(
+    db_manager: impl DatabaseManagerInterface + 'static,
+    mock_store: MockS3Store,
+    bucket_name: Option<&str>,
+  ) -> CloudStorageManager<MockS3Store> {
+    CloudStorageManager {
+      s3_store: Arc::new(mock_store),
+      db_manager: Arc::new(db_manager),
+      bucket_name: bucket_name.unwrap_or("timon").to_owned(),
     }
   }
 
@@ -78,12 +222,12 @@ impl CloudStorageManager {
     date_range: &HashMap<&str, &str>,
     username: Option<&str>,
   ) -> Result<(), Box<dyn std::error::Error>> {
-    let default_username = &self.db_manager.username;
+    let default_username = &self.db_manager.get_username();
 
     self.cloud_sink_parquet(db_name, table_name).await?;
     self.cloud_fetch_parquet(default_username, db_name, table_name, date_range).await?;
 
-    if let Some(group_username) = username.filter(|u| *u != self.db_manager.username) {
+    if let Some(group_username) = username.filter(|u| *u != self.db_manager.get_username()) {
       self.cloud_fetch_parquet(group_username, db_name, table_name, date_range).await?;
     }
 
@@ -96,7 +240,7 @@ impl CloudStorageManager {
       return Err(format!("No data files found for Table '{}' in Database '{}'.", table_name, db_name).into());
     }
 
-    let username = &self.db_manager.username;
+    let username = &self.db_manager.get_username();
     let table_schema = self.db_manager.get_table_schema(db_name, table_name)?;
     let unique_fields = get_property_fields(&table_schema, "unique")?;
     let mut batches = Vec::new();
@@ -137,7 +281,7 @@ impl CloudStorageManager {
         .into_iter()
         .collect();
 
-    let local_dir = format!("{}/group/{}/{}/{}", self.db_manager.storage_path, username, db_name, table_name);
+    let local_dir = format!("{}/group/{}/{}/{}", self.db_manager.get_storage_path(), username, db_name, table_name);
     if fs::metadata(&local_dir).is_err() {
       println!("Directory does not exist, skipping deletion.");
     } else {
@@ -219,13 +363,13 @@ impl CloudStorageManager {
           _ => unreachable!(),
         };
 
-        let s3_temp_path = format!("{}/merge_workspace/{}/{}", self.db_manager.storage_path, username, name);
+        let s3_temp_path = format!("{}/merge_workspace/{}/{}", self.db_manager.get_storage_path(), username, name);
         let mut s3_batches = Vec::new();
 
         let local_modified_datetime = get_local_file_modified_time(&file_path.to_string_lossy()).unwrap_or_default();
 
         // Use `head()` to check if file exists and get metadata
-        let s3_modified_datetime = match s3_store.head(&StorePath::from(target_path.clone())).await {
+        let s3_modified_datetime = match s3_store.store_head(&StorePath::from(target_path.clone())).await {
           Ok(meta) => meta.last_modified,
           Err(_) => {
             println!("S3 file does not exist, uploading local file...");
@@ -274,7 +418,7 @@ impl CloudStorageManager {
       let merge_target_path = &merge_target_paths[index];
       let file_path = PathBuf::from(merge_target_path);
       let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap();
-      let merged_file_path = format!("{}/merge_workspace/{}/merged_{}", self.db_manager.storage_path, username, filename);
+      let merged_file_path = format!("{}/merge_workspace/{}/merged_{}", self.db_manager.get_storage_path(), username, filename);
 
       let merge_file = File::create(&merged_file_path)?;
       let mut writer = ArrowWriter::try_new(merge_file, batch.schema(), None)?;
@@ -288,7 +432,7 @@ impl CloudStorageManager {
     Ok(())
   }
 
-  async fn upload_to_bucket(&self, source_path: &str, target_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+  pub async fn upload_to_bucket(&self, source_path: &str, target_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let s3_store = &self.s3_store;
     let object_store = Arc::new(s3_store);
 
@@ -296,14 +440,14 @@ impl CloudStorageManager {
     let mut file = tokio::fs::File::open(source_path).await?;
     let mut data = Vec::new();
     file.read_to_end(&mut data).await?;
-    object_store.put(&StorePath::from(target_path), data.into()).await?;
+    object_store.store_put(&StorePath::from(target_path), data.into()).await?;
 
     Ok(())
   }
 
-  async fn list_cloud_files(&self, prefix_path: &str) -> Result<Vec<(String, DateTime<Utc>)>, Box<dyn std::error::Error>> {
+  pub async fn list_cloud_files(&self, prefix_path: &str) -> Result<Vec<(String, DateTime<Utc>)>, Box<dyn std::error::Error>> {
     // List all objects under the prefix
-    let objects = self.s3_store.list(Some(&StorePath::from(prefix_path)));
+    let objects = self.s3_store.store_list(Some(&StorePath::from(prefix_path)));
     // Collect the stream of ObjectMeta into a Vec<ObjectMeta>
     let object_metas: Vec<ObjectMeta> = objects
       .map(|result| result.map_err(|e| Box::new(e) as Box<dyn std::error::Error>))
@@ -323,7 +467,7 @@ impl CloudStorageManager {
     Ok(files)
   }
 
-  async fn download_from_bucket(&self, target_path: &str, local_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+  pub async fn download_from_bucket(&self, target_path: &str, local_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let object_store = &self.s3_store;
     let path = StorePath::from(target_path);
 
@@ -333,7 +477,7 @@ impl CloudStorageManager {
     }
 
     // Stream the bytes from object storage
-    let mut stream = match object_store.get(&path).await {
+    let mut stream = match object_store.store_get(&path).await {
       Ok(s) => s.into_stream(),
       Err(e) => {
         if e.to_string().contains("NotFound") {

@@ -5,6 +5,7 @@ pub mod helpers;
 use cloud_sync::CloudStorageManager;
 use datafusion::prelude::DataFrame;
 use db_manager::DatabaseManager;
+use object_store::aws::AmazonS3;
 use serde::Serialize;
 use serde_json::Value;
 use serde_json::{self, json};
@@ -263,9 +264,9 @@ pub async fn query_df(db_name: &str, sql_query: &str, username: Option<&str>) ->
 * @ cloud_fetch_parquet(username, db_name, table_name, date_range)
  */
 
-static CLOUD_STORAGE_MANAGER: OnceLock<CloudStorageManager> = OnceLock::new();
+static CLOUD_STORAGE_MANAGER: OnceLock<CloudStorageManager<AmazonS3>> = OnceLock::new();
 
-fn get_cloud_storage_manager() -> &'static CloudStorageManager {
+fn get_cloud_storage_manager() -> &'static CloudStorageManager<AmazonS3> {
   CLOUD_STORAGE_MANAGER.get().expect("CloudStorageManager is not initialized")
 }
 
@@ -276,7 +277,7 @@ pub fn init_bucket(
   secret_access_key: &str,
   bucket_region: &str,
 ) -> Result<Value, String> {
-  let cloud_storage_manager = cloud_sync::CloudStorageManager::new(
+  let cloud_storage_manager = cloud_sync::CloudStorageManager::<AmazonS3>::new(
     get_database_manager().clone(),
     Some(bucket_endpoint),
     Some(access_key_id),
