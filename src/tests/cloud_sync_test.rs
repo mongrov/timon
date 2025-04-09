@@ -3,6 +3,8 @@ use crate::timon_engine::{cloud_sync::CloudStorageManager, db_manager::DatabaseM
 use chrono::Utc;
 use serde_json::json;
 use std::collections::HashMap;
+use std::io::Write;
+use tempfile::NamedTempFile;
 
 struct MockDatabaseManager {
   username: String,
@@ -64,7 +66,7 @@ impl MockS3Store {
 
 fn setup_test_environment() -> CloudStorageManager<MockS3Store> {
   // Create temp directories needed for testing
-  let storage_path = "/tmp/timon_test";
+  let storage_path = "tmp/timon_test";
   let data_path = format!("{}/data", storage_path);
   let group_path = format!("{}/group", storage_path);
   let merge_path = format!("{}/merge_workspace", storage_path);
@@ -93,7 +95,7 @@ fn setup_test_environment() -> CloudStorageManager<MockS3Store> {
 }
 
 fn cleanup_test_environment() {
-  let _ = std::fs::remove_dir_all("/tmp/timon_test");
+  let _ = std::fs::remove_dir_all("tmp/timon_test");
 }
 
 #[tokio::test]
@@ -122,13 +124,10 @@ async fn test_cloud_sync_parquet() {
   date_range.insert("start_date", "2023-01-01");
   date_range.insert("end_date", "2023-01-31");
 
-  // Call the method
   let result = cloud_mgr.cloud_sync_parquet("test_db", "test_table", &date_range, None).await;
 
-  // Clean up test artifacts
   cleanup_test_environment();
 
-  // Verify results
   assert!(result.is_ok(), "cloud_sync_parquet failed: {:?}", result.err());
 }
 
@@ -136,13 +135,10 @@ async fn test_cloud_sync_parquet() {
 async fn test_cloud_sink_parquet() {
   let cloud_mgr = setup_test_environment();
 
-  // Call the method
   let result = cloud_mgr.cloud_sink_parquet("test_db", "test_table").await;
 
-  // Clean up test artifacts
   cleanup_test_environment();
 
-  // Verify results
   assert!(result.is_ok(), "cloud_sink_parquet failed: {:?}", result.err());
 }
 
@@ -155,13 +151,10 @@ async fn test_cloud_fetch_parquet() {
   date_range.insert("start_date", "2023-01-01");
   date_range.insert("end_date", "2023-01-31");
 
-  // Call the method
   let result = cloud_mgr.cloud_fetch_parquet("testuser", "test_db", "test_table", &date_range).await;
 
-  // Clean up test artifacts
   cleanup_test_environment();
 
-  // Verify results
   assert!(result.is_ok(), "cloud_fetch_parquet failed: {:?}", result.err());
 }
 
@@ -169,17 +162,18 @@ async fn test_cloud_fetch_parquet() {
 async fn test_upload_to_bucket() {
   let cloud_mgr = setup_test_environment();
 
-  // Create a test file
-  let test_file_path = "/tmp/timon_test/test_upload.txt";
-  let _ = std::fs::write(test_file_path, "test content");
+  // Create a unique temporary file with test content
+  let mut temp_file = NamedTempFile::new().unwrap();
+  writeln!(temp_file, "test content").unwrap();
 
-  // Call the method
+  // Get the file path as string
+  let test_file_path = temp_file.path().to_str().unwrap();
+
+  // Upload to S3 bucket (or your backend)
   let result = cloud_mgr.upload_to_bucket(test_file_path, "testuser/test_upload.txt").await;
 
-  // Clean up test artifacts
   cleanup_test_environment();
 
-  // Verify results
   assert!(result.is_ok(), "upload_to_bucket failed: {:?}", result.err());
 }
 
@@ -187,18 +181,17 @@ async fn test_upload_to_bucket() {
 async fn test_download_from_bucket() {
   let cloud_mgr = setup_test_environment();
 
-  // Call the method
+  // Create an empty temporary file path for download target
+  let temp_file = NamedTempFile::new().unwrap();
+  let download_path = temp_file.path().to_str().unwrap();
+
+  // Run the download logic
   let result = cloud_mgr
-    .download_from_bucket(
-      "testuser/test_db/test_table/2023/01/test_table_2023-01_01.parquet",
-      "/tmp/timon_test/download_test.parquet",
-    )
+    .download_from_bucket("testuser/test_db/test_table/2023/01/test_table_2023-01_01.parquet", download_path)
     .await;
 
-  // Clean up test artifacts
   cleanup_test_environment();
 
-  // Verify results
   assert!(result.is_ok(), "download_from_bucket failed: {:?}", result.err());
 }
 
@@ -206,13 +199,10 @@ async fn test_download_from_bucket() {
 async fn test_list_cloud_files() {
   let cloud_mgr = setup_test_environment();
 
-  // Call the method
   let result = cloud_mgr.list_cloud_files("testuser/test_db/test_table").await;
 
-  // Clean up test artifacts
   cleanup_test_environment();
 
-  // Verify results
   assert!(result.is_ok(), "list_cloud_files failed: {:?}", result.err());
   let files = result.unwrap();
   assert!(!files.is_empty(), "No files were returned");
