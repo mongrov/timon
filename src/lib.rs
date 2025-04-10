@@ -1,3 +1,5 @@
+#[cfg(feature = "cloud_server")]
+pub mod server;
 mod tests;
 pub mod timon_engine;
 
