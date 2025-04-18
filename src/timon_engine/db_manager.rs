@@ -492,7 +492,7 @@ impl DatabaseManager {
     let mem_table = MemTable::try_new(schema, vec![combined_results])?;
     session_context.register_table("combined_table", Arc::new(mem_table))?;
 
-    let adjusted_sql_query = sql_query.replace(&format!("FROM {}", table_name), "FROM combined_table");
+    let adjusted_sql_query = sql_query.replace(&table_name, "combined_table");
     let final_df = session_context.sql(&adjusted_sql_query).await?;
     let final_results = final_df.collect().await?;
 
