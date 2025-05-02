@@ -1,5 +1,5 @@
 mod timon_engine;
-use chrono::{Duration, Local};
+use chrono::{DateTime, Duration, Local, Utc};
 use serde_json::json;
 use std::time::Instant;
 pub use timon_engine::{
@@ -170,7 +170,7 @@ async fn test_local_storage() {
   // println!("query_result: {}", query_result2.unwrap()["json_value"]);
   // println!("Time taken for query: {:.3} seconds", duration.as_secs_f64());
 
-  // let sql_query3 = format!(r#"SELECT * FROM activitydetails ORDER BY date ASC LIMIT 5"#);
+  // let sql_query3 = format!(r#"SELECT * FROM activitydetails"#);
   // let query_df_result = query_df(DATABASE_NAME, &sql_query3, None).await;
   // println!("query_df_result: {:?}", query_df_result.unwrap());
 
@@ -212,5 +212,342 @@ fn main() {
   tokio::runtime::Runtime::new().expect("Failed to create runtime").block_on(async {
     test_local_storage().await;
     test_s3_sync().await;
+    let _ = test_ziva_ring_insert().await;
+    let _ = test_ziva_ring_query().await;
   });
+}
+
+async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
+  const STORAGE_PATH: &str = "tmp/timon";
+  const USERNAME: &str = "ahmed_test";
+  let timon_result = init_timon(STORAGE_PATH, 1440, USERNAME).unwrap();
+  println!("init_timon -> {}", timon_result);
+
+  const DATABASE_NAME: &str = "zivaring";
+  let database_result = create_database(DATABASE_NAME);
+  println!("create_database -> {}", database_result.unwrap());
+
+  // Activity Details Table Schema
+  let activity_details_schema = r#"
+    {
+      "date": {
+        "type": "int",
+        "required": true, 
+        "unique": true,
+        "datetime": true
+      },
+      "step": {
+        "type": "int"
+      },
+      "arraySteps": {
+        "type": "array"
+      },
+      "calories": {
+        "type": "int|float"
+      },
+      "distance": {
+        "type": "int|float"
+      }
+    }
+  "#;
+
+  // SPO2 Table Schema
+  let spo2_schema = r#"
+    {
+      "date": {
+        "type": "int",
+        "required": true,
+        "unique": true,
+        "datetime": true
+      },
+      "automaticSpo2Data": {
+        "type": "int"
+      }
+    }
+    "#;
+
+  // Heart Rate Table Schema
+  let heartrate_schema = r#"
+    {
+      "date": {
+        "type": "int",
+        "required": true,
+        "unique": true,
+        "datetime": true
+      },
+      "singleHR": {
+        "type": "int"
+      }
+    }
+    "#;
+
+  // HRV Table Schema
+  let hrv_schema = r#"
+    {
+      "date": {
+        "type": "int",
+        "required": true,
+        "unique": true,
+        "datetime": true
+      },
+      "heartRate": {
+        "type": "int"
+      },
+      "highBP": {
+        "type": "int"
+      },
+      "hrv": {
+        "type": "int"
+      },
+      "lowBP": {
+        "type": "int"
+      },
+      "stress": {
+        "type": "int"
+      },
+      "vascularAging": {
+        "type": "int"
+      }
+    }
+    "#;
+
+  // Temperature Table Schema
+  let temperature_schema = r#"
+    {
+      "date": {
+        "type": "int",
+        "required": true,
+        "unique": true,
+        "datetime": true
+      },
+      "temperature": {
+        "type": "int|float"
+      }
+    }
+    "#;
+
+  // Create tables
+  let activity_details_result = create_table(DATABASE_NAME, "activitydetails", &activity_details_schema);
+  println!("Create activitydetails table -> {}", activity_details_result.unwrap());
+
+  let spo2_result = create_table(DATABASE_NAME, "spo2_readings", &spo2_schema);
+  println!("Create SPO2 table -> {}", spo2_result.unwrap());
+
+  let hr_result = create_table(DATABASE_NAME, "heart_rate", &heartrate_schema);
+  println!("Create heart rate table -> {}", hr_result.unwrap());
+
+  let hrv_result = create_table(DATABASE_NAME, "hrv_readings", &hrv_schema);
+  println!("Create HRV table -> {}", hrv_result.unwrap());
+
+  let temp_result = create_table(DATABASE_NAME, "temperature_readings", &temperature_schema);
+  println!("Create temperature table -> {}", temp_result.unwrap());
+
+  // Read JSON file
+  let file_content =
+    std::fs::read_to_string("/home/ahmed/Downloads/ziva_data_android 2.json").map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+  let json_data: serde_json::Value = serde_json::from_str(&file_content).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+  let start_time = Instant::now();
+
+  // Insert activity details
+  if let Some(activity_details) = json_data["activitydetails"].as_array() {
+    let formatted_activity_details: Vec<serde_json::Value> = activity_details
+      .iter()
+      .map(|reading| {
+        let timestamp = reading["date"].as_i64().unwrap_or(0);
+        let date = DateTime::from_timestamp(timestamp, 0).unwrap_or(DateTime::<Utc>::MIN_UTC);
+        json!({
+          "date": date,
+          "step": reading["step"],
+          "arraySteps": reading["arraySteps"],
+          "calories": reading["calories"],
+          "distance": reading["distance"]
+        })
+      })
+      .collect();
+    let activity_details_json = serde_json::to_string(&formatted_activity_details)?;
+    let insertion_result = insert(DATABASE_NAME, "activitydetails", &activity_details_json)?;
+    println!("Activity details insertion result: {}", insertion_result);
+  }
+
+  // Insert SPO2 readings
+  if let Some(spo2) = json_data["spo2"].as_array() {
+    let formatted_spo2: Vec<serde_json::Value> = spo2
+      .iter()
+      .map(|reading| {
+        let timestamp = reading["date"].as_i64().unwrap_or(0);
+        let date = DateTime::from_timestamp(timestamp, 0).unwrap_or(DateTime::<Utc>::MIN_UTC);
+        json!({
+          "date": date,
+          "automaticSpo2Data": reading["automaticSpo2Data"]
+        })
+      })
+      .collect();
+    let spo2_json = serde_json::to_string(&formatted_spo2)?;
+    let insertion_result = insert(DATABASE_NAME, "spo2_readings", &spo2_json)?;
+    println!("SPO2 insertion result: {}", insertion_result);
+  }
+
+  // Insert heart rate readings
+  if let Some(heartrate) = json_data["heartrate"].as_array() {
+    let formatted_hr: Vec<serde_json::Value> = heartrate
+      .iter()
+      .map(|reading| {
+        let timestamp = reading["date"].as_i64().unwrap_or(0);
+        let date = DateTime::from_timestamp(timestamp, 0).unwrap_or(DateTime::<Utc>::MIN_UTC);
+        json!({
+          "date": date,
+          "singleHR": reading["singleHR"]
+        })
+      })
+      .collect();
+    let heartrate_json = serde_json::to_string(&formatted_hr)?;
+    let insertion_result = insert(DATABASE_NAME, "heart_rate", &heartrate_json)?;
+    println!("Heart rate insertion result: {}", insertion_result);
+  }
+
+  // Insert HRV readings
+  if let Some(hrv) = json_data["hrv_table"].as_array() {
+    let formatted_hrv: Vec<serde_json::Value> = hrv
+      .iter()
+      .map(|reading| {
+        let timestamp = reading["date"].as_i64().unwrap_or(0);
+        let date = DateTime::from_timestamp(timestamp, 0).unwrap_or(DateTime::<Utc>::MIN_UTC);
+        json!({
+          "date": date,
+          "heartRate": reading["heartRate"],
+          "highBP": reading["highBP"],
+          "hrv": reading["hrv"],
+          "lowBP": reading["lowBP"],
+          "stress": reading["stress"],
+          "vascularAging": reading["vascularAging"]
+        })
+      })
+      .collect();
+    let hrv_json = serde_json::to_string(&formatted_hrv)?;
+    let insertion_result = insert(DATABASE_NAME, "hrv_readings", &hrv_json)?;
+    println!("HRV insertion result: {}", insertion_result);
+  }
+
+  // Insert temperature readings
+  if let Some(temperature) = json_data["temperature_table"].as_array() {
+    let formatted_temp: Vec<serde_json::Value> = temperature
+      .iter()
+      .map(|reading| {
+        let timestamp = reading["date"].as_i64().unwrap_or(0);
+        let date = DateTime::from_timestamp(timestamp, 0).unwrap_or(DateTime::<Utc>::MIN_UTC);
+        json!({
+          "date": date,
+          "temperature": reading["temperature"]
+        })
+      })
+      .collect();
+    let temperature_json = serde_json::to_string(&formatted_temp)?;
+    let insertion_result = insert(DATABASE_NAME, "temperature_readings", &temperature_json)?;
+    println!("Temperature insertion result: {}", insertion_result);
+  }
+
+  let duration = start_time.elapsed();
+  println!("Total time taken for all insertions: {:.3} seconds", duration.as_secs_f64());
+
+  Ok(())
+}
+
+async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
+  const STORAGE_PATH: &str = "tmp/timon";
+  const USERNAME: &str = "ahmed_test";
+  const DATABASE_NAME: &str = "zivaring";
+  let _ = init_timon(STORAGE_PATH, 60, USERNAME).unwrap();
+
+  // Query activity details
+  let start_time = Instant::now();
+  let activity_details_query = format!(r#"SELECT * FROM activitydetails"#);
+  let activity_details_result = query(DATABASE_NAME, &activity_details_query, None).await?;
+  let duration = start_time.elapsed();
+  println!(
+    "Activity details {} (Time taken: {:.3} seconds)",
+    activity_details_result["status"],
+    duration.as_secs_f64()
+  );
+
+  // Query SPO2 readings
+  let start_time = Instant::now();
+  let spo2_query = format!(r#"SELECT * FROM spo2_readings"#);
+  let spo2_result = query(DATABASE_NAME, &spo2_query, None).await?;
+  let duration = start_time.elapsed();
+  println!(
+    "SPO2 readings {} (Time taken: {:.3} seconds)",
+    spo2_result["status"],
+    duration.as_secs_f64()
+  );
+
+  // Query heart rate readings
+  let start_time = Instant::now();
+  let hr_query = format!(r#"SELECT * FROM heart_rate"#);
+  let hr_result = query(DATABASE_NAME, &hr_query, None).await?;
+  let duration = start_time.elapsed();
+  println!(
+    "Heart rate readings {} (Time taken: {:.3} seconds)",
+    hr_result["status"],
+    duration.as_secs_f64()
+  );
+
+  // Query HRV readings
+  let start_time = Instant::now();
+  let hrv_query = format!(r#"SELECT * FROM hrv_readings"#);
+  let hrv_result = query(DATABASE_NAME, &hrv_query, None).await?;
+  let duration = start_time.elapsed();
+  println!(
+    "HRV readings {} (Time taken: {:.3} seconds)",
+    hrv_result["status"],
+    duration.as_secs_f64()
+  );
+
+  // Query temperature readings
+  let start_time = Instant::now();
+  let temp_query = format!(r#"SELECT * FROM temperature_readings"#);
+  let temp_result = query(DATABASE_NAME, &temp_query, None).await?;
+  let duration = start_time.elapsed();
+  println!(
+    "Temperature readings {} (Time taken: {:.3} seconds)",
+    temp_result["status"],
+    duration.as_secs_f64()
+  );
+
+  // Test some specific queries
+  println!("\nTesting specific queries:");
+
+  // Query for average heart rate
+  let start_time = Instant::now();
+  let avg_hr_query = format!(r#"SELECT * FROM heart_rate"#);
+  let avg_hr_result = query(DATABASE_NAME, &avg_hr_query, None).await?;
+  let duration = start_time.elapsed();
+  println!(
+    "Average heart rate {} (Time taken: {:.3} seconds)",
+    avg_hr_result["status"],
+    duration.as_secs_f64()
+  );
+
+  // Query for max SPO2
+  let start_time = Instant::now();
+  let max_spo2_query = format!(r#"SELECT * FROM spo2_readings"#);
+  let max_spo2_result = query(DATABASE_NAME, &max_spo2_query, None).await?;
+  let duration = start_time.elapsed();
+  println!(
+    "Max SPO2: {} (Time taken: {:.3} seconds)",
+    max_spo2_result["status"],
+    duration.as_secs_f64()
+  );
+
+  // Query for stress levels over time
+  let start_time = Instant::now();
+  let stress_query = format!(r#"SELECT * FROM hrv_readings"#);
+  let stress_result = query(DATABASE_NAME, &stress_query, None).await?;
+  let duration = start_time.elapsed();
+  println!(
+    "Stress levels over time: {} (Time taken: {:.3} seconds)",
+    stress_result["status"],
+    duration.as_secs_f64()
+  );
+
+  Ok(())
 }

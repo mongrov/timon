@@ -495,12 +495,27 @@ pub fn extract_query_time_range(sql_query: &str) -> Option<(i64, i64)> {
 }
 
 pub fn extract_partition_time(file_path: &str) -> i64 {
-  let re = Regex::new(r"(\d{4}-\d{2}-\d{2})_(\d{2}-\d{2})").unwrap(); // Ensure regex compiles
-  if let Some(captures) = re.captures(file_path) {
-    let date_part = &captures[1]; // e.g., "2025-02-10"
-    let time_part = &captures[2]; // e.g., "01-30"
-    let datetime_str = format!("{} {}", date_part, time_part.replace("-", ":"));
-    if let Ok(naive_dt) = NaiveDateTime::parse_from_str(&datetime_str, "%Y-%m-%d %H:%M") {
+  // Extract the filename from the path
+  let filename = Path::new(file_path).file_name().and_then(|name| name.to_str()).unwrap_or(file_path);
+
+  // Try daily format first (YYYY-MM-DD_00)
+  let daily_re = Regex::new(r"(\d{4}-\d{2}-\d{2})_00").unwrap();
+  if let Some(captures) = daily_re.captures(filename) {
+    let date_part = &captures[1];
+    let datetime_str = format!("{} 00:00:00", date_part);
+    if let Ok(naive_dt) = NaiveDateTime::parse_from_str(&datetime_str, "%Y-%m-%d %H:%M:%S") {
+      return Utc.from_utc_datetime(&naive_dt).timestamp();
+    }
+  }
+
+  // Try hourly format (YYYY-MM-DD_HH-MM)
+  let hourly_re = Regex::new(r"(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})").unwrap();
+  if let Some(captures) = hourly_re.captures(filename) {
+    let date_part = &captures[1];
+    let hour = &captures[2];
+    let minute = &captures[3];
+    let datetime_str = format!("{} {}:{}:00", date_part, hour, minute);
+    if let Ok(naive_dt) = NaiveDateTime::parse_from_str(&datetime_str, "%Y-%m-%d %H:%M:%S") {
       return Utc.from_utc_datetime(&naive_dt).timestamp();
     }
   }
