@@ -214,6 +214,7 @@ fn main() {
     test_s3_sync().await;
     let _ = test_ziva_ring_insert().await;
     let _ = test_ziva_ring_query().await;
+    let _ = test_ziva_join_query().await;
   });
 }
 
@@ -548,6 +549,22 @@ async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
     stress_result["status"],
     duration.as_secs_f64()
   );
+
+  Ok(())
+}
+
+async fn test_ziva_join_query() -> Result<(), Box<dyn std::error::Error>> {
+  const STORAGE_PATH: &str = "tmp/timon";
+  const USERNAME: &str = "ahmed_test";
+  const DATABASE_NAME: &str = "zivaring";
+  let _ = init_timon(STORAGE_PATH, 1440, USERNAME).unwrap();
+
+  let start_time = Instant::now();
+  let sql_query = "SELECT * FROM activitydetails JOIN spo2_readings ON to_char(to_timestamp(activitydetails.date), 'YYYY-MM-DD') = to_char(to_timestamp(spo2_readings.date), 'YYYY-MM-DD') LIMIT 100";
+  let result = query(DATABASE_NAME, sql_query, None).await?;
+  let duration = start_time.elapsed();
+  println!("Query time: {:.3} seconds", duration.as_secs_f64());
+  println!("Result: {:?}", result);
 
   Ok(())
 }
