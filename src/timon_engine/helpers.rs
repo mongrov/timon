@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose, Engine as _};
-use chrono::{DateTime, Days, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Datelike, Days, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc};
 use datafusion::arrow::array::{
   new_null_array, Array, ArrayRef, BooleanArray, BooleanBuilder, Date32Array, Float64Array, Float64Builder, Int32Array, Int64Array, Int64Builder,
   ListArray, ListBuilder, StringArray, StringBuilder, StringViewArray, TimestampMillisecondArray, TimestampNanosecondArray,
@@ -389,8 +389,35 @@ pub fn extract_table_name(sql_query: &str) -> String {
 
 pub fn rounded_timestamp(timestamp: i64, interval: u32) -> String {
   let dt = Utc.timestamp_opt(timestamp, 0).single().expect("Invalid timestamp");
-  let rounded_time = if interval > 60 {
-    // For intervals greater than 60, calculate hour buckets
+
+  let rounded_time = if interval >= 43200 {
+    // 30 days * 24 hours * 60 minutes = 43200
+    // For monthly intervals
+    dt.with_day(1)
+      .unwrap()
+      .with_hour(0)
+      .unwrap()
+      .with_minute(0)
+      .unwrap()
+      .with_second(0)
+      .unwrap()
+      .with_nanosecond(0)
+      .unwrap()
+  } else if interval >= 10080 {
+    // 7 days * 24 hours * 60 minutes = 10080
+    // For weekly intervals
+    let days_since_monday = dt.weekday().num_days_from_monday();
+    (dt - chrono::Duration::days(days_since_monday as i64))
+      .with_hour(0)
+      .unwrap()
+      .with_minute(0)
+      .unwrap()
+      .with_second(0)
+      .unwrap()
+      .with_nanosecond(0)
+      .unwrap()
+  } else if interval > 60 {
+    // For intervals greater than 60 minutes
     let total_minutes = dt.hour() * 60 + dt.minute();
     let rounded_total_minutes = (total_minutes / interval) * interval;
     let rounded_hour = rounded_total_minutes / 60;
@@ -405,7 +432,7 @@ pub fn rounded_timestamp(timestamp: i64, interval: u32) -> String {
       .with_nanosecond(0)
       .unwrap()
   } else {
-    // For intervals within 60 minutes, calculate minute buckets
+    // For intervals within 60 minutes
     let rounded_minute = (dt.minute() / interval) * interval;
     dt.with_minute(rounded_minute)
       .unwrap()
@@ -415,10 +442,18 @@ pub fn rounded_timestamp(timestamp: i64, interval: u32) -> String {
       .unwrap()
   };
 
-  // Output format: exclude minutes for hour-based intervals
-  if interval > 60 && interval % 60 == 0 {
+  // Output format based on interval
+  if interval >= 43200 {
+    // Monthly format: YYYY-MM
+    rounded_time.format("%Y-%m").to_string()
+  } else if interval >= 10080 {
+    // Weekly format: YYYY-MM-DD
+    rounded_time.format("%Y-%m-%d").to_string()
+  } else if interval > 60 && interval % 60 == 0 {
+    // Hourly format: YYYY-MM-DD_HH
     rounded_time.format("%Y-%m-%d_%H").to_string()
   } else {
+    // Minute format: YYYY-MM-DD_HH-MM
     rounded_time.format("%Y-%m-%d_%H-%M").to_string()
   }
 }

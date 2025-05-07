@@ -215,6 +215,7 @@ fn main() {
     let _ = test_ziva_ring_insert().await;
     let _ = test_ziva_ring_query().await;
     let _ = test_ziva_join_query().await;
+    let _ = insert_ziva_data_six_months().await;
   });
 }
 
@@ -565,6 +566,71 @@ async fn test_ziva_join_query() -> Result<(), Box<dyn std::error::Error>> {
   let duration = start_time.elapsed();
   println!("Query time: {:.3} seconds", duration.as_secs_f64());
   println!("Result: {:?}", result);
+
+  Ok(())
+}
+
+fn generate_spo2_data(start: &str, end: &str) -> Result<String, Box<dyn std::error::Error>> {
+  use chrono::{Duration, NaiveDateTime};
+  use serde_json::json;
+  use std::time::{SystemTime, UNIX_EPOCH};
+  // Simple random number generator using system time
+  fn get_random_number(max: u32) -> u32 {
+    let seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u32;
+    seed % max
+  }
+  let start_time = NaiveDateTime::parse_from_str(start, "%Y-%m-%d %H:%M:%S")?;
+  let end_time = NaiveDateTime::parse_from_str(end, "%Y-%m-%d %H:%M:%S")?;
+  let mut data = Vec::new();
+  let mut current = start_time;
+  while current < end_time {
+    data.push(json!({
+        "date": current.format("%Y-%m-%d %H:%M:%S").to_string(),
+        "automaticSpo2Data": get_random_number(100)
+    }));
+    current = current + Duration::minutes(5);
+  }
+  // Convert the data to JSON string
+  Ok(serde_json::to_string(&data)?)
+}
+
+async fn insert_ziva_data_six_months() -> Result<(), Box<dyn std::error::Error>> {
+  const STORAGE_PATH: &str = "tmp/timon";
+  const USERNAME: &str = "ahmed_test";
+  const DATABASE_NAME: &str = "zivaring";
+  let _ = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
+  let _ = create_database(DATABASE_NAME);
+
+  // SPO2 Table Schema
+  let spo2_schema = r#"
+    {
+      "date": {
+        "type": "int",
+        "required": true,
+        "unique": true,
+        "datetime": true
+      },
+      "automaticSpo2Data": {
+        "type": "int"
+      }
+    }
+    "#;
+  let spo2_result = create_table(DATABASE_NAME, "spo2_readings", &spo2_schema);
+  println!("Create SPO2 table -> {}", spo2_result.unwrap());
+
+  // // SPO2 table Count: 53k rows
+  let start: &'static str = "2024-11-01 00:00:00";
+  let end = "2025-05-01 00:00:00";
+  let _json_data = generate_spo2_data(start, end)?;
+  // let insertion_result = insert(DATABASE_NAME, "spo2_readings", &_json_data)?;
+  // println!("SPO2 data insertion result: {}", insertion_result);
+
+  const QUERY: &str = "SELECT * FROM spo2_readings ORDER BY date ASC";
+  let start_time = std::time::Instant::now();
+  let result = query(DATABASE_NAME, QUERY, None).await?;
+  let duration = start_time.elapsed();
+  println!("Query execution time: {:.3} seconds", duration.as_secs_f64());
+  println!("Result: {:?}", result.get("status").unwrap());
 
   Ok(())
 }
