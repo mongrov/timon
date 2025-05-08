@@ -416,7 +416,7 @@ impl DatabaseManager {
   pub async fn query(&self, db_name: &str, sql_query: &str, username: Option<&str>, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
     let session_context = SessionContext::new();
     let table_name = extract_table_name(sql_query);
-    let query_time_range = extract_query_time_range(sql_query);
+    let query_time_range = extract_query_time_range(sql_query, self.bucket_interval);
 
     let files_list_default_path = self
       .build_files_list(db_name, &table_name, username)

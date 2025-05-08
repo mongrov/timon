@@ -515,7 +515,7 @@ pub fn filter_files_by_date_range(files: Vec<String>, start_date: &str, end_date
   Ok(filtered_files)
 }
 
-pub fn extract_query_time_range(sql_query: &str) -> Option<(i64, i64)> {
+pub fn extract_query_time_range(sql_query: &str, bucket_interval: u32) -> Option<(i64, i64)> {
   let re =
     Regex::new(r#"WHERE\s+.*?\b(date|timestamp)\b\s+BETWEEN\s+['\"]?(\d+|[\d-]+\s+[\d:]+)['\"]?\s+AND\s+['\"]?(\d+|[\d-]+\s+[\d:]+)['\"]?"#).ok()?;
   if let Some(captures) = re.captures(sql_query) {
@@ -523,7 +523,16 @@ pub fn extract_query_time_range(sql_query: &str) -> Option<(i64, i64)> {
     let end_time_str = &captures[3];
     let start_timestamp = parse_timestamp(start_time_str)?;
     let end_timestamp = parse_timestamp(end_time_str)?;
-    Some((start_timestamp, end_timestamp))
+
+    // Round the timestamps according to the bucket interval
+    let rounded_start = rounded_timestamp(start_timestamp, bucket_interval);
+    let rounded_end = rounded_timestamp(end_timestamp, bucket_interval);
+
+    // Convert the rounded timestamps back to Unix timestamps
+    let start_dt = NaiveDateTime::parse_from_str(&format!("{} 00:00:00", rounded_start), "%Y-%m-%d %H:%M:%S").ok()?;
+    let end_dt = NaiveDateTime::parse_from_str(&format!("{} 23:59:59", rounded_end), "%Y-%m-%d %H:%M:%S").ok()?;
+
+    Some((Utc.from_utc_datetime(&start_dt).timestamp(), Utc.from_utc_datetime(&end_dt).timestamp()))
   } else {
     None
   }
@@ -533,7 +542,17 @@ pub fn extract_partition_time(file_path: &str) -> i64 {
   // Extract the filename from the path
   let filename = Path::new(file_path).file_name().and_then(|name| name.to_str()).unwrap_or(file_path);
 
-  // Try daily format first (YYYY-MM-DD_00)
+  // Try weeky format (YYYY-MM-DD)
+  let daily_no_suffix_re = Regex::new(r"(\d{4}-\d{2}-\d{2})(?:\.parquet)?$").unwrap();
+  if let Some(captures) = daily_no_suffix_re.captures(filename) {
+    let date_part = &captures[1];
+    let datetime_str = format!("{} 00:00:00", date_part);
+    if let Ok(naive_dt) = NaiveDateTime::parse_from_str(&datetime_str, "%Y-%m-%d %H:%M:%S") {
+      return Utc.from_utc_datetime(&naive_dt).timestamp();
+    }
+  }
+
+  // Try daily format (YYYY-MM-DD_00)
   let daily_re = Regex::new(r"(\d{4}-\d{2}-\d{2})_00").unwrap();
   if let Some(captures) = daily_re.captures(filename) {
     let date_part = &captures[1];
@@ -554,6 +573,7 @@ pub fn extract_partition_time(file_path: &str) -> i64 {
       return Utc.from_utc_datetime(&naive_dt).timestamp();
     }
   }
+
   eprintln!("Failed to extract partition time from: {}", file_path);
   i64::MIN // Indicate failure
 }

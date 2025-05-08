@@ -216,13 +216,22 @@ fn main() {
     let _ = test_ziva_ring_query().await;
     let _ = test_ziva_join_query().await;
     let _ = insert_ziva_data_six_months().await;
+    let _ = test_ziva_range_selction_query().await;
   });
 }
+
+/*
+****** bucket_interval ******
+Hourly = 60
+Daily = 1440
+Weekly = 10080
+Monthly = 43200
+*/
 
 async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
   const STORAGE_PATH: &str = "tmp/timon";
   const USERNAME: &str = "ahmed_test";
-  let timon_result = init_timon(STORAGE_PATH, 1440, USERNAME).unwrap();
+  let timon_result = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
   println!("init_timon -> {}", timon_result);
 
   const DATABASE_NAME: &str = "zivaring";
@@ -346,7 +355,7 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
 
   // Read JSON file
   let file_content =
-    std::fs::read_to_string("/home/ahmed/Downloads/ziva_data_android 2.json").map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+    std::fs::read_to_string("/home/ahmed/Documents/ziva_data_android.json").map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
   let json_data: serde_json::Value = serde_json::from_str(&file_content).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
   let start_time = Instant::now();
 
@@ -631,6 +640,19 @@ async fn insert_ziva_data_six_months() -> Result<(), Box<dyn std::error::Error>>
   let duration = start_time.elapsed();
   println!("Query execution time: {:.3} seconds", duration.as_secs_f64());
   println!("Result: {:?}", result.get("status").unwrap());
+
+  Ok(())
+}
+
+async fn test_ziva_range_selction_query() -> Result<(), Box<dyn std::error::Error>> {
+  const STORAGE_PATH: &str = "tmp/timon";
+  const USERNAME: &str = "ahmed_test";
+  const DATABASE_NAME: &str = "zivaring";
+  let _ = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
+
+  const QUERY_2: &str = "SELECT COUNT(*) AS total FROM activitydetails WHERE date BETWEEN '1746641700' AND '1746728099'";
+  let result = query(DATABASE_NAME, QUERY_2, None).await?;
+  println!("Result: {:?}", result);
 
   Ok(())
 }
