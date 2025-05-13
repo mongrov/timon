@@ -108,7 +108,7 @@ impl DatabaseManager {
     };
 
     // Create DatabaseManager instance
-    let mut db_manager = DatabaseManager {
+    let db_manager = DatabaseManager {
       storage_path: storage_path.to_string(),
       metadata,
       data_path,
@@ -117,10 +117,11 @@ impl DatabaseManager {
       username: username.to_string(),
     };
 
-    // Update metadata with the provided storage_path
-    if let Err(e) = db_manager.update_metadata(storage_path) {
-      eprintln!("Error updating metadata: {}", e);
-    }
+    // TODO: Update metadata with the provided storage_path for IOS devices
+    // // Update metadata with the provided storage_path
+    // if let Err(e) = db_manager.update_metadata(storage_path) {
+    //   eprintln!("Error updating metadata: {}", e);
+    // }
 
     db_manager
   }
@@ -878,22 +879,23 @@ impl DatabaseManager {
     Ok(())
   }
 
-  pub fn update_metadata(&mut self, storage_path: &str) -> TokioResult<()> {
-    // if the current LibraryDirectoryPath in iOS has changed, update the tables path
-    let new_data_path = storage_path.to_string() + "/data";
-    let mut metadata = self.read_metadata().unwrap();
-    // Update paths for all tables
-    for (db_name, db) in metadata.databases.iter_mut() {
-      for (table_name, table) in db.tables.iter_mut() {
-        let new_table_path = format!("{}/{}/{}", new_data_path, db_name, table_name);
-        table.path = new_table_path.clone();
-        println!("Updated path for table {}.{} To ({})", db_name, table_name, new_table_path);
-      }
-    }
-    self.metadata = metadata;
-    self.save_metadata()?;
-    Ok(())
-  }
+  // TODO: make this method thread safe when accessing the metadata file from multiple threads
+  // pub fn update_metadata(&mut self, storage_path: &str) -> TokioResult<()> {
+  //   // if the current LibraryDirectoryPath in iOS has changed, update the tables path
+  //   let new_data_path = storage_path.to_string() + "/data";
+  //   let mut metadata = self.read_metadata().unwrap();
+  //   // Update paths for all tables
+  //   for (db_name, db) in metadata.databases.iter_mut() {
+  //     for (table_name, table) in db.tables.iter_mut() {
+  //       let new_table_path = format!("{}/{}/{}", new_data_path, db_name, table_name);
+  //       table.path = new_table_path.clone();
+  //       println!("Updated path for table {}.{} To ({})", db_name, table_name, new_table_path);
+  //     }
+  //   }
+  //   self.metadata = metadata;
+  //   self.save_metadata()?;
+  //   Ok(())
+  // }
 
   pub fn get_table_path(&self, db_name: &str, table_name: &str) -> Option<String> {
     let metadata = self.read_metadata().unwrap();
