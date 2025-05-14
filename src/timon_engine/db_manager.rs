@@ -13,12 +13,15 @@ use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::parquet::file::properties::WriterProperties;
 use datafusion::parquet::file::reader::{FileReader, SerializedFileReader};
 use datafusion::prelude::*;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
+use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use std::{fmt, fs};
 use tokio::io::Result as TokioResult;
 
@@ -108,7 +111,7 @@ impl DatabaseManager {
     };
 
     // Create DatabaseManager instance
-    let db_manager = DatabaseManager {
+    let mut db_manager = DatabaseManager {
       storage_path: storage_path.to_string(),
       metadata,
       data_path,
@@ -117,11 +120,10 @@ impl DatabaseManager {
       username: username.to_string(),
     };
 
-    // TODO: Update metadata with the provided storage_path for IOS devices
-    // // Update metadata with the provided storage_path
-    // if let Err(e) = db_manager.update_metadata(storage_path) {
-    //   eprintln!("Error updating metadata: {}", e);
-    // }
+    // Update metadata with the provided storage_path
+    if let Err(e) = db_manager.update_metadata(storage_path) {
+      eprintln!("Error updating metadata: {}", e);
+    }
 
     db_manager
   }
@@ -879,23 +881,74 @@ impl DatabaseManager {
     Ok(())
   }
 
-  // TODO: make this method thread safe when accessing the metadata file from multiple threads
-  // pub fn update_metadata(&mut self, storage_path: &str) -> TokioResult<()> {
-  //   // if the current LibraryDirectoryPath in iOS has changed, update the tables path
-  //   let new_data_path = storage_path.to_string() + "/data";
-  //   let mut metadata = self.read_metadata().unwrap();
-  //   // Update paths for all tables
-  //   for (db_name, db) in metadata.databases.iter_mut() {
-  //     for (table_name, table) in db.tables.iter_mut() {
-  //       let new_table_path = format!("{}/{}/{}", new_data_path, db_name, table_name);
-  //       table.path = new_table_path.clone();
-  //       println!("Updated path for table {}.{} To ({})", db_name, table_name, new_table_path);
-  //     }
-  //   }
-  //   self.metadata = metadata;
-  //   self.save_metadata()?;
-  //   Ok(())
-  // }
+  pub fn update_metadata(&mut self, storage_path: &str) -> TokioResult<()> {
+    // Create a lock file path
+    let lock_file_path = format!("{}/metadata.lock", self.storage_path);
+
+    // Try to acquire the lock with retries
+    let mut retries = 0;
+    let max_retries = 5;
+    let retry_delay = Duration::from_millis(100);
+
+    let _lock_file = loop {
+      match File::create(&lock_file_path) {
+        Ok(file) => {
+          // Try to acquire an exclusive lock using fs2
+          if let Err(_) = file.lock_exclusive() {
+            if retries >= max_retries {
+              return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Failed to acquire metadata lock after multiple retries",
+              ));
+            }
+            retries += 1;
+            std::thread::sleep(retry_delay);
+            continue;
+          }
+          break file;
+        }
+        Err(_) => {
+          if retries >= max_retries {
+            return Err(std::io::Error::new(
+              std::io::ErrorKind::Other,
+              "Failed to create lock file after multiple retries",
+            ));
+          }
+          retries += 1;
+          std::thread::sleep(retry_delay);
+        }
+      }
+    };
+
+    // Ensure the lock file is removed when we're done
+    struct LockGuard {
+      path: String,
+    }
+
+    impl Drop for LockGuard {
+      fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+      }
+    }
+
+    let _lock_guard = LockGuard { path: lock_file_path };
+
+    // Rest of the update_metadata implementation...
+    let new_data_path = storage_path.to_string() + "/data";
+    let mut metadata = self.read_metadata().unwrap();
+
+    for (db_name, db) in metadata.databases.iter_mut() {
+      for (table_name, table) in db.tables.iter_mut() {
+        let new_table_path = format!("{}/{}/{}", new_data_path, db_name, table_name);
+        table.path = new_table_path.clone();
+        println!("Updated path for table {}.{} To ({})", db_name, table_name, new_table_path);
+      }
+    }
+
+    self.metadata = metadata;
+    self.save_metadata()?;
+    Ok(())
+  }
 
   pub fn get_table_path(&self, db_name: &str, table_name: &str) -> Option<String> {
     let metadata = self.read_metadata().unwrap();

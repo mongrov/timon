@@ -60,7 +60,7 @@ fn main() {
 
 #[allow(dead_code)]
 async fn test_local_storage() {
-  const STORAGE_PATH: &str = "tmp/timon";
+  const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
   let timon_result = init_timon(STORAGE_PATH, 5, USERNAME).unwrap();
   println!("init_timon -> {}", timon_result);
@@ -229,7 +229,7 @@ Monthly = 43200
 */
 
 async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
-  const STORAGE_PATH: &str = "tmp/timon";
+  const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
   let timon_result = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
   println!("init_timon -> {}", timon_result);
@@ -464,7 +464,7 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
-  const STORAGE_PATH: &str = "tmp/timon";
+  const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
   const DATABASE_NAME: &str = "zivaring";
   let _ = init_timon(STORAGE_PATH, 60, USERNAME).unwrap();
@@ -564,7 +564,7 @@ async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn test_ziva_join_query() -> Result<(), Box<dyn std::error::Error>> {
-  const STORAGE_PATH: &str = "tmp/timon";
+  const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
   const DATABASE_NAME: &str = "zivaring";
   let _ = init_timon(STORAGE_PATH, 1440, USERNAME).unwrap();
@@ -604,7 +604,7 @@ fn generate_spo2_data(start: &str, end: &str) -> Result<String, Box<dyn std::err
 }
 
 async fn insert_ziva_data_six_months() -> Result<(), Box<dyn std::error::Error>> {
-  const STORAGE_PATH: &str = "tmp/timon";
+  const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
   const DATABASE_NAME: &str = "zivaring";
   let _ = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
@@ -645,7 +645,7 @@ async fn insert_ziva_data_six_months() -> Result<(), Box<dyn std::error::Error>>
 }
 
 async fn test_ziva_range_selction_query() -> Result<(), Box<dyn std::error::Error>> {
-  const STORAGE_PATH: &str = "tmp/timon";
+  const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
   const DATABASE_NAME: &str = "zivaring";
   let _ = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();

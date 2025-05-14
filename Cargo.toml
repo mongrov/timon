@@ -25,6 +25,7 @@ chrono = "0.4.38"
 hex = "0.4.3"
 bytes = "1.10.0"
 json-rules-engine = "0.9.4"
+fs2 = "0.4.3"
 # optional dependencies
 clap = { version = "4.5.27", features = ["derive"], optional = true }
 actix-web = { version = "4.9.0", optional = true }
