@@ -119,7 +119,7 @@ fn test_extract_query_time_range() {
   ];
 
   for (query, expected) in queries {
-    assert_eq!(extract_query_time_range(query), expected);
+    assert_eq!(extract_query_time_range(query, 60), expected);
   }
 }
 

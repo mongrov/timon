@@ -521,6 +521,13 @@ pub fn extract_query_time_range(sql_query: &str, bucket_interval: u32) -> Option
   if let Some(captures) = re.captures(sql_query) {
     let start_time_str = &captures[2];
     let end_time_str = &captures[3];
+
+    // Try parsing as Unix timestamp first
+    if let (Ok(start), Ok(end)) = (start_time_str.parse::<i64>(), end_time_str.parse::<i64>()) {
+      return Some((start, end));
+    }
+
+    // If not Unix timestamp, try parsing as datetime string
     let start_timestamp = parse_timestamp(start_time_str)?;
     let end_timestamp = parse_timestamp(end_time_str)?;
 
