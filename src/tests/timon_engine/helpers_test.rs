@@ -106,20 +106,64 @@ fn test_filter_files_by_date_range() {
 
 #[test]
 fn test_extract_query_time_range() {
-  let queries = vec![
+  let hourly_queries = vec![
     (
       "SELECT * FROM table WHERE date BETWEEN 1672561800 AND 1676443500 LIMIT 10",
-      Some((1672561800, 1676443500)),
+      Some((1672561800, 1676443559)),
     ),
     (
       "SELECT * FROM table WHERE timestamp BETWEEN 1672531200 AND 1675123200",
-      Some((1672531200, 1675123200)),
+      Some((1672531200, 1675123259)),
+    ),
+    (
+      "SELECT COUNT(*) AS total FROM activitydetails WHERE date BETWEEN 1746641700 AND 1746728099",
+      Some((1746641700, 1746728099)),
     ),
     ("SELECT * FROM table", None),
   ];
 
-  for (query, expected) in queries {
+  for (query, expected) in hourly_queries {
     assert_eq!(extract_query_time_range(query, 60), expected);
+  }
+
+  let daily_queries = vec![
+    (
+      "SELECT * FROM table WHERE date BETWEEN 1672561800 AND 1676443500 LIMIT 10",
+      Some((1672531200, 1676505599)),
+    ),
+    (
+      "SELECT * FROM table WHERE timestamp BETWEEN 1672531200 AND 1675123200",
+      Some((1672531200, 1675209599)),
+    ),
+    (
+      "SELECT COUNT(*) AS total FROM activitydetails WHERE date BETWEEN 1746641700 AND 1746728099",
+      Some((1746576000, 1746748799)),
+    ),
+    ("SELECT * FROM table", None),
+  ];
+
+  for (query, expected) in daily_queries {
+    assert_eq!(extract_query_time_range(query, 1440), expected);
+  }
+
+  let weekly_queries = vec![
+    (
+      "SELECT * FROM table WHERE date BETWEEN 1672561800 AND 1676443500 LIMIT 10",
+      Some((1672012800, 1676505599)),
+    ),
+    (
+      "SELECT * FROM table WHERE timestamp BETWEEN 1672531200 AND 1675123200",
+      Some((1672012800, 1675209599)),
+    ),
+    (
+      "SELECT COUNT(*) AS total FROM activitydetails WHERE date BETWEEN 1746641700 AND 1746728099",
+      Some((1746403200, 1746748799)),
+    ),
+    ("SELECT * FROM table", None),
+  ];
+
+  for (query, expected) in weekly_queries {
+    assert_eq!(extract_query_time_range(query, 10080), expected);
   }
 }
 

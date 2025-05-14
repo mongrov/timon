@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose, Engine as _};
-use chrono::{DateTime, Datelike, Days, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Datelike, Days, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc, Weekday};
 use datafusion::arrow::array::{
   new_null_array, Array, ArrayRef, BooleanArray, BooleanBuilder, Date32Array, Float64Array, Float64Builder, Int32Array, Int64Array, Int64Builder,
   ListArray, ListBuilder, StringArray, StringBuilder, StringViewArray, TimestampMillisecondArray, TimestampNanosecondArray,
@@ -524,7 +524,73 @@ pub fn extract_query_time_range(sql_query: &str, bucket_interval: u32) -> Option
 
     // Try parsing as Unix timestamp first
     if let (Ok(start), Ok(end)) = (start_time_str.parse::<i64>(), end_time_str.parse::<i64>()) {
-      return Some((start, end));
+      // Convert to DateTime for proper handling
+      let start_dt = Utc.timestamp_opt(start, 0).single()?;
+      let end_dt = Utc.timestamp_opt(end, 0).single()?;
+
+      // For weekly intervals (10080 minutes = 7 days)
+      if bucket_interval == 10080 {
+        // Round to start of week (Monday) for start time
+        let start_week = start_dt.date_naive().week(Weekday::Mon);
+        let rounded_start = Utc
+          .with_ymd_and_hms(
+            start_week.first_day().year(),
+            start_week.first_day().month(),
+            start_week.first_day().day(),
+            0,
+            0,
+            0,
+          )
+          .single()?
+          .timestamp();
+
+        // For end time, we need to ensure it's the last second of the week
+        let end_week = end_dt.date_naive().week(Weekday::Mon);
+        let week_end = Utc
+          .with_ymd_and_hms(
+            end_week.last_day().year(),
+            end_week.last_day().month(),
+            end_week.last_day().day(),
+            23,
+            59,
+            59,
+          )
+          .single()?
+          .timestamp();
+
+        // Take the minimum of the week end and the original end time
+        let rounded_end = week_end.min(end);
+
+        // Ensure end time is at 23:59:59
+        let end_date = Utc.timestamp_opt(rounded_end, 0).single()?;
+        let rounded_end = Utc
+          .with_ymd_and_hms(end_date.year(), end_date.month(), end_date.day(), 23, 59, 59)
+          .single()?
+          .timestamp();
+
+        return Some((rounded_start, rounded_end));
+      }
+      // For daily intervals (1440 minutes = 1 day)
+      else if bucket_interval == 1440 {
+        // Round to start of day for start time
+        let rounded_start = Utc
+          .with_ymd_and_hms(start_dt.year(), start_dt.month(), start_dt.day(), 0, 0, 0)
+          .single()?
+          .timestamp();
+
+        // Round to end of day for end time
+        let rounded_end = Utc
+          .with_ymd_and_hms(end_dt.year(), end_dt.month(), end_dt.day(), 23, 59, 59)
+          .single()?
+          .timestamp();
+
+        return Some((rounded_start, rounded_end));
+      } else {
+        // For regular intervals, round to the nearest bucket
+        let rounded_start = (start / bucket_interval as i64) * bucket_interval as i64;
+        let rounded_end = ((end / bucket_interval as i64) + 1) * bucket_interval as i64 - 1;
+        return Some((rounded_start, rounded_end));
+      }
     }
 
     // If not Unix timestamp, try parsing as datetime string
