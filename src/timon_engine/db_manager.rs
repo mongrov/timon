@@ -641,24 +641,12 @@ impl DatabaseManager {
     session_context.register_table(&first_combined_name, Arc::new(first_mem_table))?;
     session_context.register_table(&second_combined_name, Arc::new(second_mem_table))?;
 
-    // Extract the join condition from the original query
-    let join_condition = sql_query
-      .split("ON")
-      .nth(1)
-      .ok_or_else(|| DataFusionError::Execution("Invalid join query: missing ON clause".to_string()))?
-      .trim();
-
-    // Replace table names in the original query
     let adjusted_sql_query = sql_query
-      .replace(first_table, &first_combined_name)
-      .replace(second_table, &second_combined_name)
-      .replace(
-        join_condition,
-        &format!(
-          "date_trunc('day', {}.date) = date_trunc('day', {}.date)",
-          first_combined_name, second_combined_name
-        ),
-      );
+      .replace(&format!("FROM {}", first_table), &format!("FROM {}", first_combined_name))
+      .replace(&format!("JOIN {}", second_table), &format!("JOIN {}", second_combined_name))
+      // Also replace table names in the ON clause if they appear without aliases
+      .replace(&format!("{}.", first_table), &format!("{}.", first_combined_name))
+      .replace(&format!("{}.", second_table), &format!("{}.", second_combined_name));
 
     let final_df = session_context.sql(&adjusted_sql_query).await?;
     let final_results = final_df.collect().await?;
