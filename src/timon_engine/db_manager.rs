@@ -1,6 +1,6 @@
 use super::helpers::{
-  build_rules_tree, extract_partition_time, extract_query_time_range, extract_table_name, get_property_fields, get_table_columns, json_to_arrow,
-  record_batches_to_json, rounded_timestamp, row_to_json,
+  build_rules_tree, extract_partition_time, extract_query_time_range, extract_table_name, get_monthly_partition_overlaps, get_property_fields,
+  get_table_columns, json_to_arrow, record_batches_to_json, rounded_timestamp, row_to_json,
 };
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use datafusion::arrow::array::Array;
@@ -448,7 +448,11 @@ impl DatabaseManager {
         .into_iter()
         .filter(|file_path| {
           let partition_time = extract_partition_time(file_path);
-          partition_time >= start_time && partition_time <= end_time
+          if self.bucket_interval >= 43200 {
+            get_monthly_partition_overlaps(partition_time, start_time, end_time)
+          } else {
+            partition_time >= start_time && partition_time <= end_time
+          }
         })
         .collect::<Vec<_>>()
     } else {

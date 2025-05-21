@@ -376,3 +376,33 @@ fn test_date_range_query_weekly_bucket() {
   }
   cleanup_temp_dir(temp_dir);
 }
+
+#[test]
+fn test_date_range_query_monthly_bucket() {
+  let temp_dir = create_temp_dir();
+  let storage_path = temp_dir.to_str().unwrap();
+  // Monthly bucket_interval = 43200
+  let mut db_manager = DatabaseManager::new(storage_path, 43200, "ahmed_test");
+  db_manager.create_database("test_db").unwrap();
+  insert_activitydetails(&mut db_manager);
+
+  let rt = Runtime::new().unwrap();
+  // Query for all records in May 2025
+  let result = rt
+    .block_on(db_manager.query(
+      "test_db",
+      "SELECT COUNT(*) AS total FROM activitydetails WHERE date BETWEEN 1746038400 AND 1748716799",
+      None,
+      true,
+    ))
+    .unwrap();
+
+  match result {
+    DataFusionOutput::Json(json_result) => {
+      // Should include all 4 records
+      assert_eq!(json_result[0]["total"], 4);
+    }
+    _ => panic!("Expected JSON output"),
+  }
+  cleanup_temp_dir(temp_dir);
+}

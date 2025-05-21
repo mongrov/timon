@@ -615,11 +615,13 @@ pub fn extract_partition_time(file_path: &str) -> i64 {
   // Extract the filename from the path
   let filename = Path::new(file_path).file_name().and_then(|name| name.to_str()).unwrap_or(file_path);
 
-  // Try weeky format (YYYY-MM-DD)
-  let daily_no_suffix_re = Regex::new(r"(\d{4}-\d{2}-\d{2})(?:\.parquet)?$").unwrap();
-  if let Some(captures) = daily_no_suffix_re.captures(filename) {
+  // Try hourly format (YYYY-MM-DD_HH-MM)
+  let hourly_re = Regex::new(r"(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})").unwrap();
+  if let Some(captures) = hourly_re.captures(filename) {
     let date_part = &captures[1];
-    let datetime_str = format!("{} 00:00:00", date_part);
+    let hour = &captures[2];
+    let minute = &captures[3];
+    let datetime_str = format!("{} {}:{}:00", date_part, hour, minute);
     if let Ok(naive_dt) = NaiveDateTime::parse_from_str(&datetime_str, "%Y-%m-%d %H:%M:%S") {
       return Utc.from_utc_datetime(&naive_dt).timestamp();
     }
@@ -635,13 +637,21 @@ pub fn extract_partition_time(file_path: &str) -> i64 {
     }
   }
 
-  // Try hourly format (YYYY-MM-DD_HH-MM)
-  let hourly_re = Regex::new(r"(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})").unwrap();
-  if let Some(captures) = hourly_re.captures(filename) {
+  // Try weeky format (YYYY-MM-DD)
+  let daily_no_suffix_re = Regex::new(r"(\d{4}-\d{2}-\d{2})(?:\.parquet)?$").unwrap();
+  if let Some(captures) = daily_no_suffix_re.captures(filename) {
     let date_part = &captures[1];
-    let hour = &captures[2];
-    let minute = &captures[3];
-    let datetime_str = format!("{} {}:{}:00", date_part, hour, minute);
+    let datetime_str = format!("{} 00:00:00", date_part);
+    if let Ok(naive_dt) = NaiveDateTime::parse_from_str(&datetime_str, "%Y-%m-%d %H:%M:%S") {
+      return Utc.from_utc_datetime(&naive_dt).timestamp();
+    }
+  }
+
+  // Try monthly format: _YYYY-MM(.parquet)
+  let monthly_re = Regex::new(r"_(\d{4}-\d{2})").unwrap();
+  if let Some(captures) = monthly_re.captures(filename) {
+    let date_part = &captures[1];
+    let datetime_str = format!("{}-01 00:00:00", date_part);
     if let Ok(naive_dt) = NaiveDateTime::parse_from_str(&datetime_str, "%Y-%m-%d %H:%M:%S") {
       return Utc.from_utc_datetime(&naive_dt).timestamp();
     }
@@ -649,6 +659,26 @@ pub fn extract_partition_time(file_path: &str) -> i64 {
 
   eprintln!("Failed to extract partition time from: {}", file_path);
   i64::MIN // Indicate failure
+}
+
+pub fn get_monthly_partition_overlaps(partition_time: i64, query_start: i64, query_end: i64) -> bool {
+  let dt = Utc.timestamp_opt(partition_time, 0).single().unwrap();
+  let year = dt.year();
+  let month = dt.month();
+
+  // Get the first day of the month
+  let partition_start = Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0).single().unwrap().timestamp();
+
+  // Get the last day of the month using chrono's next_month logic
+  let first_of_next_month = if month == 12 {
+    NaiveDate::from_ymd_opt(year + 1, 1, 1).unwrap()
+  } else {
+    NaiveDate::from_ymd_opt(year, month + 1, 1).unwrap()
+  };
+  let last_day = first_of_next_month.pred_opt().unwrap().day();
+  let partition_end = Utc.with_ymd_and_hms(year, month, last_day, 23, 59, 59).single().unwrap().timestamp();
+
+  partition_end >= query_start && partition_start <= query_end
 }
 
 fn parse_timestamp(datetime_str: &str) -> Option<i64> {
