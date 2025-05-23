@@ -30,24 +30,24 @@ pub fn record_batches_to_json(batches: &[RecordBatch]) -> Result<Value, serde_js
       DataType::Int64 => json!(array.as_any().downcast_ref::<Int64Array>().unwrap().value(row_index)),
       DataType::Int32 => json!(array.as_any().downcast_ref::<Int32Array>().unwrap().value(row_index)),
       DataType::Float64 => json!(array.as_any().downcast_ref::<Float64Array>().unwrap().value(row_index)),
-      DataType::Utf8 => json!(array.as_any().downcast_ref::<StringArray>().unwrap().value(row_index)),
+      DataType::Utf8 => {
+        let string_array = array.as_any().downcast_ref::<StringArray>().unwrap();
+        if string_array.is_null(row_index) {
+          json!(null)
+        } else {
+          json!(string_array.value(row_index))
+        }
+      }
       DataType::Utf8View => {
-        // Downcast the array to StringViewArray
         let string_view_array = array
           .as_any()
           .downcast_ref::<StringViewArray>()
           .expect("Failed to downcast to StringViewArray");
-        // Extract the string values
-        let values: Vec<String> = (0..string_view_array.len())
-          .map(|i| {
-            if string_view_array.is_null(i) {
-              "null".to_string()
-            } else {
-              string_view_array.value(i).to_string()
-            }
-          })
-          .collect();
-        json!(values.get(row_index))
+        if string_view_array.is_null(row_index) {
+          json!(null)
+        } else {
+          json!(string_view_array.value(row_index).to_string())
+        }
       }
       DataType::Boolean => json!(array.as_any().downcast_ref::<BooleanArray>().unwrap().value(row_index)),
       DataType::Timestamp(TimeUnit::Millisecond, None) => json!(array.as_any().downcast_ref::<TimestampMillisecondArray>().unwrap().value(row_index)),

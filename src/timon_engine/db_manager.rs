@@ -484,14 +484,13 @@ impl DatabaseManager {
 
     let column_names = get_table_columns(&session_context, &table_names[0]).await?;
 
-    // Check if this is a join query
+    // Check if this is a JOIN query
     if sql_query.to_lowercase().contains("join") {
       return self
         .handle_join_query(session_context.clone(), db_name, sql_query, username, is_json_format)
         .await;
     }
 
-    // Handle non-join queries as before
     let combined_query = format!(
       "SELECT {} FROM ({}) AS combined_table",
       column_names,
@@ -512,15 +511,17 @@ impl DatabaseManager {
     let final_df = session_context.sql(&adjusted_sql_query).await?;
     let final_results = final_df.collect().await?;
 
-    if is_json_format {
+    let result = if is_json_format {
       let json_result = record_batches_to_json(&final_results).unwrap();
-      Ok(DataFusionOutput::Json(json_result))
+      DataFusionOutput::Json(json_result)
     } else {
       let final_schema = final_results[0].schema();
       let final_mem_table = MemTable::try_new(final_schema, vec![final_results])?;
       let final_df = session_context.read_table(Arc::new(final_mem_table))?;
-      Ok(DataFusionOutput::DataFrame(final_df))
-    }
+      DataFusionOutput::DataFrame(final_df)
+    };
+
+    Ok(result)
   }
 
   async fn handle_join_query(
