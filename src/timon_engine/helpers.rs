@@ -53,14 +53,12 @@ pub fn record_batches_to_json(batches: &[RecordBatch]) -> Result<Value, serde_js
       DataType::Timestamp(TimeUnit::Millisecond, None) => json!(array.as_any().downcast_ref::<TimestampMillisecondArray>().unwrap().value(row_index)),
       DataType::Timestamp(TimeUnit::Nanosecond, None) => {
         let timestamp_ns = array.as_any().downcast_ref::<TimestampNanosecondArray>().unwrap().value(row_index);
-        // Convert nanoseconds to seconds and nanoseconds part
         let naive_datetime = DateTime::from_timestamp(
           timestamp_ns / 1_000_000_000,          // Seconds
           (timestamp_ns % 1_000_000_000) as u32, // Nanoseconds
         )
         .unwrap();
         let local_time = naive_datetime.with_timezone(&Local);
-        // Format as ISO 8601 datetime string
         json!(local_time.format("%Y-%m-%d %H:%M:%S").to_string())
       }
       DataType::Date32 => {
@@ -118,13 +116,16 @@ pub fn record_batches_to_json(batches: &[RecordBatch]) -> Result<Value, serde_js
     .flat_map(|batch| {
       let schema = batch.schema();
       let num_rows = batch.num_rows();
-      (0..num_rows).map(move |row_index| {
-        schema.fields().iter().enumerate().fold(HashMap::new(), |mut row, (col_index, field)| {
+      let mut rows = Vec::with_capacity(num_rows);
+      for row_index in 0..num_rows {
+        let mut row = HashMap::with_capacity(schema.fields().len());
+        for (col_index, field) in schema.fields().iter().enumerate() {
           let column = batch.column(col_index);
           row.insert(field.name().clone(), array_value_to_json(column, row_index));
-          row
-        })
-      })
+        }
+        rows.push(row);
+      }
+      rows
     })
     .collect();
 
