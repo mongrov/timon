@@ -413,6 +413,11 @@ impl DatabaseManager {
       }
     }
 
+    // Enforce row limits if configured for this table
+    if let Err(e) = self.enforce_row_limits(db_name, table_name, datetime_field) {
+      eprintln!("Warning: Failed to enforce row limits for table '{}.{}': {}", db_name, table_name, e);
+    }
+
     Ok(invalid_json_values)
   }
 
@@ -742,6 +747,11 @@ impl DatabaseManager {
     let schema_obj = schema.as_object().ok_or("Schema should be a JSON object")?;
 
     for (field_name, field_rules) in schema_obj {
+      // Skip validation for max_rows as it's a configuration property, not a data field
+      if field_name == "max_rows" {
+        continue;
+      }
+
       let field_rules_obj = field_rules
         .as_object()
         .ok_or(format!("Invalid validation rules for field '{}'", field_name))?;
@@ -782,6 +792,11 @@ impl DatabaseManager {
 
     // Validate each field in the schema
     for (field_name, field_rules) in schema_obj {
+      // Skip validation for max_rows as it's a configuration property, not a data field
+      if field_name == "max_rows" {
+        continue;
+      }
+
       let field_rules_obj = field_rules
         .as_object()
         .ok_or(format!("Invalid validation rules for field '{}'", field_name))?;
@@ -951,5 +966,85 @@ impl DatabaseManager {
       }
     }
     None
+  }
+
+  fn enforce_row_limits(&self, db_name: &str, table_name: &str, datetime_field: &str) -> Result<(), Box<dyn Error>> {
+    // Get table schema to check for max_rows configuration
+    let table_schema = self.get_table_schema(db_name, table_name)?;
+    let schema_obj = table_schema.as_object().ok_or("Schema should be a JSON object")?;
+
+    // Check if max_rows is configured in the schema
+    let max_rows = if let Some(max_rows_value) = schema_obj.get("max_rows") {
+      max_rows_value.as_u64().unwrap_or(0) as usize
+    } else {
+      return Ok(()); // No row limiting configured
+    };
+
+    if max_rows == 0 {
+      return Ok(()); // No limit specified
+    }
+
+    // Load all records from the table
+    let file_list = self.build_files_list(db_name, table_name, None)?;
+    let mut all_records = Vec::new();
+
+    for file in &file_list {
+      if let Ok(records) = self.read_parquet_file(file) {
+        all_records.extend(records);
+      }
+    }
+
+    // If we're under the limit, no cleanup needed
+    if all_records.len() <= max_rows {
+      return Ok(());
+    }
+
+    // Sort records by timestamp (descending) and keep only the latest max_rows
+    all_records.sort_by(|a, b| {
+      let a_ts = a.get(datetime_field).and_then(|v| v.as_i64()).unwrap_or(0);
+      let b_ts = b.get(datetime_field).and_then(|v| v.as_i64()).unwrap_or(0);
+      b_ts.cmp(&a_ts) // Descending order (latest first)
+    });
+
+    let records_to_keep = all_records.into_iter().take(max_rows).collect::<Vec<_>>();
+
+    // Get table path for file operations
+    let table_path = self
+      .get_table_path(db_name, table_name)
+      .ok_or_else(|| format!("Table '{}.{}' not found", db_name, table_name))?;
+
+    // Group records by partition and rewrite files
+    let mut records_by_file: HashMap<String, Vec<Value>> = HashMap::new();
+
+    for record in records_to_keep {
+      let timestamp = record.get(datetime_field).and_then(|t| t.as_i64()).unwrap_or(0);
+      let partition_name = format!(
+        "{}_{}.parquet",
+        table_name,
+        rounded_timestamp(timestamp.try_into().unwrap(), self.bucket_interval)
+      );
+      let target_file = format!("{}/{}", table_path, partition_name);
+
+      records_by_file.entry(target_file).or_insert_with(Vec::new).push(record);
+    }
+
+    // Rewrite all files with the limited records
+    for (file_path, records) in records_by_file {
+      if !records.is_empty() {
+        let (arrays, schema) = json_to_arrow(&records)?;
+        Self::parquet_file_writer(Path::new(&file_path), schema, arrays)?;
+      }
+    }
+
+    // Remove empty files
+    for file in &file_list {
+      if let Ok(records) = self.read_parquet_file(file) {
+        if records.is_empty() {
+          let _ = fs::remove_file(file);
+        }
+      }
+    }
+
+    Ok(())
   }
 }
