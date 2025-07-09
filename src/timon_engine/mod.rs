@@ -31,8 +31,10 @@ pub struct TimonResult {
 
 static DATABASE_MANAGER: OnceLock<DatabaseManager> = OnceLock::new();
 
-fn get_database_manager() -> &'static DatabaseManager {
-  DATABASE_MANAGER.get().expect("DatabaseManager is not initialized")
+fn get_database_manager() -> Result<&'static DatabaseManager, String> {
+  DATABASE_MANAGER
+    .get()
+    .ok_or("DatabaseManager is not initialized. Please call init_timon() first.".to_string())
 }
 
 #[allow(dead_code)]
@@ -61,7 +63,7 @@ pub fn init_timon(storage_path: &str, bucket_interval: u32, username: &str) -> R
 
 #[allow(dead_code)]
 pub fn create_database(db_name: &str) -> Result<Value, String> {
-  let database_manager = get_database_manager();
+  let database_manager = get_database_manager()?;
   match database_manager.clone().create_database(db_name) {
     Ok(_) => {
       let result = TimonResult {
@@ -84,7 +86,7 @@ pub fn create_database(db_name: &str) -> Result<Value, String> {
 
 #[allow(dead_code)]
 pub fn create_table(db_name: &str, table_name: &str, schema: &str) -> Result<Value, String> {
-  let database_manager = get_database_manager();
+  let database_manager = get_database_manager()?;
   match database_manager.clone().create_table(db_name, table_name, schema) {
     Ok(_) => {
       let result = TimonResult {
@@ -107,7 +109,7 @@ pub fn create_table(db_name: &str, table_name: &str, schema: &str) -> Result<Val
 
 #[allow(dead_code)]
 pub fn list_databases() -> Result<Value, String> {
-  let mut database_manager = get_database_manager().clone();
+  let mut database_manager = get_database_manager()?.clone();
   match database_manager.list_databases() {
     Ok(databases_list) => {
       let json_value = serde_json::to_value(databases_list).map_err(|e| e.to_string())?;
@@ -131,7 +133,7 @@ pub fn list_databases() -> Result<Value, String> {
 
 #[allow(dead_code)]
 pub fn list_tables(db_name: &str) -> Result<Value, String> {
-  let mut database_manager = get_database_manager().clone();
+  let mut database_manager = get_database_manager()?.clone();
   match database_manager.list_tables(db_name) {
     Ok(tables_list) => {
       let json_value = serde_json::to_value(&tables_list).map_err(|e| e.to_string())?;
@@ -155,7 +157,7 @@ pub fn list_tables(db_name: &str) -> Result<Value, String> {
 
 #[allow(dead_code)]
 pub fn delete_database(db_name: &str) -> Result<Value, String> {
-  let database_manager = get_database_manager();
+  let database_manager = get_database_manager()?;
   match database_manager.clone().delete_database(db_name) {
     Ok(_) => {
       let result = TimonResult {
@@ -178,7 +180,7 @@ pub fn delete_database(db_name: &str) -> Result<Value, String> {
 
 #[allow(dead_code)]
 pub fn delete_table(db_name: &str, table_name: &str) -> Result<Value, String> {
-  let database_manager = get_database_manager();
+  let database_manager = get_database_manager()?;
   match database_manager.clone().delete_table(db_name, table_name) {
     Ok(_) => {
       let result = TimonResult {
@@ -201,7 +203,7 @@ pub fn delete_table(db_name: &str, table_name: &str) -> Result<Value, String> {
 
 #[allow(dead_code)]
 pub fn insert(db_name: &str, table_name: &str, json_data: &str) -> Result<Value, String> {
-  let database_manager = get_database_manager();
+  let database_manager = get_database_manager()?;
   match database_manager.clone().insert(db_name, table_name, json_data) {
     Ok(value) => {
       let result = TimonResult {
@@ -224,7 +226,7 @@ pub fn insert(db_name: &str, table_name: &str, json_data: &str) -> Result<Value,
 
 #[allow(dead_code)]
 pub async fn query(db_name: &str, sql_query: &str, username: Option<&str>) -> Result<Value, String> {
-  let database_manager = get_database_manager();
+  let database_manager = get_database_manager()?;
   match database_manager.query(db_name, sql_query, username, true).await {
     Ok(db_manager::DataFusionOutput::Json(data)) => {
       let json_value = serde_json::to_value(&data).map_err(|e| e.to_string())?;
@@ -249,7 +251,7 @@ pub async fn query(db_name: &str, sql_query: &str, username: Option<&str>) -> Re
 
 #[allow(dead_code)]
 pub async fn query_df(db_name: &str, sql_query: &str, username: Option<&str>) -> Result<DataFrame, String> {
-  let database_manager = get_database_manager();
+  let database_manager = get_database_manager()?;
   match database_manager.query(db_name, sql_query, username, false).await {
     Ok(db_manager::DataFusionOutput::DataFrame(df)) => Ok(df),
     Ok(db_manager::DataFusionOutput::Json(_)) => Err("Expected DataFrame output, but got JSON".to_string()),
@@ -266,8 +268,10 @@ pub async fn query_df(db_name: &str, sql_query: &str, username: Option<&str>) ->
 
 static CLOUD_STORAGE_MANAGER: OnceLock<CloudStorageManager<AmazonS3>> = OnceLock::new();
 
-fn get_cloud_storage_manager() -> &'static CloudStorageManager<AmazonS3> {
-  CLOUD_STORAGE_MANAGER.get().expect("CloudStorageManager is not initialized")
+fn get_cloud_storage_manager() -> Result<&'static CloudStorageManager<AmazonS3>, String> {
+  CLOUD_STORAGE_MANAGER
+    .get()
+    .ok_or("CloudStorageManager is not initialized. Please call init_bucket() first.".to_string())
 }
 
 pub fn init_bucket(
@@ -277,8 +281,9 @@ pub fn init_bucket(
   secret_access_key: &str,
   bucket_region: &str,
 ) -> Result<Value, String> {
+  let database_manager = get_database_manager()?;
   let cloud_storage_manager = cloud_sync::CloudStorageManager::<AmazonS3>::new(
-    get_database_manager().clone(),
+    database_manager.clone(),
     Some(bucket_endpoint),
     Some(access_key_id),
     Some(secret_access_key),
@@ -307,7 +312,7 @@ pub fn init_bucket(
 }
 
 pub async fn cloud_sync_parquet(db_name: &str, table_name: &str, date_range: HashMap<&str, &str>, username: Option<&str>) -> Result<Value, String> {
-  let cloud_storage_manager = get_cloud_storage_manager();
+  let cloud_storage_manager = get_cloud_storage_manager()?;
   match cloud_storage_manager.cloud_sync_parquet(db_name, table_name, &date_range, username).await {
     Ok(_) => {
       let result = TimonResult {
@@ -332,7 +337,7 @@ pub async fn cloud_sync_parquet(db_name: &str, table_name: &str, date_range: Has
 }
 
 pub async fn cloud_sink_parquet(db_name: &str, table_name: &str) -> Result<Value, String> {
-  let cloud_storage_manager = get_cloud_storage_manager();
+  let cloud_storage_manager = get_cloud_storage_manager()?;
   match cloud_storage_manager.cloud_sink_parquet(db_name, table_name).await {
     Ok(_) => {
       let result = TimonResult {
@@ -357,7 +362,7 @@ pub async fn cloud_sink_parquet(db_name: &str, table_name: &str) -> Result<Value
 }
 
 pub async fn cloud_fetch_parquet(username: &str, db_name: &str, table_name: &str, date_range: HashMap<&str, &str>) -> Result<Value, String> {
-  let cloud_storage_manager = get_cloud_storage_manager();
+  let cloud_storage_manager = get_cloud_storage_manager()?;
   match cloud_storage_manager
     .cloud_fetch_parquet(username, db_name, table_name, &date_range)
     .await
