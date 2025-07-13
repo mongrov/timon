@@ -773,8 +773,10 @@ impl DatabaseManager {
   }
 
   pub fn get_table_schema(&self, db_name: &str, table_name: &str) -> Result<serde_json::Value, Box<dyn Error>> {
-    // Look up the schema from the metadata or wherever it is stored
-    let database = self.metadata.databases.get(db_name).ok_or("Database not found")?;
+    // Reload metadata to ensure it's up-to-date
+    let metadata = self.read_metadata().map_err(|e| format!("Failed to reload metadata: {}", e))?;
+    // Look up the schema from the metadata
+    let database = metadata.databases.get(db_name).ok_or("Database not found")?;
     let table = database.tables.get(table_name).ok_or("Table not found")?;
     Ok(table.schema.clone())
   }

@@ -343,8 +343,8 @@ pub async fn cloud_sink_parquet(db_name: &str, table_name: &str) -> Result<Value
       let result = TimonResult {
         status: 200,
         message: format!(
-          "successfully uploaded '{}.{}' table data to '{}' bucket",
-          db_name, table_name, cloud_storage_manager.bucket_name
+          "successfully uploaded '{}.{}' table data to '{}' bucket for user '{}'",
+          db_name, table_name, cloud_storage_manager.bucket_name, cloud_storage_manager.username
         ),
         json_value: None,
       };

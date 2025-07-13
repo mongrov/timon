@@ -155,6 +155,7 @@ impl S3StoreInterface for MockS3Store {
 pub struct CloudStorageManager<S: S3StoreInterface> {
   pub(crate) s3_store: Arc<S>,
   db_manager: Arc<dyn DatabaseManagerInterface>,
+  pub username: String,
   pub bucket_name: String,
 }
 
@@ -172,6 +173,7 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
     bucket_name: Option<&str>,
     bucket_region: Option<&str>,
   ) -> CloudStorageManager<AmazonS3> {
+    let username = db_manager.get_username().to_string();
     let bucket_endpoint = bucket_endpoint.unwrap_or("http://localhost:9000").to_owned();
     let bucket_name = bucket_name.unwrap_or("timon").to_owned();
     let access_key_id = access_key_id.unwrap_or("ahmed").to_owned();
@@ -198,6 +200,7 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
     CloudStorageManager {
       s3_store: Arc::new(s3_store),
       db_manager: Arc::new(db_manager),
+      username,
       bucket_name,
     }
   }
@@ -211,6 +214,7 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
     CloudStorageManager {
       s3_store: Arc::new(mock_store),
       db_manager: Arc::new(db_manager),
+      username: "mock_user".to_string(),
       bucket_name: bucket_name.unwrap_or("timon").to_owned(),
     }
   }
