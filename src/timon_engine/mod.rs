@@ -10,7 +10,7 @@ use serde::Serialize;
 use serde_json::Value;
 use serde_json::{self, json};
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, LazyLock, Mutex};
 
 /* ******************************** Local File Storage ********************************
 * @ init_timon/new(storage_path, bucket_interval)
@@ -29,36 +29,63 @@ pub struct TimonResult {
   pub json_value: Option<Value>,
 }
 
-static DATABASE_MANAGER: OnceLock<DatabaseManager> = OnceLock::new();
+static DATABASE_MANAGER: LazyLock<Arc<Mutex<Option<DatabaseManager>>>> = LazyLock::new(|| Arc::new(Mutex::new(None)));
+static CLOUD_STORAGE_MANAGER: LazyLock<Arc<Mutex<Option<Arc<CloudStorageManager<AmazonS3>>>>>> = LazyLock::new(|| Arc::new(Mutex::new(None)));
 
-fn get_database_manager() -> Result<&'static DatabaseManager, String> {
-  DATABASE_MANAGER
-    .get()
+fn get_database_manager() -> Result<DatabaseManager, String> {
+  let manager_guard = DATABASE_MANAGER
+    .lock()
+    .map_err(|e| format!("Failed to acquire database manager lock: {}", e))?;
+  manager_guard
+    .as_ref()
+    .cloned()
     .ok_or("DatabaseManager is not initialized. Please call init_timon() first.".to_string())
+}
+
+fn get_cloud_storage_manager() -> Result<Arc<CloudStorageManager<AmazonS3>>, String> {
+  let manager_guard = CLOUD_STORAGE_MANAGER
+    .lock()
+    .map_err(|e| format!("Failed to acquire cloud storage manager lock: {}", e))?;
+  manager_guard
+    .as_ref()
+    .cloned()
+    .ok_or("CloudStorageManager is not initialized. Please call init_bucket() first.".to_string())
 }
 
 #[allow(dead_code)]
 pub fn init_timon(storage_path: &str, bucket_interval: u32, username: &str) -> Result<Value, String> {
   let db_manager = DatabaseManager::new(storage_path, bucket_interval, username);
 
-  match DATABASE_MANAGER.set(db_manager) {
-    Ok(_) => {
-      let result = TimonResult {
-        status: 200,
-        message: "DatabaseManager initialized successfully".to_owned(),
-        json_value: None,
-      };
-      serde_json::to_value(&result).map_err(|e| e.to_string())
-    }
-    Err(_) => {
-      let result = TimonResult {
-        status: 400,
-        message: "DatabaseManager already initialized".to_owned(),
-        json_value: None,
-      };
-      serde_json::to_value(&result).map_err(|e| e.to_string())
+  // Check if we already have a database manager with a different username
+  let mut db_manager_guard = DATABASE_MANAGER
+    .lock()
+    .map_err(|e| format!("Failed to acquire database manager lock: {}", e))?;
+
+  if let Some(existing_manager) = db_manager_guard.as_ref() {
+    if existing_manager.username != username {
+      // Username changed, we need to clear the cloud storage manager to force reinitialization
+      let mut cloud_manager_guard = CLOUD_STORAGE_MANAGER
+        .lock()
+        .map_err(|e| format!("Failed to acquire cloud storage manager lock: {}", e))?;
+      if cloud_manager_guard.is_some() {
+        *cloud_manager_guard = None;
+        println!(
+          "Cleared cloud storage manager due to username change from '{}' to '{}'",
+          existing_manager.username, username
+        );
+      }
     }
   }
+
+  // Update the database manager
+  *db_manager_guard = Some(db_manager);
+
+  let result = TimonResult {
+    status: 200,
+    message: format!("DatabaseManager initialized successfully with '{}'", username),
+    json_value: None,
+  };
+  serde_json::to_value(&result).map_err(|e| e.to_string())
 }
 
 #[allow(dead_code)]
@@ -266,14 +293,7 @@ pub async fn query_df(db_name: &str, sql_query: &str, username: Option<&str>) ->
 * @ cloud_fetch_parquet(username, db_name, table_name, date_range)
  */
 
-static CLOUD_STORAGE_MANAGER: OnceLock<CloudStorageManager<AmazonS3>> = OnceLock::new();
-
-fn get_cloud_storage_manager() -> Result<&'static CloudStorageManager<AmazonS3>, String> {
-  CLOUD_STORAGE_MANAGER
-    .get()
-    .ok_or("CloudStorageManager is not initialized. Please call init_bucket() first.".to_string())
-}
-
+#[allow(dead_code)]
 pub fn init_bucket(
   bucket_endpoint: &str,
   bucket_name: &str,
@@ -282,6 +302,8 @@ pub fn init_bucket(
   bucket_region: &str,
 ) -> Result<Value, String> {
   let database_manager = get_database_manager()?;
+
+  // Create a new cloud storage manager with the current database manager's username
   let cloud_storage_manager = cloud_sync::CloudStorageManager::<AmazonS3>::new(
     database_manager.clone(),
     Some(bucket_endpoint),
@@ -291,26 +313,74 @@ pub fn init_bucket(
     Some(bucket_region),
   );
 
-  match CLOUD_STORAGE_MANAGER.set(cloud_storage_manager) {
-    Ok(_) => {
-      let result = TimonResult {
-        status: 200,
-        message: "CloudStorageManager initialized successfully".to_owned(),
-        json_value: None,
-      };
-      serde_json::to_value(&result).map_err(|e| e.to_string())
-    }
-    Err(_) => {
-      let result = TimonResult {
-        status: 400,
-        message: "CloudStorageManager already initialized".to_string(),
-        json_value: None,
-      };
-      serde_json::to_value(&result).map_err(|e| e.to_string())
-    }
+  // Set the cloud storage manager (can be reinitialized now)
+  let mut cloud_manager_guard = CLOUD_STORAGE_MANAGER
+    .lock()
+    .map_err(|e| format!("Failed to acquire cloud storage manager lock: {}", e))?;
+  *cloud_manager_guard = Some(Arc::new(cloud_storage_manager));
+
+  let result = TimonResult {
+    status: 200,
+    message: format!("CloudStorageManager initialized successfully with '{}'", database_manager.username),
+    json_value: None,
+  };
+  serde_json::to_value(&result).map_err(|e| e.to_string())
+}
+
+/// Clear the cloud storage manager to allow reinitialization with a new username
+/// This is useful when the username changes and you need to reinitialize cloud storage
+#[allow(dead_code)]
+pub fn clear_cloud_storage_manager() -> Result<Value, String> {
+  let mut cloud_manager_guard = CLOUD_STORAGE_MANAGER
+    .lock()
+    .map_err(|e| format!("Failed to acquire cloud storage manager lock: {}", e))?;
+  *cloud_manager_guard = None;
+
+  let result = TimonResult {
+    status: 200,
+    message: "CloudStorageManager cleared successfully".to_owned(),
+    json_value: None,
+  };
+  serde_json::to_value(&result).map_err(|e| e.to_string())
+}
+
+/// Reset the cloud storage manager to allow reinitialization with a new username
+/// This is useful when the username changes and you need to reinitialize cloud storage
+/// Note: This function will return an error if the cloud storage manager is not initialized
+#[allow(dead_code)]
+pub fn reset_cloud_storage_manager() -> Result<Value, String> {
+  // This is now the same as clear_cloud_storage_manager since we can actually clear it
+  clear_cloud_storage_manager()
+}
+
+/// Check if the current username matches the expected username for cloud operations
+/// This helps detect username mismatches before performing cloud operations
+#[allow(dead_code)]
+pub fn check_username_consistency() -> Result<Value, String> {
+  let db_manager = get_database_manager()?;
+  let cloud_manager = get_cloud_storage_manager()?;
+
+  if db_manager.username != cloud_manager.username {
+    let result = TimonResult {
+      status: 400,
+      message: format!(
+        "Username mismatch detected. Database manager: '{}', Cloud storage manager: '{}'. Please reinitialize with the correct username.",
+        db_manager.username, cloud_manager.username
+      ),
+      json_value: None,
+    };
+    serde_json::to_value(&result).map_err(|e| e.to_string())
+  } else {
+    let result = TimonResult {
+      status: 200,
+      message: format!("Username consistency check passed. Current username: '{}'", db_manager.username),
+      json_value: None,
+    };
+    serde_json::to_value(&result).map_err(|e| e.to_string())
   }
 }
 
+#[allow(dead_code)]
 pub async fn cloud_sync_parquet(db_name: &str, table_name: &str, date_range: HashMap<&str, &str>, username: Option<&str>) -> Result<Value, String> {
   let cloud_storage_manager = get_cloud_storage_manager()?;
   match cloud_storage_manager.cloud_sync_parquet(db_name, table_name, &date_range, username).await {
@@ -336,8 +406,19 @@ pub async fn cloud_sync_parquet(db_name: &str, table_name: &str, date_range: Has
   }
 }
 
+#[allow(dead_code)]
 pub async fn cloud_sink_parquet(db_name: &str, table_name: &str) -> Result<Value, String> {
+  // Check username consistency before performing cloud operations
+  let db_manager = get_database_manager()?;
   let cloud_storage_manager = get_cloud_storage_manager()?;
+
+  if db_manager.username != cloud_storage_manager.username {
+    return Err(format!(
+      "Username mismatch detected. Database manager: '{}', Cloud storage manager: '{}'. Please reinitialize with the correct username.",
+      db_manager.username, cloud_storage_manager.username
+    ));
+  }
+
   match cloud_storage_manager.cloud_sink_parquet(db_name, table_name).await {
     Ok(_) => {
       let result = TimonResult {
@@ -361,6 +442,7 @@ pub async fn cloud_sink_parquet(db_name: &str, table_name: &str) -> Result<Value
   }
 }
 
+#[allow(dead_code)]
 pub async fn cloud_fetch_parquet(username: &str, db_name: &str, table_name: &str, date_range: HashMap<&str, &str>) -> Result<Value, String> {
   let cloud_storage_manager = get_cloud_storage_manager()?;
   match cloud_storage_manager
