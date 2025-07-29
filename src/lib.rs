@@ -5,8 +5,8 @@ pub mod timon_engine;
 #[cfg(target_os = "android")]
 pub mod android {
   use crate::timon_engine::{
-    cloud_fetch_parquet, cloud_sink_parquet, cloud_sync_parquet, create_database, create_table, delete_database, delete_table, init_bucket,
-    init_timon, insert, list_databases, list_tables, query,
+    cloud_fetch_parquet, cloud_sink_parquet, cloud_sync_parquet, create_database, create_table, delete_database, delete_table, get_all_sync_metadata,
+    get_sync_metadata, init_bucket, init_timon, insert, list_databases, list_tables, query,
   };
   use jni::objects::{JClass, JObject, JString, JValue};
   use jni::sys::{jint, jstring};
@@ -373,6 +373,43 @@ pub mod android {
   }
 
   #[no_mangle]
+  pub unsafe extern "C" fn nativeGetAllSyncMetadata(mut env: JNIEnv, _class: JClass, db_name: JString) -> jstring {
+    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
+
+    match get_all_sync_metadata(&rust_db_name) {
+      Ok(result) => {
+        let json_string = result.to_string();
+        let output = env.new_string(json_string).expect("Couldn't create success string!");
+        output.into_raw()
+      }
+      Err(err) => {
+        let err_message = format!("Failed to get all sync metadata: {:?}", err);
+        let output = env.new_string(err_message).expect("Couldn't create error string!");
+        output.into_raw()
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub unsafe extern "C" fn nativeGetSyncMetadata(mut env: JNIEnv, _class: JClass, db_name: JString, table_name: JString) -> jstring {
+    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
+    let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
+
+    match get_sync_metadata(&rust_db_name, &rust_table_name) {
+      Ok(result) => {
+        let json_string = result.to_string();
+        let output = env.new_string(json_string).expect("Couldn't create success string!");
+        output.into_raw()
+      }
+      Err(err) => {
+        let err_message = format!("Failed to get sync metadata: {:?}", err);
+        let output = env.new_string(err_message).expect("Couldn't create error string!");
+        output.into_raw()
+      }
+    }
+  }
+
+  #[no_mangle]
   pub extern "C" fn JNI_OnLoad(vm: jni::JavaVM, _reserved: *mut std::ffi::c_void) -> jni::sys::jint {
     let mut env = vm.get_env().expect("Failed to get JNIEnv");
 
@@ -470,6 +507,16 @@ pub mod android {
         sig: "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;)Ljava/lang/String;".into(),
         fn_ptr: nativeCloudFetchParquet as *mut c_void,
       },
+      NativeMethod {
+        name: "nativeGetAllSyncMetadata".into(),
+        sig: "(Ljava/lang/String;)Ljava/lang/String;".into(),
+        fn_ptr: nativeGetAllSyncMetadata as *mut c_void,
+      },
+      NativeMethod {
+        name: "nativeGetSyncMetadata".into(),
+        sig: "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;".into(),
+        fn_ptr: nativeGetSyncMetadata as *mut c_void,
+      },
     ];
 
     env.register_native_methods(class, &methods).expect("Failed to register native methods");
@@ -480,8 +527,8 @@ pub mod android {
 #[cfg(target_os = "ios")]
 pub mod ios {
   use crate::timon_engine::{
-    cloud_fetch_parquet, cloud_sink_parquet, cloud_sync_parquet, create_database, create_table, delete_database, delete_table, init_bucket,
-    init_timon, insert, list_databases, list_tables, query,
+    cloud_fetch_parquet, cloud_sink_parquet, cloud_sync_parquet, create_database, create_table, delete_database, delete_table, get_all_sync_metadata,
+    get_sync_metadata, init_bucket, init_timon, insert, list_databases, list_tables, query,
   };
   use libc::c_char;
   use std::collections::HashMap;
@@ -902,6 +949,50 @@ pub mod ios {
             "error": "Invalid arguments to nativeCloudFetchParquet function. Ensure all parameters are valid strings."
           })
           .to_string();
+          string_to_c_str(err_message)
+        }
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub extern "C" fn nativeGetAllSyncMetadata(db_name: *const c_char) -> *mut c_char {
+    unsafe {
+      match c_str_to_string(db_name) {
+        Ok(rust_db_name) => match get_all_sync_metadata(&rust_db_name) {
+          Ok(result) => {
+            let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "[]".to_string());
+            string_to_c_str(json_string)
+          }
+          Err(err) => {
+            let err_message = serde_json::json!({ "error": format!("Failed to get all sync metadata: {:?}", err) }).to_string();
+            string_to_c_str(err_message)
+          }
+        },
+        Err(err) => {
+          let err_message = serde_json::json!({ "error": err }).to_string();
+          string_to_c_str(err_message)
+        }
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub extern "C" fn nativeGetSyncMetadata(db_name: *const c_char, table_name: *const c_char) -> *mut c_char {
+    unsafe {
+      match (c_str_to_string(db_name), c_str_to_string(table_name)) {
+        (Ok(rust_db_name), Ok(rust_table_name)) => match get_sync_metadata(&rust_db_name, &rust_table_name) {
+          Ok(result) => {
+            let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
+            string_to_c_str(json_string)
+          }
+          Err(err) => {
+            let err_message = serde_json::json!({ "error": format!("Failed to get sync metadata: {:?}", err) }).to_string();
+            string_to_c_str(err_message)
+          }
+        },
+        (Err(e), _) | (_, Err(e)) => {
+          let err_message = serde_json::json!({ "error": e }).to_string();
           string_to_c_str(err_message)
         }
       }

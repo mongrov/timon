@@ -291,6 +291,8 @@ pub async fn query_df(db_name: &str, sql_query: &str, username: Option<&str>) ->
 * @ cloud_sync_parquet(db_name, table_name, date_range, username?)
 * @ cloud_sink_parquet(db_name, table_name, date_range)
 * @ cloud_fetch_parquet(username, db_name, table_name, date_range)
+* @ get_sync_metadata(db_name, table_name)
+* @ get_all_sync_metadata(db_name)
  */
 
 #[allow(dead_code)]
@@ -327,64 +329,18 @@ pub fn init_bucket(
   serde_json::to_value(&result).map_err(|e| e.to_string())
 }
 
-/// Clear the cloud storage manager to allow reinitialization with a new username
-/// This is useful when the username changes and you need to reinitialize cloud storage
-#[allow(dead_code)]
-pub fn clear_cloud_storage_manager() -> Result<Value, String> {
-  let mut cloud_manager_guard = CLOUD_STORAGE_MANAGER
-    .lock()
-    .map_err(|e| format!("Failed to acquire cloud storage manager lock: {}", e))?;
-  *cloud_manager_guard = None;
-
-  let result = TimonResult {
-    status: 200,
-    message: "CloudStorageManager cleared successfully".to_owned(),
-    json_value: None,
-  };
-  serde_json::to_value(&result).map_err(|e| e.to_string())
-}
-
-/// Reset the cloud storage manager to allow reinitialization with a new username
-/// This is useful when the username changes and you need to reinitialize cloud storage
-/// Note: This function will return an error if the cloud storage manager is not initialized
-#[allow(dead_code)]
-pub fn reset_cloud_storage_manager() -> Result<Value, String> {
-  // This is now the same as clear_cloud_storage_manager since we can actually clear it
-  clear_cloud_storage_manager()
-}
-
-/// Check if the current username matches the expected username for cloud operations
-/// This helps detect username mismatches before performing cloud operations
-#[allow(dead_code)]
-pub fn check_username_consistency() -> Result<Value, String> {
-  let db_manager = get_database_manager()?;
-  let cloud_manager = get_cloud_storage_manager()?;
-
-  if db_manager.username != cloud_manager.username {
-    let result = TimonResult {
-      status: 400,
-      message: format!(
-        "Username mismatch detected. Database manager: '{}', Cloud storage manager: '{}'. Please reinitialize with the correct username.",
-        db_manager.username, cloud_manager.username
-      ),
-      json_value: None,
-    };
-    serde_json::to_value(&result).map_err(|e| e.to_string())
-  } else {
-    let result = TimonResult {
-      status: 200,
-      message: format!("Username consistency check passed. Current username: '{}'", db_manager.username),
-      json_value: None,
-    };
-    serde_json::to_value(&result).map_err(|e| e.to_string())
-  }
-}
-
 #[allow(dead_code)]
 pub async fn cloud_sync_parquet(db_name: &str, table_name: &str, date_range: HashMap<&str, &str>, username: Option<&str>) -> Result<Value, String> {
   let cloud_storage_manager = get_cloud_storage_manager()?;
+  let mut database_manager = get_database_manager()?;
+
   match cloud_storage_manager.cloud_sync_parquet(db_name, table_name, &date_range, username).await {
     Ok(_) => {
+      // Update sync metadata on successful sync
+      if let Err(e) = database_manager.update_sync_metadata(db_name, table_name, "sync") {
+        eprintln!("Warning: Failed to update sync metadata: {}", e);
+      }
+
       let result = TimonResult {
         status: 200,
         message: format!(
@@ -421,6 +377,12 @@ pub async fn cloud_sink_parquet(db_name: &str, table_name: &str) -> Result<Value
 
   match cloud_storage_manager.cloud_sink_parquet(db_name, table_name).await {
     Ok(_) => {
+      // Update sync metadata on successful sink
+      let mut database_manager = get_database_manager()?;
+      if let Err(e) = database_manager.update_sync_metadata(db_name, table_name, "sink") {
+        eprintln!("Warning: Failed to update sync metadata: {}", e);
+      }
+
       let result = TimonResult {
         status: 200,
         message: format!(
@@ -457,6 +419,52 @@ pub async fn cloud_fetch_parquet(username: &str, db_name: &str, table_name: &str
           username, cloud_storage_manager.bucket_name, db_name, table_name
         ),
         json_value: None,
+      };
+      serde_json::to_value(&result).map_err(|e| e.to_string())
+    }
+    Err(err) => {
+      let result = TimonResult {
+        status: 400,
+        message: err.to_string(),
+        json_value: None,
+      };
+      serde_json::to_value(&result).map_err(|e| e.to_string())
+    }
+  }
+}
+
+#[allow(dead_code)]
+pub fn get_sync_metadata(db_name: &str, table_name: &str) -> Result<Value, String> {
+  let database_manager = get_database_manager()?;
+  match database_manager.get_sync_metadata(db_name, table_name) {
+    Ok(sync_info) => {
+      let result = TimonResult {
+        status: 200,
+        message: format!("Successfully retrieved sync metadata for '{}.{}'", db_name, table_name),
+        json_value: Some(sync_info),
+      };
+      serde_json::to_value(&result).map_err(|e| e.to_string())
+    }
+    Err(err) => {
+      let result = TimonResult {
+        status: 400,
+        message: err.to_string(),
+        json_value: None,
+      };
+      serde_json::to_value(&result).map_err(|e| e.to_string())
+    }
+  }
+}
+
+#[allow(dead_code)]
+pub fn get_all_sync_metadata(db_name: &str) -> Result<Value, String> {
+  let database_manager = get_database_manager()?;
+  match database_manager.get_all_sync_metadata(db_name) {
+    Ok(sync_info) => {
+      let result = TimonResult {
+        status: 200,
+        message: format!("Successfully retrieved sync metadata for all tables in '{}'", db_name),
+        json_value: Some(sync_info),
       };
       serde_json::to_value(&result).map_err(|e| e.to_string())
     }

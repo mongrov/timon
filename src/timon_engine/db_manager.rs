@@ -58,8 +58,10 @@ struct Database {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Table {
-  path: String,              // Path to the table
-  schema: serde_json::Value, // Placeholder for your schema structure (optional)
+  path: String,                   // Path to the table
+  schema: serde_json::Value,      // Placeholder for your schema structure (optional)
+  last_sync_time: Option<String>, // ISO 8601 timestamp of last successful sync
+  last_sync_type: Option<String>, // "sync" or "sink" to indicate sync type
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -190,7 +192,12 @@ impl DatabaseManager {
     fs::create_dir_all(&table_path)?;
 
     // Store the schema for future validation during inserts
-    let table = Table { schema, path: table_path };
+    let table = Table {
+      schema,
+      path: table_path,
+      last_sync_time: None,
+      last_sync_type: None,
+    };
     database.tables.insert(table_name.to_string(), table);
 
     // Persist the metadata to disk (e.g., in a metadata.json or similar)
@@ -961,13 +968,77 @@ impl DatabaseManager {
   }
 
   pub fn get_table_path(&self, db_name: &str, table_name: &str) -> Option<String> {
-    let metadata = self.read_metadata().unwrap();
-    if let Some(db) = metadata.databases.get(db_name) {
-      if let Some(table_path) = db.tables.get(table_name) {
-        return Some(table_path.path.clone());
+    self.metadata.databases.get(db_name)?.tables.get(table_name)?.path.clone().into()
+  }
+
+  /// Update the last sync time and type for a table
+  pub fn update_sync_metadata(&mut self, db_name: &str, table_name: &str, sync_type: &str) -> Result<(), Box<dyn Error>> {
+    // Reload the metadata to ensure it's up to date
+    self.metadata = self.read_metadata()?;
+
+    if let Some(database) = self.metadata.databases.get_mut(db_name) {
+      if let Some(table) = database.tables.get_mut(table_name) {
+        let now = chrono::Utc::now();
+        table.last_sync_time = Some(now.to_rfc3339());
+        table.last_sync_type = Some(sync_type.to_string());
+
+        // Save the updated metadata
+        self.save_metadata()?;
+        Ok(())
+      } else {
+        Err(format!("Table '{}' not found in database '{}'", table_name, db_name).into())
       }
+    } else {
+      Err(format!("Database '{}' not found", db_name).into())
     }
-    None
+  }
+
+  /// Get the last sync information for a table
+  pub fn get_sync_metadata(&self, db_name: &str, table_name: &str) -> Result<serde_json::Value, Box<dyn Error>> {
+    // Reload metadata to ensure we have the latest sync information
+    let metadata = self.read_metadata()?;
+
+    if let Some(database) = metadata.databases.get(db_name) {
+      if let Some(table) = database.tables.get(table_name) {
+        let sync_info = json!({
+          "last_sync_time": table.last_sync_time,
+          "last_sync_type": table.last_sync_type,
+          "table_name": table_name,
+          "database_name": db_name
+        });
+        Ok(sync_info)
+      } else {
+        Err(format!("Table '{}' not found in database '{}'", table_name, db_name).into())
+      }
+    } else {
+      Err(format!("Database '{}' not found", db_name).into())
+    }
+  }
+
+  /// Get sync metadata for all tables in a database
+  pub fn get_all_sync_metadata(&self, db_name: &str) -> Result<serde_json::Value, Box<dyn Error>> {
+    // Reload metadata to ensure we have the latest sync information
+    let metadata = self.read_metadata()?;
+
+    if let Some(database) = metadata.databases.get(db_name) {
+      let mut sync_info = Vec::new();
+
+      for (table_name, table) in &database.tables {
+        sync_info.push(json!({
+          "table_name": table_name,
+          "last_sync_time": table.last_sync_time,
+          "last_sync_type": table.last_sync_type,
+          "database_name": db_name
+        }));
+      }
+
+      Ok(json!({
+        "database_name": db_name,
+        "tables": sync_info
+      }))
+    } else {
+      Err(format!("Database '{}' not found", db_name).into())
+    }
   }
 
   fn enforce_row_limits(&self, db_name: &str, table_name: &str, datetime_field: &str) -> Result<(), Box<dyn Error>> {
