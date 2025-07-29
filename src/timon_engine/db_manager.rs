@@ -58,10 +58,13 @@ struct Database {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Table {
-  path: String,                   // Path to the table
-  schema: serde_json::Value,      // Placeholder for your schema structure (optional)
-  last_sync_time: Option<String>, // ISO 8601 timestamp of last successful sync
-  last_sync_type: Option<String>, // "sync" or "sink" to indicate sync type
+  path: String,                         // Path to the table
+  schema: serde_json::Value,            // Placeholder for your schema structure (optional)
+  last_sync_time: Option<String>,       // ISO 8601 timestamp of last successful sync
+  last_sync_type: Option<String>,       // "sync" or "sink" to indicate sync type
+  last_sync_operation: Option<String>,  // ISO 8601 timestamp of last sync operation
+  last_sink_operation: Option<String>,  // ISO 8601 timestamp of last sink operation
+  last_fetch_operation: Option<String>, // ISO 8601 timestamp of last fetch operation
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -197,6 +200,9 @@ impl DatabaseManager {
       path: table_path,
       last_sync_time: None,
       last_sync_type: None,
+      last_sync_operation: None,
+      last_sink_operation: None,
+      last_fetch_operation: None,
     };
     database.tables.insert(table_name.to_string(), table);
 
@@ -979,8 +985,23 @@ impl DatabaseManager {
     if let Some(database) = self.metadata.databases.get_mut(db_name) {
       if let Some(table) = database.tables.get_mut(table_name) {
         let now = chrono::Utc::now();
-        table.last_sync_time = Some(now.to_rfc3339());
+        let timestamp = now.to_rfc3339();
+
+        // Update the legacy fields for backward compatibility
+        table.last_sync_time = Some(timestamp.clone());
         table.last_sync_type = Some(sync_type.to_string());
+
+        // Update the specific operation type field
+        match sync_type {
+          "sync" => table.last_sync_operation = Some(timestamp),
+          "sink" => table.last_sink_operation = Some(timestamp),
+          "fetch" => table.last_fetch_operation = Some(timestamp),
+          _ => {
+            // For any other type, just update the legacy fields
+            table.last_sync_time = Some(timestamp);
+            table.last_sync_type = Some(sync_type.to_string());
+          }
+        }
 
         // Save the updated metadata
         self.save_metadata()?;
@@ -1001,10 +1022,13 @@ impl DatabaseManager {
     if let Some(database) = metadata.databases.get(db_name) {
       if let Some(table) = database.tables.get(table_name) {
         let sync_info = json!({
+          "table_name": table_name,
+          "database_name": db_name,
           "last_sync_time": table.last_sync_time,
           "last_sync_type": table.last_sync_type,
-          "table_name": table_name,
-          "database_name": db_name
+          "last_sync_operation": table.last_sync_operation,
+          "last_sink_operation": table.last_sink_operation,
+          "last_fetch_operation": table.last_fetch_operation
         });
         Ok(sync_info)
       } else {
@@ -1026,9 +1050,12 @@ impl DatabaseManager {
       for (table_name, table) in &database.tables {
         sync_info.push(json!({
           "table_name": table_name,
+          "database_name": db_name,
           "last_sync_time": table.last_sync_time,
           "last_sync_type": table.last_sync_type,
-          "database_name": db_name
+          "last_sync_operation": table.last_sync_operation,
+          "last_sink_operation": table.last_sink_operation,
+          "last_fetch_operation": table.last_fetch_operation
         }));
       }
 

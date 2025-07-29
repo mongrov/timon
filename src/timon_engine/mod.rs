@@ -412,6 +412,12 @@ pub async fn cloud_fetch_parquet(username: &str, db_name: &str, table_name: &str
     .await
   {
     Ok(_) => {
+      // Update sync metadata on successful fetch
+      let mut database_manager = get_database_manager()?;
+      if let Err(e) = database_manager.update_sync_metadata(db_name, table_name, "fetch") {
+        eprintln!("Warning: Failed to update sync metadata: {}", e);
+      }
+
       let result = TimonResult {
         status: 200,
         message: format!(
