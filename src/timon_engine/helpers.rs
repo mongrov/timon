@@ -682,7 +682,7 @@ pub fn get_monthly_partition_overlaps(partition_time: i64, query_start: i64, que
   partition_end >= query_start && partition_start <= query_end
 }
 
-fn parse_timestamp(datetime_str: &str) -> Option<i64> {
+pub fn parse_timestamp(datetime_str: &str) -> Option<i64> {
   // Parses either epoch timestamps or datetime strings
   if let Ok(epoch) = datetime_str.parse::<i64>() {
     Some(epoch)

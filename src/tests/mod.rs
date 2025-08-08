@@ -5,3 +5,6 @@ mod timon_engine {
   mod helpers_test;
   mod mod_test;
 }
+
+#[cfg(test)]
+mod lib_test;
