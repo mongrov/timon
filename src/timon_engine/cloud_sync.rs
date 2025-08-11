@@ -15,11 +15,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::File;
 use std::fs::{self};
-use std::io::{BufWriter, Write};
+//
 use std::path::Path;
 use std::path::PathBuf;
 use std::{collections::HashMap, sync::Arc};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::task;
 
 pub trait DatabaseManagerInterface: Send + Sync {
   fn build_files_list(&self, db_name: &str, table_name: &str, username: Option<&str>) -> Result<Vec<String>, Box<dyn std::error::Error>>;
@@ -386,14 +387,39 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
         // Compare timestamps before downloading
         if local_modified_datetime > s3_modified_datetime {
           println!("Local file is newer than S3, downloading S3 version for merge...");
-          let s3_available = self
-            .download_from_bucket(&target_path, &s3_temp_path)
+          let s3_available = self.download_from_bucket(&target_path, &s3_temp_path).await.is_ok() && {
+            let s3_temp_path_cloned = s3_temp_path.clone();
+            // Offload blocking parquet read to a blocking thread
+            match task::spawn_blocking(move || {
+              let mut tmp_batches = Vec::new();
+              match read_parquet_batches(Path::new(&s3_temp_path_cloned), &mut tmp_batches) {
+                Ok(_) => Ok::<_, String>(tmp_batches),
+                Err(e) => Err::<Vec<RecordBatch>, String>(e.to_string()),
+              }
+            })
             .await
-            .map(|_| read_parquet_batches(Path::new(&s3_temp_path), &mut s3_batches).is_ok())
-            .unwrap_or(false);
+            .ok()
+            .and_then(Result::ok)
+            {
+              Some(vec) => {
+                s3_batches.extend(vec);
+                true
+              }
+              None => false,
+            }
+          };
 
-          let mut local_batches = Vec::new();
-          read_parquet_batches(&file_path, &mut local_batches)?;
+          // Read local parquet file off the async runtime
+          let file_path_string = file_path.to_string_lossy().to_string();
+          let local_batches = task::spawn_blocking(move || {
+            let mut local_vec = Vec::new();
+            read_parquet_batches(Path::new(&file_path_string), &mut local_vec)
+              .map(|_| local_vec)
+              .map_err(|e| e.to_string())
+          })
+          .await
+          .map_err(|e| format!("Failed to join blocking task: {}", e))
+          .and_then(|res| res.map_err(|e| e.into()))?;
 
           if s3_available {
             let merged_batches = combine_unique_batches(local_batches, s3_batches, unique_fields)?;
@@ -424,13 +450,28 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
       let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap();
       let merged_file_path = format!("{}/merge_workspace/{}/merged_{}", self.db_manager.get_storage_path(), username, filename);
 
-      let merge_file = File::create(&merged_file_path)?;
-      let mut writer = ArrowWriter::try_new(merge_file, batch.schema(), None)?;
-      writer.write(batch)?;
-      writer.close()?;
+      // Perform heavy file creation and parquet writing off the async runtime
+      let schema = batch.schema();
+      let batch_cloned = batch.clone();
+      let merged_file_path_for_write = merged_file_path.clone();
+      let write_result: Result<(), String> = task::spawn_blocking(move || -> Result<(), String> {
+        let merge_file = File::create(&merged_file_path_for_write).map_err(|e| e.to_string())?;
+        let mut writer = ArrowWriter::try_new(merge_file, schema, None).map_err(|e| e.to_string())?;
+        writer.write(&batch_cloned).map_err(|e| e.to_string())?;
+        writer.close().map_err(|e| e.to_string())?;
+        Ok(())
+      })
+      .await
+      .map_err(|e| format!("Failed to join blocking task: {}", e))?;
+
+      // Convert String error to io::Error to satisfy error bounds cleanly
+      write_result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
       self.upload_to_bucket(&merged_file_path, merge_target_path).await?;
-      fs::remove_file(&merged_file_path)?;
+
+      // Remove local temp file off the async runtime
+      let merged_file_path_for_remove = merged_file_path.clone();
+      task::spawn_blocking(move || fs::remove_file(&merged_file_path_for_remove)).await??;
       println!("Successfully uploaded merged: '{}'", merged_file_path);
     }
     Ok(())
@@ -492,21 +533,23 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
       }
     };
 
-    // Create a local file to write the Parquet data
-    let file = fs::File::create(local_path).map_err(|e| format!("Failed to create local file '{}': {}", local_path, e))?;
-    let mut writer = BufWriter::new(file);
-    let mut total_bytes_written = 0;
+    // Create a local file (async) to write the Parquet data
+    let mut file = tokio::fs::File::create(local_path)
+      .await
+      .map_err(|e| format!("Failed to create local file '{}': {}", local_path, e))?;
+    let mut total_bytes_written = 0usize;
 
-    // Process the stream and write chunks directly to the file
+    // Process the stream and write chunks directly to the file asynchronously
     while let Some(chunk) = stream.next().await {
       let bytes = chunk.map_err(|e| format!("Error reading stream for '{}': {}", target_path, e))?;
-      writer
+      file
         .write_all(&bytes)
+        .await
         .map_err(|e| format!("Failed to write to file '{}': {}", local_path, e))?;
       total_bytes_written += bytes.len();
     }
 
-    writer.flush().map_err(|e| format!("Failed to flush file '{}': {}", local_path, e))?;
+    file.flush().await.map_err(|e| format!("Failed to flush file '{}': {}", local_path, e))?;
 
     println!("Successfully downloaded '{}' from S3 ({} bytes)", target_path, total_bytes_written);
 
