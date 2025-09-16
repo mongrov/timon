@@ -509,24 +509,31 @@ impl DatabaseManager {
         .await;
     }
 
-    let combined_query = format!(
-      "SELECT {} FROM ({}) AS combined_table",
-      column_names,
-      table_names
-        .iter()
-        .map(|name| format!("SELECT {} FROM {}", column_names, name))
-        .collect::<Vec<_>>()
-        .join(" UNION ALL ")
-    );
-
-    let combined_df = session_context.sql(&combined_query).await?;
-    let combined_results = combined_df.collect().await?;
-    let schema = combined_results[0].schema();
-    let mem_table = MemTable::try_new(schema, vec![combined_results])?;
-    session_context.register_table("combined_table", Arc::new(mem_table))?;
+    let union_query = if table_names.len() == 1 {
+      // Single partition - no need for UNION
+      format!("SELECT {} FROM {}", column_names, table_names[0])
+    } else {
+      // Multiple partitions - use UNION ALL but avoid intermediate collection
+      format!(
+        "SELECT {} FROM ({}) AS combined_table",
+        column_names,
+        table_names
+          .iter()
+          .map(|name| format!("SELECT {} FROM {}", column_names, name))
+          .collect::<Vec<_>>()
+          .join(" UNION ALL ")
+      )
+    };
 
     let adjusted_sql_query = sql_query.replace(&table_name, "combined_table");
-    let final_df = session_context.sql(&adjusted_sql_query).await?;
+
+    let final_query = if table_names.len() == 1 {
+      adjusted_sql_query.replace("combined_table", &table_names[0])
+    } else {
+      format!("WITH combined_table AS ({}) {}", union_query, adjusted_sql_query)
+    };
+
+    let final_df = session_context.sql(&final_query).await?;
     let final_results = final_df.collect().await?;
 
     let result = if is_json_format {
