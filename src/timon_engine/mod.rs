@@ -90,8 +90,8 @@ pub fn init_timon(storage_path: &str, bucket_interval: u32, username: &str) -> R
 
 #[allow(dead_code)]
 pub fn create_database(db_name: &str) -> Result<Value, String> {
-  let database_manager = get_database_manager()?;
-  match database_manager.clone().create_database(db_name) {
+  let mut database_manager = get_database_manager()?;
+  match database_manager.create_database(db_name) {
     Ok(_) => {
       let result = TimonResult {
         status: 200,
@@ -113,8 +113,8 @@ pub fn create_database(db_name: &str) -> Result<Value, String> {
 
 #[allow(dead_code)]
 pub fn create_table(db_name: &str, table_name: &str, schema: &str) -> Result<Value, String> {
-  let database_manager = get_database_manager()?;
-  match database_manager.clone().create_table(db_name, table_name, schema) {
+  let mut database_manager = get_database_manager()?;
+  match database_manager.create_table(db_name, table_name, schema) {
     Ok(_) => {
       let result = TimonResult {
         status: 200,
@@ -136,7 +136,7 @@ pub fn create_table(db_name: &str, table_name: &str, schema: &str) -> Result<Val
 
 #[allow(dead_code)]
 pub fn list_databases() -> Result<Value, String> {
-  let mut database_manager = get_database_manager()?.clone();
+  let mut database_manager = get_database_manager()?;
   match database_manager.list_databases() {
     Ok(databases_list) => {
       let json_value = serde_json::to_value(databases_list).map_err(|e| e.to_string())?;
@@ -160,7 +160,7 @@ pub fn list_databases() -> Result<Value, String> {
 
 #[allow(dead_code)]
 pub fn list_tables(db_name: &str) -> Result<Value, String> {
-  let mut database_manager = get_database_manager()?.clone();
+  let mut database_manager = get_database_manager()?;
   match database_manager.list_tables(db_name) {
     Ok(tables_list) => {
       let json_value = serde_json::to_value(&tables_list).map_err(|e| e.to_string())?;
@@ -184,8 +184,8 @@ pub fn list_tables(db_name: &str) -> Result<Value, String> {
 
 #[allow(dead_code)]
 pub fn delete_database(db_name: &str) -> Result<Value, String> {
-  let database_manager = get_database_manager()?;
-  match database_manager.clone().delete_database(db_name) {
+  let mut database_manager = get_database_manager()?;
+  match database_manager.delete_database(db_name) {
     Ok(_) => {
       let result = TimonResult {
         status: 200,
@@ -207,8 +207,8 @@ pub fn delete_database(db_name: &str) -> Result<Value, String> {
 
 #[allow(dead_code)]
 pub fn delete_table(db_name: &str, table_name: &str) -> Result<Value, String> {
-  let database_manager = get_database_manager()?;
-  match database_manager.clone().delete_table(db_name, table_name) {
+  let mut database_manager = get_database_manager()?;
+  match database_manager.delete_table(db_name, table_name) {
     Ok(_) => {
       let result = TimonResult {
         status: 200,
@@ -230,8 +230,8 @@ pub fn delete_table(db_name: &str, table_name: &str) -> Result<Value, String> {
 
 #[allow(dead_code)]
 pub fn insert(db_name: &str, table_name: &str, json_data: &str) -> Result<Value, String> {
-  let database_manager = get_database_manager()?;
-  match database_manager.clone().insert(db_name, table_name, json_data) {
+  let mut database_manager = get_database_manager()?;
+  match database_manager.insert(db_name, table_name, json_data) {
     Ok(value) => {
       let result = TimonResult {
         status: 200,
@@ -304,10 +304,11 @@ pub fn init_bucket(
   bucket_region: &str,
 ) -> Result<Value, String> {
   let database_manager = get_database_manager()?;
+  let username = database_manager.username.clone();
 
   // Create a new cloud storage manager with the current database manager's username
   let cloud_storage_manager = cloud_sync::CloudStorageManager::<AmazonS3>::new(
-    database_manager.clone(),
+    database_manager,
     Some(bucket_endpoint),
     Some(access_key_id),
     Some(secret_access_key),
@@ -323,7 +324,7 @@ pub fn init_bucket(
 
   let result = TimonResult {
     status: 200,
-    message: format!("CloudStorageManager initialized successfully with '{}'", database_manager.username),
+    message: format!("CloudStorageManager initialized successfully with '{}'", username),
     json_value: None,
   };
   serde_json::to_value(&result).map_err(|e| e.to_string())

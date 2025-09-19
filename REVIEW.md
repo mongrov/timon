@@ -145,10 +145,11 @@ The code demonstrates good understanding of Rust's ownership model:
 - Strategic cloning when necessary
 - Proper use of `Arc` for shared ownership
 
-Some potential improvements:
+✅ **Fixed: Ownership and borrowing optimizations implemented**
 
-- Some unnecessary clones in hot paths could be optimized
-- Certain operations could use references instead of owned values
+- Removed unnecessary clones in hot paths (create_database, create_table, delete_database, delete_table, insert, list_databases, list_tables)
+- Optimized function calls to pass mutable references instead of cloning DatabaseManager instances
+- Improved performance by eliminating redundant memory allocations in frequently called functions
 
 ### Use of `unsafe`
 
