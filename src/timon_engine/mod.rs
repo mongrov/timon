@@ -1,10 +1,12 @@
 pub mod cloud_sync;
 pub mod db_manager;
+pub mod errors;
 pub mod helpers;
 
 use cloud_sync::CloudStorageManager;
 use datafusion::prelude::DataFrame;
 use db_manager::DatabaseManager;
+use errors::{TimonError, TimonErrorKind, TimonResult as ErrorResult};
 use object_store::aws::AmazonS3;
 use serde::Serialize;
 use serde_json::Value;
@@ -32,24 +34,27 @@ pub struct TimonResult {
 static DATABASE_MANAGER: LazyLock<Arc<Mutex<Option<DatabaseManager>>>> = LazyLock::new(|| Arc::new(Mutex::new(None)));
 static CLOUD_STORAGE_MANAGER: LazyLock<Arc<Mutex<Option<Arc<CloudStorageManager<AmazonS3>>>>>> = LazyLock::new(|| Arc::new(Mutex::new(None)));
 
-fn get_database_manager() -> Result<DatabaseManager, String> {
-  let manager_guard = DATABASE_MANAGER
-    .lock()
-    .map_err(|e| format!("Failed to acquire database manager lock: {}", e))?;
+fn get_database_manager() -> ErrorResult<DatabaseManager> {
+  let manager_guard = DATABASE_MANAGER.lock().map_err(|e| {
+    TimonError::new(
+      TimonErrorKind::LockAcquisitionFailed,
+      format!("Failed to acquire database manager lock: {}", e),
+    )
+  })?;
   manager_guard
     .as_ref()
     .cloned()
-    .ok_or("DatabaseManager is not initialized. Please call init_timon() first.".to_string())
+    .ok_or_else(|| TimonError::database_manager_not_initialized())
 }
 
-fn get_cloud_storage_manager() -> Result<Arc<CloudStorageManager<AmazonS3>>, String> {
-  let manager_guard = CLOUD_STORAGE_MANAGER
-    .lock()
-    .map_err(|e| format!("Failed to acquire cloud storage manager lock: {}", e))?;
-  manager_guard
-    .as_ref()
-    .cloned()
-    .ok_or("CloudStorageManager is not initialized. Please call init_bucket() first.".to_string())
+fn get_cloud_storage_manager() -> ErrorResult<Arc<CloudStorageManager<AmazonS3>>> {
+  let manager_guard = CLOUD_STORAGE_MANAGER.lock().map_err(|e| {
+    TimonError::new(
+      TimonErrorKind::LockAcquisitionFailed,
+      format!("Failed to acquire cloud storage manager lock: {}", e),
+    )
+  })?;
+  manager_guard.as_ref().cloned().ok_or_else(|| TimonError::cloud_storage_not_initialized())
 }
 
 #[allow(dead_code)]
@@ -90,7 +95,7 @@ pub fn init_timon(storage_path: &str, bucket_interval: u32, username: &str) -> R
 
 #[allow(dead_code)]
 pub fn create_database(db_name: &str) -> Result<Value, String> {
-  let mut database_manager = get_database_manager()?;
+  let mut database_manager = get_database_manager().map_err(|e| e.to_string())?;
   match database_manager.create_database(db_name) {
     Ok(_) => {
       let result = TimonResult {
@@ -101,9 +106,10 @@ pub fn create_database(db_name: &str) -> Result<Value, String> {
       serde_json::to_value(&result).map_err(|e| e.to_string())
     }
     Err(err) => {
+      let timon_error: TimonError = err.into();
       let result = TimonResult {
-        status: 400,
-        message: err.to_string(),
+        status: timon_error.status_code(),
+        message: timon_error.to_string(),
         json_value: None,
       };
       serde_json::to_value(&result).map_err(|e| e.to_string())
@@ -113,7 +119,7 @@ pub fn create_database(db_name: &str) -> Result<Value, String> {
 
 #[allow(dead_code)]
 pub fn create_table(db_name: &str, table_name: &str, schema: &str) -> Result<Value, String> {
-  let mut database_manager = get_database_manager()?;
+  let mut database_manager = get_database_manager().map_err(|e| e.to_string())?;
   match database_manager.create_table(db_name, table_name, schema) {
     Ok(_) => {
       let result = TimonResult {
@@ -124,9 +130,10 @@ pub fn create_table(db_name: &str, table_name: &str, schema: &str) -> Result<Val
       serde_json::to_value(&result).map_err(|e| e.to_string())
     }
     Err(err) => {
+      let timon_error: TimonError = err.into();
       let result = TimonResult {
-        status: 400,
-        message: err.to_string(),
+        status: timon_error.status_code(),
+        message: timon_error.to_string(),
         json_value: None,
       };
       serde_json::to_value(&result).map_err(|e| e.to_string())
@@ -136,7 +143,7 @@ pub fn create_table(db_name: &str, table_name: &str, schema: &str) -> Result<Val
 
 #[allow(dead_code)]
 pub fn list_databases() -> Result<Value, String> {
-  let mut database_manager = get_database_manager()?;
+  let mut database_manager = get_database_manager().map_err(|e| e.to_string())?;
   match database_manager.list_databases() {
     Ok(databases_list) => {
       let json_value = serde_json::to_value(databases_list).map_err(|e| e.to_string())?;
@@ -148,9 +155,10 @@ pub fn list_databases() -> Result<Value, String> {
       serde_json::to_value(&result).map_err(|e| e.to_string())
     }
     Err(err) => {
+      let timon_error: TimonError = err.into();
       let result = TimonResult {
-        status: 400,
-        message: err.to_string(),
+        status: timon_error.status_code(),
+        message: timon_error.to_string(),
         json_value: None,
       };
       serde_json::to_value(&result).map_err(|e| e.to_string())
@@ -160,7 +168,7 @@ pub fn list_databases() -> Result<Value, String> {
 
 #[allow(dead_code)]
 pub fn list_tables(db_name: &str) -> Result<Value, String> {
-  let mut database_manager = get_database_manager()?;
+  let mut database_manager = get_database_manager().map_err(|e| e.to_string())?;
   match database_manager.list_tables(db_name) {
     Ok(tables_list) => {
       let json_value = serde_json::to_value(&tables_list).map_err(|e| e.to_string())?;
@@ -172,9 +180,10 @@ pub fn list_tables(db_name: &str) -> Result<Value, String> {
       serde_json::to_value(&result).map_err(|e| e.to_string())
     }
     Err(err) => {
+      let timon_error: TimonError = err.into();
       let result = TimonResult {
-        status: 400,
-        message: err.to_string(),
+        status: timon_error.status_code(),
+        message: timon_error.to_string(),
         json_value: None,
       };
       serde_json::to_value(&result).map_err(|e| e.to_string())
@@ -184,7 +193,7 @@ pub fn list_tables(db_name: &str) -> Result<Value, String> {
 
 #[allow(dead_code)]
 pub fn delete_database(db_name: &str) -> Result<Value, String> {
-  let mut database_manager = get_database_manager()?;
+  let mut database_manager = get_database_manager().map_err(|e| e.to_string())?;
   match database_manager.delete_database(db_name) {
     Ok(_) => {
       let result = TimonResult {
@@ -195,9 +204,10 @@ pub fn delete_database(db_name: &str) -> Result<Value, String> {
       serde_json::to_value(&result).map_err(|e| e.to_string())
     }
     Err(err) => {
+      let timon_error: TimonError = err.into();
       let result = TimonResult {
-        status: 400,
-        message: err.to_string(),
+        status: timon_error.status_code(),
+        message: timon_error.to_string(),
         json_value: None,
       };
       serde_json::to_value(&result).map_err(|e| e.to_string())
@@ -207,7 +217,7 @@ pub fn delete_database(db_name: &str) -> Result<Value, String> {
 
 #[allow(dead_code)]
 pub fn delete_table(db_name: &str, table_name: &str) -> Result<Value, String> {
-  let mut database_manager = get_database_manager()?;
+  let mut database_manager = get_database_manager().map_err(|e| e.to_string())?;
   match database_manager.delete_table(db_name, table_name) {
     Ok(_) => {
       let result = TimonResult {
@@ -218,9 +228,10 @@ pub fn delete_table(db_name: &str, table_name: &str) -> Result<Value, String> {
       serde_json::to_value(&result).map_err(|e| e.to_string())
     }
     Err(err) => {
+      let timon_error: TimonError = err.into();
       let result = TimonResult {
-        status: 400,
-        message: err.to_string(),
+        status: timon_error.status_code(),
+        message: timon_error.to_string(),
         json_value: None,
       };
       serde_json::to_value(&result).map_err(|e| e.to_string())
@@ -230,7 +241,7 @@ pub fn delete_table(db_name: &str, table_name: &str) -> Result<Value, String> {
 
 #[allow(dead_code)]
 pub fn insert(db_name: &str, table_name: &str, json_data: &str) -> Result<Value, String> {
-  let mut database_manager = get_database_manager()?;
+  let mut database_manager = get_database_manager().map_err(|e| e.to_string())?;
   match database_manager.insert(db_name, table_name, json_data) {
     Ok(value) => {
       let result = TimonResult {
@@ -241,9 +252,10 @@ pub fn insert(db_name: &str, table_name: &str, json_data: &str) -> Result<Value,
       serde_json::to_value(&result).map_err(|e| e.to_string())
     }
     Err(err) => {
+      let timon_error: TimonError = err.into();
       let result = TimonResult {
-        status: 400,
-        message: err.to_string(),
+        status: timon_error.status_code(),
+        message: timon_error.to_string(),
         json_value: None,
       };
       serde_json::to_value(&result).map_err(|e| e.to_string())
@@ -253,7 +265,7 @@ pub fn insert(db_name: &str, table_name: &str, json_data: &str) -> Result<Value,
 
 #[allow(dead_code)]
 pub async fn query(db_name: &str, sql_query: &str, username: Option<&str>) -> Result<Value, String> {
-  let database_manager = get_database_manager()?;
+  let database_manager = get_database_manager().map_err(|e| e.to_string())?;
   match database_manager.query(db_name, sql_query, username, true).await {
     Ok(db_manager::DataFusionOutput::Json(data)) => {
       let json_value = serde_json::to_value(&data).map_err(|e| e.to_string())?;
@@ -266,9 +278,10 @@ pub async fn query(db_name: &str, sql_query: &str, username: Option<&str>) -> Re
     }
     Ok(db_manager::DataFusionOutput::DataFrame(_df)) => Err("DataFrame output is not directly convertible to string".to_owned()),
     Err(err) => {
+      let timon_error: TimonError = err.into();
       let result = TimonResult {
-        status: 400,
-        message: err.to_string(),
+        status: timon_error.status_code(),
+        message: timon_error.to_string(),
         json_value: None,
       };
       serde_json::to_value(&result).map_err(|e| e.to_string())
@@ -278,11 +291,14 @@ pub async fn query(db_name: &str, sql_query: &str, username: Option<&str>) -> Re
 
 #[allow(dead_code)]
 pub async fn query_df(db_name: &str, sql_query: &str, username: Option<&str>) -> Result<DataFrame, String> {
-  let database_manager = get_database_manager()?;
+  let database_manager = get_database_manager().map_err(|e| e.to_string())?;
   match database_manager.query(db_name, sql_query, username, false).await {
     Ok(db_manager::DataFusionOutput::DataFrame(df)) => Ok(df),
     Ok(db_manager::DataFusionOutput::Json(_)) => Err("Expected DataFrame output, but got JSON".to_string()),
-    Err(err) => Err(err.to_string()),
+    Err(err) => {
+      let timon_error: TimonError = err.into();
+      Err(timon_error.to_string())
+    }
   }
 }
 
@@ -303,7 +319,7 @@ pub fn init_bucket(
   secret_access_key: &str,
   bucket_region: &str,
 ) -> Result<Value, String> {
-  let database_manager = get_database_manager()?;
+  let database_manager = get_database_manager().map_err(|e| e.to_string())?;
   let username = database_manager.username.clone();
 
   // Create a new cloud storage manager with the current database manager's username
@@ -332,8 +348,8 @@ pub fn init_bucket(
 
 #[allow(dead_code)]
 pub async fn cloud_sync_parquet(db_name: &str, table_name: &str, date_range: HashMap<&str, &str>, username: Option<&str>) -> Result<Value, String> {
-  let cloud_storage_manager = get_cloud_storage_manager()?;
-  let mut database_manager = get_database_manager()?;
+  let cloud_storage_manager = get_cloud_storage_manager().map_err(|e| e.to_string())?;
+  let mut database_manager = get_database_manager().map_err(|e| e.to_string())?;
 
   match cloud_storage_manager.cloud_sync_parquet(db_name, table_name, &date_range, username).await {
     Ok(_) => {
@@ -366,8 +382,8 @@ pub async fn cloud_sync_parquet(db_name: &str, table_name: &str, date_range: Has
 #[allow(dead_code)]
 pub async fn cloud_sink_parquet(db_name: &str, table_name: &str) -> Result<Value, String> {
   // Check username consistency before performing cloud operations
-  let db_manager = get_database_manager()?;
-  let cloud_storage_manager = get_cloud_storage_manager()?;
+  let db_manager = get_database_manager().map_err(|e| e.to_string())?;
+  let cloud_storage_manager = get_cloud_storage_manager().map_err(|e| e.to_string())?;
 
   if db_manager.username != cloud_storage_manager.username {
     return Err(format!(
@@ -379,7 +395,7 @@ pub async fn cloud_sink_parquet(db_name: &str, table_name: &str) -> Result<Value
   match cloud_storage_manager.cloud_sink_parquet(db_name, table_name).await {
     Ok(_) => {
       // Update sync metadata on successful sink
-      let mut database_manager = get_database_manager()?;
+      let mut database_manager = get_database_manager().map_err(|e| e.to_string())?;
       if let Err(e) = database_manager.update_sync_metadata(db_name, table_name, "sink") {
         eprintln!("Warning: Failed to update sync metadata: {}", e);
       }
@@ -407,14 +423,14 @@ pub async fn cloud_sink_parquet(db_name: &str, table_name: &str) -> Result<Value
 
 #[allow(dead_code)]
 pub async fn cloud_fetch_parquet(username: &str, db_name: &str, table_name: &str, date_range: HashMap<&str, &str>) -> Result<Value, String> {
-  let cloud_storage_manager = get_cloud_storage_manager()?;
+  let cloud_storage_manager = get_cloud_storage_manager().map_err(|e| e.to_string())?;
   match cloud_storage_manager
     .cloud_fetch_parquet(username, db_name, table_name, &date_range)
     .await
   {
     Ok(_) => {
       // Update sync metadata on successful fetch
-      let mut database_manager = get_database_manager()?;
+      let mut database_manager = get_database_manager().map_err(|e| e.to_string())?;
       if let Err(e) = database_manager.update_sync_metadata(db_name, table_name, "fetch") {
         eprintln!("Warning: Failed to update sync metadata: {}", e);
       }
@@ -442,7 +458,7 @@ pub async fn cloud_fetch_parquet(username: &str, db_name: &str, table_name: &str
 
 #[allow(dead_code)]
 pub fn get_sync_metadata(db_name: &str, table_name: &str) -> Result<Value, String> {
-  let database_manager = get_database_manager()?;
+  let database_manager = get_database_manager().map_err(|e| e.to_string())?;
   match database_manager.get_sync_metadata(db_name, table_name) {
     Ok(sync_info) => {
       let result = TimonResult {
@@ -453,9 +469,10 @@ pub fn get_sync_metadata(db_name: &str, table_name: &str) -> Result<Value, Strin
       serde_json::to_value(&result).map_err(|e| e.to_string())
     }
     Err(err) => {
+      let timon_error: TimonError = err.into();
       let result = TimonResult {
-        status: 400,
-        message: err.to_string(),
+        status: timon_error.status_code(),
+        message: timon_error.to_string(),
         json_value: None,
       };
       serde_json::to_value(&result).map_err(|e| e.to_string())
@@ -465,7 +482,7 @@ pub fn get_sync_metadata(db_name: &str, table_name: &str) -> Result<Value, Strin
 
 #[allow(dead_code)]
 pub fn get_all_sync_metadata(db_name: &str) -> Result<Value, String> {
-  let database_manager = get_database_manager()?;
+  let database_manager = get_database_manager().map_err(|e| e.to_string())?;
   match database_manager.get_all_sync_metadata(db_name) {
     Ok(sync_info) => {
       let result = TimonResult {
@@ -476,9 +493,10 @@ pub fn get_all_sync_metadata(db_name: &str) -> Result<Value, String> {
       serde_json::to_value(&result).map_err(|e| e.to_string())
     }
     Err(err) => {
+      let timon_error: TimonError = err.into();
       let result = TimonResult {
-        status: 400,
-        message: err.to_string(),
+        status: timon_error.status_code(),
+        message: timon_error.to_string(),
         json_value: None,
       };
       serde_json::to_value(&result).map_err(|e| e.to_string())
