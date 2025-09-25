@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs::File;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::{fmt, fs};
 use tokio::io::Result as TokioResult;
@@ -80,6 +80,8 @@ pub struct DatabaseManager {
   data_path: String,
   metadata_path: String,
   bucket_interval: u32,
+  session_context: SessionContext,
+  registered_tables: Arc<Mutex<HashMap<String, Vec<String>>>>, // Maps table_name -> list of registered file paths
 }
 
 impl DatabaseManager {
@@ -118,11 +120,13 @@ impl DatabaseManager {
     // Create DatabaseManager instance
     let mut db_manager = DatabaseManager {
       storage_path: storage_path.to_string(),
+      username: username.to_string(),
       metadata,
       data_path,
       metadata_path,
       bucket_interval,
-      username: username.to_string(),
+      session_context: SessionContext::new(),
+      registered_tables: Arc::new(Mutex::new(HashMap::new())),
     };
 
     // Update metadata with the provided storage_path
@@ -435,7 +439,6 @@ impl DatabaseManager {
   }
 
   pub async fn query(&self, db_name: &str, sql_query: &str, username: Option<&str>, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
-    let session_context = SessionContext::new();
     let table_name = extract_table_name(sql_query);
     let query_time_range = extract_query_time_range(sql_query, self.bucket_interval);
 
@@ -481,31 +484,80 @@ impl DatabaseManager {
       return Err(DataFusionError::Plan("No relevant partitions found for query".to_string()));
     }
 
+    // Check if we need to register new files for this table
+    let mut registered_tables_guard = self.registered_tables.lock().unwrap();
+    let registered_files = registered_tables_guard.get(&table_name).cloned().unwrap_or_default();
+    let mut files_to_register: Vec<String> = Vec::new();
+
+    for file_path in &filtered_files {
+      if Path::new(file_path).exists() && !registered_files.contains(file_path) {
+        files_to_register.push(file_path.clone());
+      }
+    }
+
+    // Register new files if any
     let mut table_names = Vec::new();
-    for (i, file_path) in filtered_files.iter().enumerate() {
-      if Path::new(file_path).exists() {
-        let temp_table_name = format!("{}_{}", table_name, i);
-        if let Err(e) = session_context
+    if !files_to_register.is_empty() {
+      let mut new_registered_files = registered_files.clone();
+      for (i, file_path) in files_to_register.iter().enumerate() {
+        let temp_table_name = format!("{}_{}", table_name, registered_files.len() + i);
+        if let Err(e) = self
+          .session_context
           .register_parquet(&temp_table_name, file_path, ParquetReadOptions::default())
           .await
         {
           eprintln!("Failed to register {}: {:?}", file_path, e);
         } else {
+          new_registered_files.push(file_path.clone());
           table_names.push(temp_table_name);
         }
       }
+      // Update the registered tables map
+      registered_tables_guard.insert(table_name.clone(), new_registered_files);
+    }
+
+    // Add existing registered table names
+    for i in 0..registered_files.len() {
+      let temp_table_name = format!("{}_{}", table_name, i);
+      if let Ok(exists) = self.session_context.table_exist(&temp_table_name) {
+        if exists {
+          table_names.push(temp_table_name);
+        }
+      }
+    }
+
+    // If no tables are registered yet, register them now
+    if table_names.is_empty() {
+      let mut new_registered_files = Vec::new();
+      for (i, file_path) in filtered_files.iter().enumerate() {
+        if Path::new(file_path).exists() {
+          let temp_table_name = format!("{}_{}", table_name, i);
+          if let Err(e) = self
+            .session_context
+            .register_parquet(&temp_table_name, file_path, ParquetReadOptions::default())
+            .await
+          {
+            eprintln!("Failed to register {}: {:?}", file_path, e);
+          } else {
+            table_names.push(temp_table_name);
+            new_registered_files.push(file_path.clone());
+          }
+        }
+      }
+      // Update the registered tables map
+      registered_tables_guard.insert(table_name.clone(), new_registered_files);
     }
 
     if table_names.is_empty() {
       return Err(DataFusionError::Plan("No valid tables found to query.".to_string()));
     }
 
-    let column_names = get_table_columns(&session_context, &table_names[0]).await?;
+    let column_names = get_table_columns(&self.session_context, &table_names[0]).await?;
 
     // Check if this is a JOIN query
     if sql_query.to_lowercase().contains("join") {
       return self
-        .handle_join_query(session_context.clone(), db_name, sql_query, username, is_json_format)
+        .handle_join_query(self.session_context.clone(), db_name, sql_query, username, is_json_format)
         .await;
     }
 
@@ -533,7 +585,7 @@ impl DatabaseManager {
       format!("WITH combined_table AS ({}) {}", union_query, adjusted_sql_query)
     };
 
-    let final_df = session_context.sql(&final_query).await?;
+    let final_df = self.session_context.sql(&final_query).await?;
     let final_results = final_df.collect().await?;
 
     let result = if is_json_format {
@@ -542,7 +594,7 @@ impl DatabaseManager {
     } else {
       let final_schema = final_results[0].schema();
       let final_mem_table = MemTable::try_new(final_schema, vec![final_results])?;
-      let final_df = session_context.read_table(Arc::new(final_mem_table))?;
+      let final_df = self.session_context.read_table(Arc::new(final_mem_table))?;
       DataFusionOutput::DataFrame(final_df)
     };
 

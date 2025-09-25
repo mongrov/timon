@@ -200,7 +200,10 @@ Documentation could be improved:
 
 1. __DataFusion Integration:__
 
-   - Consider reusing `SessionContext` for repeated queries
+   - ✅ Consider reusing `SessionContext` for repeated queries *(Fixed: Implemented persistent SessionContext with thread-safe table registration caching)*
+     - ⚠️ **Potential Concerns:**
+       - **Memory Footprint**: The `SessionContext` and registered table mappings consume memory for the app's lifetime
+       - **Table Registration Growth**: If an app queries many different tables over time, the registration cache grows
    - ✅ Optimize the partition selection logic *(Fixed: Implemented efficient CTE-based partition handling)*
    - Evaluate using DataFusion's more advanced features like caching
 
