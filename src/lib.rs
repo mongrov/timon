@@ -1,22 +1,37 @@
+mod tests;
 pub mod timon_engine;
 
 // cbindgen:ignore
 #[cfg(target_os = "android")]
 pub mod android {
-  use crate::timon_engine::{create_database, create_table, delete_database, delete_table, init_timon, insert, list_databases, list_tables, query};
-  use crate::timon_engine::{init_bucket, query_bucket, sink_daily_parquet};
+  use crate::timon_engine::{
+    cloud_fetch_parquet, cloud_sink_parquet, cloud_sync_parquet, create_database, create_table, delete_database, delete_table, get_all_sync_metadata,
+    get_sync_metadata, init_bucket, init_timon, insert, list_databases, list_tables, query,
+  };
   use jni::objects::{JClass, JObject, JString, JValue};
-  use jni::sys::jstring;
+  use jni::sys::{jint, jstring};
   use jni::JNIEnv;
+  use jni::NativeMethod;
   use std::collections::HashMap;
+  use std::ffi::c_void;
   use tokio::runtime::Runtime;
 
   // ******************************** File Storage ********************************
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_initTimon(mut env: JNIEnv, _class: JClass, storage_path: JString) -> jstring {
+  pub unsafe extern "C" fn nativeInitTimon(
+    mut env: JNIEnv,
+    _class: JClass,
+    storage_path: JString,
+    bucket_interval: jint,
+    username: JString,
+  ) -> jstring {
+    // Convert `storage_path` from Java `String` to Rust `String`
     let rust_storage_path: String = env.get_string(&storage_path).expect("Couldn't get java string!").into();
+    // Convert `bucket_interval` from Java `int` to Rust `u32`
+    let rust_bucket_interval: u32 = bucket_interval as u32;
+    let rust_username: String = env.get_string(&username).expect("Couldn't get java string!").into();
 
-    match init_timon(&rust_storage_path) {
+    match init_timon(&rust_storage_path, rust_bucket_interval, &rust_username) {
       Ok(result) => {
         let json_string = result.to_string();
         let output = env.new_string(json_string).expect("Couldn't create success string!");
@@ -31,7 +46,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_createDatabase(mut env: JNIEnv, _class: JClass, db_name: JString) -> jstring {
+  pub unsafe extern "C" fn nativeCreateDatabase(mut env: JNIEnv, _class: JClass, db_name: JString) -> jstring {
     let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
 
     match create_database(&rust_db_name) {
@@ -49,13 +64,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_createTable(
-    mut env: JNIEnv,
-    _class: JClass,
-    db_name: JString,
-    table_name: JString,
-    schema: JString,
-  ) -> jstring {
+  pub unsafe extern "C" fn nativeCreateTable(mut env: JNIEnv, _class: JClass, db_name: JString, table_name: JString, schema: JString) -> jstring {
     let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
     let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
     let rust_schema: String = env.get_string(&schema).expect("Couldn't get java string!").into();
@@ -75,7 +84,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_listDatabases(env: JNIEnv, _class: JClass) -> jstring {
+  pub unsafe extern "C" fn nativeListDatabases(env: JNIEnv, _class: JClass) -> jstring {
     match list_databases() {
       Ok(result) => {
         let json_string = result.to_string();
@@ -91,7 +100,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_listTables(mut env: JNIEnv, _class: JClass, db_name: JString) -> jstring {
+  pub unsafe extern "C" fn nativeListTables(mut env: JNIEnv, _class: JClass, db_name: JString) -> jstring {
     let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
 
     match list_tables(&rust_db_name) {
@@ -109,7 +118,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_deleteDatabase(mut env: JNIEnv, _class: JClass, db_name: JString) -> jstring {
+  pub unsafe extern "C" fn nativeDeleteDatabase(mut env: JNIEnv, _class: JClass, db_name: JString) -> jstring {
     let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
 
     match delete_database(&rust_db_name) {
@@ -127,12 +136,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_deleteTable(
-    mut env: JNIEnv,
-    _class: JClass,
-    db_name: JString,
-    table_name: JString,
-  ) -> jstring {
+  pub unsafe extern "C" fn nativeDeleteTable(mut env: JNIEnv, _class: JClass, db_name: JString, table_name: JString) -> jstring {
     let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
     let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
 
@@ -151,13 +155,7 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_insert(
-    mut env: JNIEnv,
-    _class: JClass,
-    db_name: JString,
-    table_name: JString,
-    json_data: JString,
-  ) -> jstring {
+  pub unsafe extern "C" fn nativeInsert(mut env: JNIEnv, _class: JClass, db_name: JString, table_name: JString, json_data: JString) -> jstring {
     let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
     let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
     let rust_json_data: String = env.get_string(&json_data).expect("Couldn't get java string!").into();
@@ -210,24 +208,21 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_query(
-    mut env: JNIEnv,
-    _class: JClass,
-    db_name: JString,
-    date_range: JObject,
-    sql_query: JString,
-  ) -> jstring {
+  pub unsafe extern "C" fn nativeQuery(mut env: JNIEnv, _class: JClass, db_name: JString, sql_query: JString, username: JString) -> jstring {
     // Convert Java strings to Rust strings
-    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
-    let rust_sql_query: String = env.get_string(&sql_query).expect("Couldn't get java string!").into();
+    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get db_name java string!").into();
+    let rust_sql_query: String = env.get_string(&sql_query).expect("Couldn't get sql_query java string!").into();
+    let rust_username: Option<String> = if username.is_null() {
+      None
+    } else {
+      Some(env.get_string(&username).expect("Couldn't get username java string!").into())
+    };
 
-    let mut rust_date_range: HashMap<&str, &str> = HashMap::new();
-    let rust_start = get_date_range_value(&mut env, &date_range, "start");
-    let rust_end = get_date_range_value(&mut env, &date_range, "end");
-    rust_date_range.insert("start_date", &rust_start);
-    rust_date_range.insert("end_date", &rust_end);
-
-    match Runtime::new().unwrap().block_on(query(&rust_db_name, rust_date_range, &rust_sql_query)) {
+    // Call the async query function
+    match Runtime::new()
+      .unwrap()
+      .block_on(query(&rust_db_name, &rust_sql_query, rust_username.as_deref()))
+    {
       Ok(result) => {
         let json_string = result.to_string();
         let output = env.new_string(json_string).expect("Couldn't create success string!");
@@ -244,20 +239,28 @@ pub mod android {
 
   // ******************************** S3 Compatible Storage ********************************
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_initBucket(
+  pub unsafe extern "C" fn nativeInitBucket(
     mut env: JNIEnv,
     _class: JClass,
     bucket_endpoint: JString,
     bucket_name: JString,
     access_key_id: JString,
     secret_access_key: JString,
+    bucket_region: JString,
   ) -> jstring {
     let rust_bucket_endpoint: String = env.get_string(&bucket_endpoint).expect("Couldn't get java string!").into();
     let rust_bucket_name: String = env.get_string(&bucket_name).expect("Couldn't get java string!").into();
     let rust_access_key_id: String = env.get_string(&access_key_id).expect("Couldn't get java string!").into();
     let rust_secret_access_key: String = env.get_string(&secret_access_key).expect("Couldn't get java string!").into();
+    let rust_bucket_region: String = env.get_string(&bucket_region).expect("Couldn't get java string!").into();
 
-    match init_bucket(&rust_bucket_endpoint, &rust_bucket_name, &rust_access_key_id, &rust_secret_access_key) {
+    match init_bucket(
+      &rust_bucket_endpoint,
+      &rust_bucket_name,
+      &rust_access_key_id,
+      &rust_secret_access_key,
+      &rust_bucket_region,
+    ) {
       Ok(result) => {
         let json_string = result.to_string();
         let output = env.new_string(json_string).expect("Couldn't create success string!");
@@ -272,14 +275,16 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_queryBucket(
+  pub unsafe extern "C" fn nativeCloudSyncParquet(
     mut env: JNIEnv,
     _class: JClass,
+    db_name: JString,
+    table_name: JString,
     date_range: JObject,
-    sql_query: JString,
+    username: JString,
   ) -> jstring {
-    // Convert Java strings to Rust strings
-    let rust_sql_query: String = env.get_string(&sql_query).expect("Couldn't get java string!").into();
+    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
+    let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
 
     let mut rust_date_range: HashMap<&str, &str> = HashMap::new();
     let rust_start = get_date_range_value(&mut env, &date_range, "start");
@@ -287,50 +292,244 @@ pub mod android {
     rust_date_range.insert("start_date", &rust_start);
     rust_date_range.insert("end_date", &rust_end);
 
-    match Runtime::new().unwrap().block_on(query_bucket(rust_date_range, &rust_sql_query)) {
-      Ok(result) => {
-        let json_string = result.to_string();
-        let output = env.new_string(json_string).expect("Couldn't create success string!");
-        output.into_raw()
-      }
-      Err(e) => {
-        let error_message = env
-          .new_string(format!("Error querying Parquet files: {:?}", e))
-          .expect("Couldn't create java string!");
-        error_message.into_raw()
-      }
-    }
-  }
+    let rust_username: Option<String> = if username.is_null() {
+      None
+    } else {
+      Some(env.get_string(&username).expect("Couldn't get username java string!").into())
+    };
 
-  #[no_mangle]
-  pub unsafe extern "C" fn Java_com_rustexample_TimonModule_sinkMonthlyParquet(
-    mut env: JNIEnv,
-    _class: JClass,
-    db_name: JString,
-    table_name: JString,
-  ) -> jstring {
-    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
-    let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
-
-    match Runtime::new().unwrap().block_on(sink_daily_parquet(&rust_db_name, &rust_table_name)) {
+    match Runtime::new().unwrap().block_on(cloud_sync_parquet(
+      &rust_db_name,
+      &rust_table_name,
+      rust_date_range,
+      rust_username.as_deref(),
+    )) {
       Ok(result) => {
         let json_string = result.to_string();
         let output = env.new_string(json_string).expect("Couldn't create success string!");
         output.into_raw()
       }
       Err(err) => {
-        let err_message = format!("Failed sink monthly parquet files: {:?}", err);
+        let err_message = format!("Failed fetch s3 parquet files: {:?}", err);
         let output = env.new_string(err_message).expect("Couldn't create error string!");
         output.into_raw()
       }
     }
   }
+
+  #[no_mangle]
+  pub unsafe extern "C" fn nativeCloudSinkParquet(mut env: JNIEnv, _class: JClass, db_name: JString, table_name: JString) -> jstring {
+    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
+    let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
+
+    match Runtime::new().unwrap().block_on(cloud_sink_parquet(&rust_db_name, &rust_table_name)) {
+      Ok(result) => {
+        let json_string = result.to_string();
+        let output = env.new_string(json_string).expect("Couldn't create success string!");
+        output.into_raw()
+      }
+      Err(err) => {
+        let err_message = format!("Failed sink parquet files: {:?}", err);
+        let output = env.new_string(err_message).expect("Couldn't create error string!");
+        output.into_raw()
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub unsafe extern "C" fn nativeCloudFetchParquet(
+    mut env: JNIEnv,
+    _class: JClass,
+    username: JString,
+    db_name: JString,
+    table_name: JString,
+    date_range: JObject,
+  ) -> jstring {
+    let rust_username: String = env.get_string(&username).expect("Couldn't get java string!").into();
+    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
+    let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
+
+    let mut rust_date_range: HashMap<&str, &str> = HashMap::new();
+    let rust_start = get_date_range_value(&mut env, &date_range, "start");
+    let rust_end = get_date_range_value(&mut env, &date_range, "end");
+    rust_date_range.insert("start_date", &rust_start);
+    rust_date_range.insert("end_date", &rust_end);
+
+    match Runtime::new()
+      .unwrap()
+      .block_on(cloud_fetch_parquet(&rust_username, &rust_db_name, &rust_table_name, rust_date_range))
+    {
+      Ok(result) => {
+        let json_string = result.to_string();
+        let output = env.new_string(json_string).expect("Couldn't create success string!");
+        output.into_raw()
+      }
+      Err(err) => {
+        let err_message = format!("Failed fetch s3 parquet files: {:?}", err);
+        let output = env.new_string(err_message).expect("Couldn't create error string!");
+        output.into_raw()
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub unsafe extern "C" fn nativeGetAllSyncMetadata(mut env: JNIEnv, _class: JClass, db_name: JString) -> jstring {
+    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
+
+    match get_all_sync_metadata(&rust_db_name) {
+      Ok(result) => {
+        let json_string = result.to_string();
+        let output = env.new_string(json_string).expect("Couldn't create success string!");
+        output.into_raw()
+      }
+      Err(err) => {
+        let err_message = format!("Failed to get all sync metadata: {:?}", err);
+        let output = env.new_string(err_message).expect("Couldn't create error string!");
+        output.into_raw()
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub unsafe extern "C" fn nativeGetSyncMetadata(mut env: JNIEnv, _class: JClass, db_name: JString, table_name: JString) -> jstring {
+    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
+    let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
+
+    match get_sync_metadata(&rust_db_name, &rust_table_name) {
+      Ok(result) => {
+        let json_string = result.to_string();
+        let output = env.new_string(json_string).expect("Couldn't create success string!");
+        output.into_raw()
+      }
+      Err(err) => {
+        let err_message = format!("Failed to get sync metadata: {:?}", err);
+        let output = env.new_string(err_message).expect("Couldn't create error string!");
+        output.into_raw()
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub extern "C" fn JNI_OnLoad(vm: jni::JavaVM, _reserved: *mut std::ffi::c_void) -> jni::sys::jint {
+    let mut env = vm.get_env().expect("Failed to get JNIEnv");
+
+    // Get the Application Context
+    let activity_thread = env.find_class("android/app/ActivityThread").expect("Failed to find ActivityThread");
+    let current_activity_thread = env
+      .call_static_method(activity_thread, "currentActivityThread", "()Landroid/app/ActivityThread;", &[])
+      .expect("Failed to get currentActivityThread")
+      .l()
+      .expect("Failed to convert to object");
+    let app_context = env
+      .call_method(current_activity_thread, "getApplication", "()Landroid/app/Application;", &[])
+      .expect("Failed to get Application context")
+      .l()
+      .expect("Failed to convert to object");
+
+    // Get the Package Name
+    let package_name = env
+      .call_method(app_context, "getPackageName", "()Ljava/lang/String;", &[])
+      .expect("Failed to get package name")
+      .l()
+      .expect("Failed to convert to object");
+    let package_name: String = env
+      .get_string(&JString::from(package_name))
+      .expect("Failed to convert package name to Rust string")
+      .into();
+
+    // Construct the Dynamic Class Name
+    let class_name = format!("{}/TimonModule", package_name.replace(".", "/"));
+    let class = env.find_class(&class_name).expect(&format!("Failed to find class: {}", class_name));
+
+    let methods = [
+      NativeMethod {
+        name: "nativeInitTimon".into(),
+        sig: "(Ljava/lang/String;ILjava/lang/String;)Ljava/lang/String;".into(),
+        fn_ptr: nativeInitTimon as *mut c_void,
+      },
+      NativeMethod {
+        name: "nativeCreateDatabase".into(),
+        sig: "(Ljava/lang/String;)Ljava/lang/String;".into(),
+        fn_ptr: nativeCreateDatabase as *mut c_void,
+      },
+      NativeMethod {
+        name: "nativeCreateTable".into(),
+        sig: "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;".into(),
+        fn_ptr: nativeCreateTable as *mut c_void,
+      },
+      NativeMethod {
+        name: "nativeListDatabases".into(),
+        sig: "()Ljava/lang/String;".into(),
+        fn_ptr: nativeListDatabases as *mut c_void,
+      },
+      NativeMethod {
+        name: "nativeListTables".into(),
+        sig: "(Ljava/lang/String;)Ljava/lang/String;".into(),
+        fn_ptr: nativeListTables as *mut c_void,
+      },
+      NativeMethod {
+        name: "nativeDeleteDatabase".into(),
+        sig: "(Ljava/lang/String;)Ljava/lang/String;".into(),
+        fn_ptr: nativeDeleteDatabase as *mut c_void,
+      },
+      NativeMethod {
+        name: "nativeDeleteTable".into(),
+        sig: "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;".into(),
+        fn_ptr: nativeDeleteTable as *mut c_void,
+      },
+      NativeMethod {
+        name: "nativeInsert".into(),
+        sig: "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;".into(),
+        fn_ptr: nativeInsert as *mut c_void,
+      },
+      NativeMethod {
+        name: "nativeQuery".into(),
+        sig: "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;".into(),
+        fn_ptr: nativeQuery as *mut c_void,
+      },
+      NativeMethod {
+        name: "nativeInitBucket".into(),
+        sig: "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;".into(),
+        fn_ptr: nativeInitBucket as *mut c_void,
+      },
+      NativeMethod {
+        name: "nativeCloudSyncParquet".into(),
+        sig: "(Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;Ljava/lang/String;)Ljava/lang/String;".into(),
+        fn_ptr: nativeCloudSyncParquet as *mut c_void,
+      },
+      NativeMethod {
+        name: "nativeCloudSinkParquet".into(),
+        sig: "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;".into(),
+        fn_ptr: nativeCloudSinkParquet as *mut c_void,
+      },
+      NativeMethod {
+        name: "nativeCloudFetchParquet".into(),
+        sig: "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;)Ljava/lang/String;".into(),
+        fn_ptr: nativeCloudFetchParquet as *mut c_void,
+      },
+      NativeMethod {
+        name: "nativeGetAllSyncMetadata".into(),
+        sig: "(Ljava/lang/String;)Ljava/lang/String;".into(),
+        fn_ptr: nativeGetAllSyncMetadata as *mut c_void,
+      },
+      NativeMethod {
+        name: "nativeGetSyncMetadata".into(),
+        sig: "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;".into(),
+        fn_ptr: nativeGetSyncMetadata as *mut c_void,
+      },
+    ];
+
+    env.register_native_methods(class, &methods).expect("Failed to register native methods");
+    jni::sys::JNI_VERSION_1_8
+  }
 }
 
 #[cfg(target_os = "ios")]
 pub mod ios {
-  use crate::timon_engine::{create_database, create_table, delete_database, delete_table, init_timon, insert, list_databases, list_tables, query};
-  use crate::timon_engine::{init_bucket, query_bucket, sink_daily_parquet};
+  use crate::timon_engine::{
+    cloud_fetch_parquet, cloud_sink_parquet, cloud_sync_parquet, create_database, create_table, delete_database, delete_table, get_all_sync_metadata,
+    get_sync_metadata, init_bucket, init_timon, insert, list_databases, list_tables, query,
+  };
   use libc::c_char;
   use std::collections::HashMap;
   use std::ffi::{CStr, CString};
@@ -361,11 +560,12 @@ pub mod ios {
       }
     }
   }
+
   #[no_mangle]
-  pub extern "C" fn Java_com_rustexample_TimonModule_initTimon(storage_path: *const c_char) -> *mut c_char {
+  pub extern "C" fn nativeInitTimon(storage_path: *const c_char, bucket_interval: u32, username: *const c_char) -> *mut c_char {
     unsafe {
-      match c_str_to_string(storage_path) {
-        Ok(rust_storage_path) => match init_timon(&rust_storage_path) {
+      match (c_str_to_string(storage_path), c_str_to_string(username)) {
+        (Ok(rust_storage_path), Ok(rust_username)) => match init_timon(&rust_storage_path, bucket_interval, &rust_username) {
           Ok(result) => {
             let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
             string_to_c_str(json_string)
@@ -375,7 +575,7 @@ pub mod ios {
             string_to_c_str(err_message)
           }
         },
-        Err(err) => {
+        (Err(err), _) | (_, Err(err)) => {
           let err_message = serde_json::json!({ "error": err }).to_string();
           string_to_c_str(err_message)
         }
@@ -384,7 +584,7 @@ pub mod ios {
   }
 
   #[no_mangle]
-  pub extern "C" fn Java_com_rustexample_TimonModule_createDatabase(db_name: *const c_char) -> *mut c_char {
+  pub extern "C" fn nativeCreateDatabase(db_name: *const c_char) -> *mut c_char {
     unsafe {
       match c_str_to_string(db_name) {
         Ok(rust_db_name) => match create_database(&rust_db_name) {
@@ -406,11 +606,7 @@ pub mod ios {
   }
 
   #[no_mangle]
-  pub extern "C" fn Java_com_rustexample_TimonModule_createTable(
-    db_name: *const c_char,
-    table_name: *const c_char,
-    schema: *const c_char,
-  ) -> *mut c_char {
+  pub extern "C" fn nativeCreateTable(db_name: *const c_char, table_name: *const c_char, schema: *const c_char) -> *mut c_char {
     unsafe {
       match (c_str_to_string(db_name), c_str_to_string(table_name), c_str_to_string(schema)) {
         (Ok(rust_db_name), Ok(rust_table_name), Ok(rust_schema)) => match create_table(&rust_db_name, &rust_table_name, &rust_schema) {
@@ -432,7 +628,7 @@ pub mod ios {
   }
 
   #[no_mangle]
-  pub extern "C" fn Java_com_rustexample_TimonModule_listDatabases() -> *mut c_char {
+  pub extern "C" fn nativeListDatabases() -> *mut c_char {
     match list_databases() {
       Ok(result) => {
         let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "[]".to_string());
@@ -446,7 +642,7 @@ pub mod ios {
   }
 
   #[no_mangle]
-  pub extern "C" fn Java_com_rustexample_TimonModule_listTables(db_name: *const c_char) -> *mut c_char {
+  pub extern "C" fn nativeListTables(db_name: *const c_char) -> *mut c_char {
     unsafe {
       match c_str_to_string(db_name) {
         Ok(rust_db_name) => match list_tables(&rust_db_name) {
@@ -468,7 +664,7 @@ pub mod ios {
   }
 
   #[no_mangle]
-  pub extern "C" fn Java_com_rustexample_TimonModule_deleteDatabase(db_name: *const c_char) -> *mut c_char {
+  pub extern "C" fn nativeDeleteDatabase(db_name: *const c_char) -> *mut c_char {
     unsafe {
       match c_str_to_string(db_name) {
         Ok(rust_db_name) => match delete_database(&rust_db_name) {
@@ -490,7 +686,7 @@ pub mod ios {
   }
 
   #[no_mangle]
-  pub extern "C" fn Java_com_rustexample_TimonModule_deleteTable(db_name: *const c_char, table_name: *const c_char) -> *mut c_char {
+  pub extern "C" fn nativeDeleteTable(db_name: *const c_char, table_name: *const c_char) -> *mut c_char {
     unsafe {
       match (c_str_to_string(db_name), c_str_to_string(table_name)) {
         (Ok(rust_db_name), Ok(rust_table_name)) => match delete_table(&rust_db_name, &rust_table_name) {
@@ -512,11 +708,7 @@ pub mod ios {
   }
 
   #[no_mangle]
-  pub extern "C" fn Java_com_rustexample_TimonModule_insert(
-    db_name: *const c_char,
-    table_name: *const c_char,
-    json_data: *const c_char,
-  ) -> *mut c_char {
+  pub extern "C" fn nativeInsert(db_name: *const c_char, table_name: *const c_char, json_data: *const c_char) -> *mut c_char {
     unsafe {
       match (c_str_to_string(db_name), c_str_to_string(table_name), c_str_to_string(json_data)) {
         (Ok(rust_db_name), Ok(rust_table_name), Ok(rust_json_data)) => match insert(&rust_db_name, &rust_table_name, &rust_json_data) {
@@ -538,24 +730,14 @@ pub mod ios {
   }
 
   #[no_mangle]
-  pub extern "C" fn Java_com_rustexample_TimonModule_query(
-    db_name: *const c_char,
-    date_range_json: *const c_char,
-    sql_query: *const c_char,
-  ) -> *mut c_char {
+  pub extern "C" fn nativeQuery(db_name: *const c_char, sql_query: *const c_char, username: *const c_char) -> *mut c_char {
     unsafe {
-      match (c_str_to_string(db_name), c_str_to_string(date_range_json), c_str_to_string(sql_query)) {
-        (Ok(rust_db_name), Ok(rust_date_range_json), Ok(rust_sql_query)) => {
-          // Parse date_range_json into HashMap
-          let rust_date_range: HashMap<String, String> = serde_json::from_str(&rust_date_range_json).unwrap_or_default();
-          let start_date = rust_date_range.get("start").cloned().unwrap_or_else(|| "1970-01-01".to_string());
-          let end_date = rust_date_range.get("end").cloned().unwrap_or_else(|| "1970-01-02".to_string());
-
-          let mut date_range_map = HashMap::new();
-          date_range_map.insert("start_date", start_date.as_str());
-          date_range_map.insert("end_date", end_date.as_str());
-
-          match Runtime::new().unwrap().block_on(query(&rust_db_name, date_range_map, &rust_sql_query)) {
+      match (c_str_to_string(db_name), c_str_to_string(sql_query), c_str_to_string(username).ok()) {
+        (Ok(rust_db_name), Ok(rust_sql_query), rust_username) => {
+          match Runtime::new()
+            .unwrap()
+            .block_on(query(&rust_db_name, &rust_sql_query, rust_username.as_deref()))
+          {
             Ok(result) => {
               let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "[]".to_string());
               string_to_c_str(json_string)
@@ -576,11 +758,12 @@ pub mod ios {
 
   // ******************************** S3 Compatible Storage ********************************
   #[no_mangle]
-  pub extern "C" fn Java_com_rustexample_TimonModule_initBucket(
+  pub extern "C" fn nativeInitBucket(
     bucket_endpoint: *const c_char,
     bucket_name: *const c_char,
     access_key_id: *const c_char,
     secret_access_key: *const c_char,
+    bucket_region: *const c_char,
   ) -> *mut c_char {
     unsafe {
       match (
@@ -588,9 +771,16 @@ pub mod ios {
         c_str_to_string(bucket_name),
         c_str_to_string(access_key_id),
         c_str_to_string(secret_access_key),
+        c_str_to_string(bucket_region),
       ) {
-        (Ok(rust_bucket_endpoint), Ok(rust_bucket_name), Ok(rust_access_key_id), Ok(rust_secret_access_key)) => {
-          match init_bucket(&rust_bucket_endpoint, &rust_bucket_name, &rust_access_key_id, &rust_secret_access_key) {
+        (Ok(rust_bucket_endpoint), Ok(rust_bucket_name), Ok(rust_access_key_id), Ok(rust_secret_access_key), Ok(rust_bucket_region)) => {
+          match init_bucket(
+            &rust_bucket_endpoint,
+            &rust_bucket_name,
+            &rust_access_key_id,
+            &rust_secret_access_key,
+            &rust_bucket_region,
+          ) {
             Ok(result) => {
               let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
               string_to_c_str(json_string)
@@ -610,30 +800,87 @@ pub mod ios {
   }
 
   #[no_mangle]
-  pub extern "C" fn Java_com_rustexample_TimonModule_queryBucket(date_range_json: *const c_char, sql_query: *const c_char) -> *mut c_char {
+  pub extern "C" fn nativeCloudSyncParquet(
+    db_name: *const c_char,
+    table_name: *const c_char,
+    date_range_json: *const c_char,
+    username: *const c_char,
+  ) -> *mut c_char {
     unsafe {
-      match (c_str_to_string(date_range_json), c_str_to_string(sql_query)) {
-        (Ok(rust_date_range_json), Ok(rust_sql_query)) => {
+      match (
+        c_str_to_string(db_name),
+        c_str_to_string(table_name),
+        c_str_to_string(date_range_json),
+        c_str_to_string(username).ok(),
+      ) {
+        (Ok(rust_db_name), Ok(rust_table_name), Ok(rust_date_range_json), rust_username) => {
           // Parse date_range_json into HashMap
-          let rust_date_range: HashMap<String, String> = serde_json::from_str(&rust_date_range_json).unwrap_or_default();
-          let start_date = rust_date_range.get("start").cloned().unwrap_or_else(|| "1970-01-01".to_string());
-          let end_date = rust_date_range.get("end").cloned().unwrap_or_else(|| "1970-01-02".to_string());
+          let rust_date_range: HashMap<String, String> = match serde_json::from_str(&rust_date_range_json) {
+            Ok(map) => map,
+            Err(e) => {
+              let err_message = serde_json::json!({
+                "error": format!("Failed to parse date_range_json: {}. Input was: '{}'", e, rust_date_range_json)
+              })
+              .to_string();
+              return string_to_c_str(err_message);
+            }
+          };
+
+          let start_date = rust_date_range.get("start").cloned().unwrap_or_else(|| {
+            println!("Warning: 'start' key not found in date_range_json, using default");
+            "1970-01-01".to_string()
+          });
+
+          let end_date = rust_date_range.get("end").cloned().unwrap_or_else(|| {
+            println!("Warning: 'end' key not found in date_range_json, using default");
+            "1970-01-02".to_string()
+          });
 
           let mut date_range_map = HashMap::new();
           date_range_map.insert("start_date", start_date.as_str());
           date_range_map.insert("end_date", end_date.as_str());
 
-          match Runtime::new().unwrap().block_on(query_bucket(date_range_map, &rust_sql_query)) {
+          match Runtime::new().unwrap().block_on(cloud_sync_parquet(
+            &rust_db_name,
+            &rust_table_name,
+            date_range_map,
+            rust_username.as_deref(),
+          )) {
             Ok(result) => {
-              let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "[]".to_string());
+              let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
               string_to_c_str(json_string)
             }
             Err(err) => {
-              let err_message = serde_json::json!({ "error": format!("Error querying bucket: {:?}", err) }).to_string();
+              let err_message = serde_json::json!({ "error": format!("Error syncing parquet files: {}", err) }).to_string();
               string_to_c_str(err_message)
             }
           }
         }
+        _ => {
+          let err_message = serde_json::json!({
+            "error": "Invalid arguments to nativeCloudSyncParquet function. Ensure all parameters are valid strings."
+          })
+          .to_string();
+          string_to_c_str(err_message)
+        }
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub extern "C" fn nativeCloudSinkParquet(db_name: *const c_char, table_name: *const c_char) -> *mut c_char {
+    unsafe {
+      match (c_str_to_string(db_name), c_str_to_string(table_name)) {
+        (Ok(rust_db_name), Ok(rust_table_name)) => match Runtime::new().unwrap().block_on(cloud_sink_parquet(&rust_db_name, &rust_table_name)) {
+          Ok(result) => {
+            let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
+            string_to_c_str(json_string)
+          }
+          Err(err) => {
+            let err_message = serde_json::json!({ "error": format!("Failed to sink Parquet files: {:?}", err) }).to_string();
+            string_to_c_str(err_message)
+          }
+        },
         _ => {
           let err_message = serde_json::json!({ "error": "Invalid arguments" }).to_string();
           string_to_c_str(err_message)
@@ -643,21 +890,109 @@ pub mod ios {
   }
 
   #[no_mangle]
-  pub extern "C" fn Java_com_rustexample_TimonModule_sinkMonthlyParquet(db_name: *const c_char, table_name: *const c_char) -> *mut c_char {
+  pub extern "C" fn nativeCloudFetchParquet(
+    username: *const c_char,
+    db_name: *const c_char,
+    table_name: *const c_char,
+    date_range_json: *const c_char,
+  ) -> *mut c_char {
+    unsafe {
+      match (
+        c_str_to_string(username),
+        c_str_to_string(db_name),
+        c_str_to_string(table_name),
+        c_str_to_string(date_range_json),
+      ) {
+        (Ok(rust_username), Ok(rust_db_name), Ok(rust_table_name), Ok(rust_date_range_json)) => {
+          // Parse date_range_json into HashMap
+          let rust_date_range: HashMap<String, String> = match serde_json::from_str(&rust_date_range_json) {
+            Ok(map) => map,
+            Err(e) => {
+              let err_message = serde_json::json!({
+                "error": format!("Failed to parse date_range_json: {}. Input was: '{}'", e, rust_date_range_json)
+              })
+              .to_string();
+              return string_to_c_str(err_message);
+            }
+          };
+
+          let start_date = rust_date_range.get("start").cloned().unwrap_or_else(|| {
+            println!("Warning: 'start' key not found in date_range_json, using default");
+            "1970-01-01".to_string()
+          });
+
+          let end_date = rust_date_range.get("end").cloned().unwrap_or_else(|| {
+            println!("Warning: 'end' key not found in date_range_json, using default");
+            "1970-01-02".to_string()
+          });
+
+          let mut date_range_map = HashMap::new();
+          date_range_map.insert("start_date", start_date.as_str());
+          date_range_map.insert("end_date", end_date.as_str());
+
+          match Runtime::new()
+            .unwrap()
+            .block_on(cloud_fetch_parquet(&rust_username, &rust_db_name, &rust_table_name, date_range_map))
+          {
+            Ok(result) => {
+              let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
+              string_to_c_str(json_string)
+            }
+            Err(err) => {
+              let err_message = serde_json::json!({ "error": format!("Failed to fetch s3 Parquet files: {}", err) }).to_string();
+              string_to_c_str(err_message)
+            }
+          }
+        }
+        _ => {
+          let err_message = serde_json::json!({
+            "error": "Invalid arguments to nativeCloudFetchParquet function. Ensure all parameters are valid strings."
+          })
+          .to_string();
+          string_to_c_str(err_message)
+        }
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub extern "C" fn nativeGetAllSyncMetadata(db_name: *const c_char) -> *mut c_char {
+    unsafe {
+      match c_str_to_string(db_name) {
+        Ok(rust_db_name) => match get_all_sync_metadata(&rust_db_name) {
+          Ok(result) => {
+            let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "[]".to_string());
+            string_to_c_str(json_string)
+          }
+          Err(err) => {
+            let err_message = serde_json::json!({ "error": format!("Failed to get all sync metadata: {:?}", err) }).to_string();
+            string_to_c_str(err_message)
+          }
+        },
+        Err(err) => {
+          let err_message = serde_json::json!({ "error": err }).to_string();
+          string_to_c_str(err_message)
+        }
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub extern "C" fn nativeGetSyncMetadata(db_name: *const c_char, table_name: *const c_char) -> *mut c_char {
     unsafe {
       match (c_str_to_string(db_name), c_str_to_string(table_name)) {
-        (Ok(rust_db_name), Ok(rust_table_name)) => match Runtime::new().unwrap().block_on(sink_daily_parquet(&rust_db_name, &rust_table_name)) {
+        (Ok(rust_db_name), Ok(rust_table_name)) => match get_sync_metadata(&rust_db_name, &rust_table_name) {
           Ok(result) => {
             let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
             string_to_c_str(json_string)
           }
           Err(err) => {
-            let err_message = serde_json::json!({ "error": format!("Failed to sink monthly Parquet files: {:?}", err) }).to_string();
+            let err_message = serde_json::json!({ "error": format!("Failed to get sync metadata: {:?}", err) }).to_string();
             string_to_c_str(err_message)
           }
         },
-        _ => {
-          let err_message = serde_json::json!({ "error": "Invalid arguments" }).to_string();
+        (Err(e), _) | (_, Err(e)) => {
+          let err_message = serde_json::json!({ "error": e }).to_string();
           string_to_c_str(err_message)
         }
       }

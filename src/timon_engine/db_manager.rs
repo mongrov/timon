@@ -1,22 +1,29 @@
-use arrow::record_batch::RecordBatch;
-use chrono::Utc;
+use super::helpers::{
+  build_rules_tree, extract_partition_time, extract_query_time_range, extract_table_name, get_monthly_partition_overlaps, get_property_fields,
+  get_table_columns, json_to_arrow, record_batches_to_json, rounded_timestamp, row_to_json,
+};
+use chrono::{NaiveDateTime, TimeZone, Utc};
+use datafusion::arrow::array::Array;
+use datafusion::arrow::datatypes::Schema;
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::dataframe::DataFrame;
 use datafusion::datasource::MemTable;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
+use datafusion::parquet::arrow::ArrowWriter;
+use datafusion::parquet::file::properties::WriterProperties;
+use datafusion::parquet::file::reader::{FileReader, SerializedFileReader};
 use datafusion::prelude::*;
-use parquet::arrow::ArrowWriter;
-use parquet::file::properties::WriterProperties;
-use parquet::file::reader::{FileReader, SerializedFileReader};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::HashMap;
+use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
+use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use std::{fmt, fs};
 use tokio::io::Result as TokioResult;
-
-use super::helpers::{extract_table_name, generate_paths, get_unique_fields, json_to_arrow, record_batches_to_json, row_to_json, Granularity};
 
 pub enum DataFusionOutput {
   Json(Value),
@@ -51,8 +58,13 @@ struct Database {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Table {
-  path: String,              // Path to the table
-  schema: serde_json::Value, // Placeholder for your schema structure (optional)
+  path: String,                         // Path to the table
+  schema: serde_json::Value,            // Placeholder for your schema structure (optional)
+  last_sync_time: Option<String>,       // ISO 8601 timestamp of last successful sync
+  last_sync_type: Option<String>,       // "sync" or "sink" to indicate sync type
+  last_sync_operation: Option<String>,  // ISO 8601 timestamp of last sync operation
+  last_sink_operation: Option<String>,  // ISO 8601 timestamp of last sink operation
+  last_fetch_operation: Option<String>, // ISO 8601 timestamp of last fetch operation
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -62,13 +74,16 @@ struct DatabaseInfo {
 
 #[derive(Clone)]
 pub struct DatabaseManager {
+  pub storage_path: String,
+  pub username: String,
   metadata: Metadata,
   data_path: String,
   metadata_path: String,
+  bucket_interval: u32,
 }
 
 impl DatabaseManager {
-  pub fn new(storage_path: &str) -> Self {
+  pub fn new(storage_path: &str, bucket_interval: u32, username: &str) -> Self {
     let data_path = format!("{}/data", storage_path);
     let metadata_path = format!("{}/metadata.json", storage_path);
 
@@ -101,11 +116,21 @@ impl DatabaseManager {
     };
 
     // Create DatabaseManager instance
-    DatabaseManager {
+    let mut db_manager = DatabaseManager {
+      storage_path: storage_path.to_string(),
       metadata,
       data_path,
       metadata_path,
+      bucket_interval,
+      username: username.to_string(),
+    };
+
+    // Update metadata with the provided storage_path
+    if let Err(e) = db_manager.update_metadata(storage_path) {
+      eprintln!("Error updating metadata: {}", e);
     }
+
+    db_manager
   }
 
   pub fn create_database(&mut self, db_name: &str) -> Result<(), DataFusionError> {
@@ -170,7 +195,15 @@ impl DatabaseManager {
     fs::create_dir_all(&table_path)?;
 
     // Store the schema for future validation during inserts
-    let table = Table { schema, path: table_path };
+    let table = Table {
+      schema,
+      path: table_path,
+      last_sync_time: None,
+      last_sync_type: None,
+      last_sync_operation: None,
+      last_sink_operation: None,
+      last_fetch_operation: None,
+    };
     database.tables.insert(table_name.to_string(), table);
 
     // Persist the metadata to disk (e.g., in a metadata.json or similar)
@@ -272,98 +305,466 @@ impl DatabaseManager {
     }
   }
 
-  fn save_metadata(&self) -> TokioResult<()> {
-    // Serialize the metadata structure and save it to the file
-    let json = serde_json::to_string(&self.metadata)?;
-    fs::write(&self.metadata_path, json)?;
-    Ok(())
-  }
+  pub fn insert(&mut self, db_name: &str, table_name: &str, json_data: &str) -> Result<Vec<Value>, Box<dyn Error>> {
+    // Reload metadata
+    self.metadata = self.read_metadata()?;
 
-  pub fn insert(&mut self, db_name: &str, table_name: &str, json_data: &str) -> Result<String, Box<dyn Error>> {
-    // Reload the metadata to ensure it's up to date
-    self.metadata = self
-      .read_metadata()
-      .map_err(|e| DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))
-      .unwrap();
+    let mut new_json_values: Vec<Value> = serde_json::from_str(json_data)?;
+    let table_path = self
+      .get_table_path(db_name, table_name)
+      .ok_or_else(|| format!("Database '{}' or Table '{}' does not exist.", db_name, table_name))?;
+    let table_schema = self.get_table_schema(db_name, table_name)?;
 
-    // Parse the JSON data
-    let json_values: Vec<Value> = serde_json::from_str(json_data)?;
-
-    // Check if the database and table exist
-    let table_path = self.get_table_path(db_name, table_name);
-    if table_path.is_none() {
-      return Err(format!("Database '{}' or Table '{}' does not exist.", db_name, table_name).into());
+    let conditions = build_rules_tree(table_schema.clone());
+    let mut invalid_json_values = Vec::new();
+    if !conditions.is_empty() {
+      let tree = json_rules_engine::and(conditions);
+      for json_value in &new_json_values {
+        let result = tree.check_value(json_value);
+        if result.status == json_rules_engine::Status::NotMet {
+          println!("record condition mismatch: {}", json_value);
+          invalid_json_values.push(json_value.clone());
+        }
+      }
     }
 
-    let table_schema = self.get_table_schema(db_name, table_name)?;
-    for json_value in &json_values {
+    let datetime_binding = get_property_fields(&table_schema, "datetime")?;
+    let datetime_field = datetime_binding
+      .get(0)
+      .ok_or_else(|| format!("No 'datetime' field found in the table schema."))?;
+    let unique_fields = get_property_fields(&table_schema, "unique")?;
+
+    let build_key = |record: &Value| -> String {
+      unique_fields
+        .iter()
+        .map(|field| record.get(field).map(|v| v.to_string()).unwrap_or_default())
+        .collect::<Vec<String>>()
+        .join("-")
+    };
+
+    // Ensure datetime fields are present and convert them to timestamps
+    for json_value in new_json_values.iter_mut() {
+      match json_value.get(datetime_field) {
+        Some(Value::String(date_str)) => {
+          let parsed_timestamp = NaiveDateTime::parse_from_str(date_str, "%Y.%m.%d %H:%M:%S")
+            .or_else(|_| NaiveDateTime::parse_from_str(date_str, "%Y-%m-%dT%H:%M:%S%.3fZ"))
+            .or_else(|_| NaiveDateTime::parse_from_str(date_str, "%Y-%m-%dT%H:%M:%S%.fZ"))
+            .or_else(|_| NaiveDateTime::parse_from_str(date_str, "%Y-%m-%d %H:%M:%S"))
+            .map(|naive_dt| Utc.from_utc_datetime(&naive_dt).timestamp());
+
+          match parsed_timestamp {
+            Ok(timestamp) => {
+              json_value[datetime_field] = json!(timestamp);
+            }
+            Err(_) => return Err(format!("Invalid datetime format for field '{}'.", datetime_field).into()),
+          }
+        }
+        _ => return Err(format!("Missing required datetime field: '{}'.", datetime_field).into()),
+      }
+    }
+
+    for json_value in &new_json_values {
       self.validate_data_against_schema(&table_schema, json_value)?;
     }
 
-    let current_date = Utc::now().format("%Y-%m-%d").to_string();
-    let file_path = format!("{}/{}_{}.parquet", table_path.unwrap(), table_name, current_date);
+    // Load existing records from partitioned files
+    let file_list = self.build_files_list(db_name, table_name, None)?;
+    let mut file_records: HashMap<String, Vec<Value>> = HashMap::new();
+    let mut record_index: HashMap<String, (String, usize)> = HashMap::new(); // key -> (file_path, record_index)
 
-    // Convert JSON data to Arrow arrays
-    let (new_arrays, new_schema) = json_to_arrow(&json_values)?;
-
-    let path = Path::new(&file_path);
-    if path.exists() {
-      let existing_json_values = self.read_parquet_file(&file_path)?;
-      let mut combined_json_values = existing_json_values;
-      combined_json_values.extend(json_values);
-
-      // Check and update deduplicated field values
-      let unique_fields = get_unique_fields(table_schema)?;
-      if !unique_fields.is_empty() {
-        let mut seen: HashMap<String, serde_json::Value> = HashMap::new();
-        for record in combined_json_values.iter() {
-          let key = unique_fields
-            .iter()
-            .map(|field| record.get(field).map(|v| v.to_string()).unwrap_or_default())
-            .collect::<Vec<String>>()
-            .join("-");
-          // Update the record in the map with the latest entry
-          seen.insert(key, record.clone());
+    for file in &file_list {
+      if let Ok(existing_records) = self.read_parquet_file(file) {
+        for (index, record) in existing_records.iter().enumerate() {
+          let key = build_key(record);
+          record_index.insert(key, (file.clone(), index));
         }
-        // Replace the original vector with updated values
-        combined_json_values = seen.into_values().collect();
+        file_records.insert(file.clone(), existing_records);
       }
-
-      // Convert combined data to Arrow arrays
-      let (combined_arrays, combined_schema) = json_to_arrow(&combined_json_values)?;
-
-      // Create a Parquet writer
-      let file = fs::File::create(&path)?;
-      let props = WriterProperties::builder().build();
-      let mut writer = ArrowWriter::try_new(file, Arc::new(combined_schema.clone()), Some(props))?;
-
-      // Write the combined record batch to the Parquet file
-      let combined_batch = RecordBatch::try_new(Arc::new(combined_schema), combined_arrays)?;
-      writer.write(&combined_batch)?;
-
-      // Close the writer to ensure data is written to the file
-      writer.close()?;
-    } else {
-      // Create a new Parquet file with the new data
-      let file = fs::File::create(&path)?;
-      let props = WriterProperties::builder().build();
-      let mut writer = ArrowWriter::try_new(file, Arc::new(new_schema.clone()), Some(props))?;
-
-      // Write the record batch to the Parquet file
-      let record_batch = RecordBatch::try_new(Arc::new(new_schema), new_arrays)?;
-      writer.write(&record_batch)?;
-
-      // Close the writer to ensure data is written to the file
-      writer.close()?;
     }
 
-    Ok(format!("Data was successfully written to '{}'", file_path))
+    let mut seen_records: HashMap<String, Value> = HashMap::new();
+    let mut updated_files = HashSet::new();
+    let mut new_records_by_file: HashMap<String, Vec<Value>> = HashMap::new();
+
+    for new_record in new_json_values.into_iter() {
+      let key = build_key(&new_record);
+      if seen_records.insert(key.clone(), new_record.clone()).is_some() {
+        continue;
+      }
+
+      let timestamp = new_record.get(datetime_field).and_then(|t| t.as_i64()).unwrap_or(0);
+      let partition_name = format!(
+        "{}_{}.parquet",
+        table_name,
+        rounded_timestamp(timestamp.try_into().unwrap(), self.bucket_interval)
+      );
+      let target_file = format!("{}/{}", table_path, partition_name);
+
+      if let Some((file, index)) = record_index.get(&key) {
+        // Update existing record in-place
+        if let Some(records) = file_records.get_mut(file) {
+          records[*index] = new_record;
+          updated_files.insert(file.clone());
+        }
+      } else {
+        // Ensure we create the correct partitioned file instead of writing to an existing one
+        new_records_by_file.entry(target_file.clone()).or_insert_with(Vec::new).push(new_record);
+        updated_files.insert(target_file.clone());
+      }
+    }
+
+    // Create new files if needed and insert records into the correct partition
+    for (file, new_records) in new_records_by_file {
+      file_records.entry(file.clone()).or_insert_with(Vec::new).extend(new_records);
+    }
+
+    // Write updated and newly created files
+    for (file, records) in file_records {
+      if updated_files.contains(&file) {
+        let (arrays, schema) = json_to_arrow(&records)?;
+        Self::parquet_file_writer(Path::new(&file), schema, arrays)?;
+      }
+    }
+
+    // Enforce row limits if configured for this table
+    if let Err(e) = self.enforce_row_limits(db_name, table_name, datetime_field) {
+      eprintln!("Warning: Failed to enforce row limits for table '{}.{}': {}", db_name, table_name, e);
+    }
+
+    Ok(invalid_json_values)
+  }
+
+  pub async fn query(&self, db_name: &str, sql_query: &str, username: Option<&str>, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
+    let session_context = SessionContext::new();
+    let table_name = extract_table_name(sql_query);
+    let query_time_range = extract_query_time_range(sql_query, self.bucket_interval);
+
+    let files_list_default_path = self
+      .build_files_list(db_name, &table_name, username)
+      .map_err(|e| DataFusionError::Execution(format!("Error building files list: {}", e)))?;
+
+    let files_list_group_path = username.map(|_| Vec::new()).unwrap_or_else(|| {
+      self
+        .build_files_list(db_name, &table_name, Some(&self.username))
+        .map_err(|e| DataFusionError::Execution(format!("Error building files list: {}", e)))
+        .unwrap_or_default()
+    });
+
+    let mut unique_files: HashSet<String> = HashSet::new();
+    let mut merged_files = Vec::new();
+
+    // Prioritize group path files, then add default path files if not present
+    for file in files_list_group_path.iter().chain(files_list_default_path.iter()) {
+      let file_name = Path::new(file).file_name().unwrap().to_string_lossy().to_string();
+      if unique_files.insert(file_name.clone()) {
+        merged_files.push(file.clone());
+      }
+    }
+
+    let filtered_files = if let Some((start_time, end_time)) = query_time_range {
+      merged_files
+        .into_iter()
+        .filter(|file_path| {
+          let partition_time = extract_partition_time(file_path);
+          if self.bucket_interval >= 43200 {
+            get_monthly_partition_overlaps(partition_time, start_time, end_time)
+          } else {
+            partition_time >= start_time && partition_time <= end_time
+          }
+        })
+        .collect::<Vec<_>>()
+    } else {
+      merged_files
+    };
+
+    if filtered_files.is_empty() {
+      return Err(DataFusionError::Plan("No relevant partitions found for query".to_string()));
+    }
+
+    let mut table_names = Vec::new();
+    for (i, file_path) in filtered_files.iter().enumerate() {
+      if Path::new(file_path).exists() {
+        let temp_table_name = format!("{}_{}", table_name, i);
+        if let Err(e) = session_context
+          .register_parquet(&temp_table_name, file_path, ParquetReadOptions::default())
+          .await
+        {
+          eprintln!("Failed to register {}: {:?}", file_path, e);
+        } else {
+          table_names.push(temp_table_name);
+        }
+      }
+    }
+
+    if table_names.is_empty() {
+      return Err(DataFusionError::Plan("No valid tables found to query.".to_string()));
+    }
+
+    let column_names = get_table_columns(&session_context, &table_names[0]).await?;
+
+    // Check if this is a JOIN query
+    if sql_query.to_lowercase().contains("join") {
+      return self
+        .handle_join_query(session_context.clone(), db_name, sql_query, username, is_json_format)
+        .await;
+    }
+
+    let combined_query = format!(
+      "SELECT {} FROM ({}) AS combined_table",
+      column_names,
+      table_names
+        .iter()
+        .map(|name| format!("SELECT {} FROM {}", column_names, name))
+        .collect::<Vec<_>>()
+        .join(" UNION ALL ")
+    );
+
+    let combined_df = session_context.sql(&combined_query).await?;
+    let combined_results = combined_df.collect().await?;
+    let schema = combined_results[0].schema();
+    let mem_table = MemTable::try_new(schema, vec![combined_results])?;
+    session_context.register_table("combined_table", Arc::new(mem_table))?;
+
+    let adjusted_sql_query = sql_query.replace(&table_name, "combined_table");
+    let final_df = session_context.sql(&adjusted_sql_query).await?;
+    let final_results = final_df.collect().await?;
+
+    let result = if is_json_format {
+      let json_result = record_batches_to_json(&final_results).unwrap();
+      DataFusionOutput::Json(json_result)
+    } else {
+      let final_schema = final_results[0].schema();
+      let final_mem_table = MemTable::try_new(final_schema, vec![final_results])?;
+      let final_df = session_context.read_table(Arc::new(final_mem_table))?;
+      DataFusionOutput::DataFrame(final_df)
+    };
+
+    Ok(result)
+  }
+
+  async fn handle_join_query(
+    &self,
+    session_context: SessionContext,
+    db_name: &str,
+    sql_query: &str,
+    username: Option<&str>,
+    is_json_format: bool,
+  ) -> DataFusionResult<DataFusionOutput> {
+    // Generate a unique suffix for this query execution
+    let query_suffix = chrono::Utc::now().timestamp_millis();
+
+    // Extract both table names from the join query
+    let words: Vec<&str> = sql_query.split_whitespace().collect();
+    let mut table_names = Vec::new();
+
+    for i in 0..words.len() {
+      if words[i].to_lowercase() == "from" && i + 1 < words.len() {
+        table_names.push(words[i + 1]);
+      } else if words[i].to_lowercase() == "join" && i + 1 < words.len() {
+        table_names.push(words[i + 1]);
+      }
+    }
+
+    if table_names.len() != 2 {
+      return Err(DataFusionError::Execution(
+        "Invalid join query: must specify exactly two tables".to_string(),
+      ));
+    }
+
+    let first_table = table_names[0];
+    let second_table = table_names[1];
+
+    // Get files for both tables
+    let first_table_files = self.build_files_list(db_name, first_table, username).map_err(|e| {
+      println!("Failed to get files for first table {}: {}", first_table, e);
+      DataFusionError::Execution(format!("Failed to get files for first table: {}", e))
+    })?;
+
+    let second_table_files = self.build_files_list(db_name, second_table, username).map_err(|e| {
+      println!("Failed to get files for second table {}: {}", second_table, e);
+      DataFusionError::Execution(format!("Failed to get files for second table: {}", e))
+    })?;
+
+    // Register all files for first table
+    let mut first_table_names = Vec::new();
+    for (i, file_path) in first_table_files.iter().enumerate() {
+      let temp_table_name = format!("{}_{}_{}", first_table, i, query_suffix);
+      if let Err(e) = session_context
+        .register_parquet(&temp_table_name, file_path, ParquetReadOptions::default())
+        .await
+      {
+        println!("Failed to register {}: {:?}", file_path, e);
+      } else {
+        first_table_names.push(temp_table_name);
+      }
+    }
+
+    // Register all files for second table
+    let mut second_table_names = Vec::new();
+    for (i, file_path) in second_table_files.iter().enumerate() {
+      let temp_table_name = format!("{}_{}_{}", second_table, i, query_suffix);
+      if let Err(e) = session_context
+        .register_parquet(&temp_table_name, file_path, ParquetReadOptions::default())
+        .await
+      {
+        println!("Failed to register {}: {:?}", file_path, e);
+      } else {
+        second_table_names.push(temp_table_name);
+      }
+    }
+
+    if first_table_names.is_empty() || second_table_names.is_empty() {
+      println!("No valid tables found for join operation");
+      return Err(DataFusionError::Plan("No valid tables found for join operation".to_string()));
+    }
+
+    // Create combined tables for both sides of the join
+    let first_columns = get_table_columns(&session_context, &first_table_names[0]).await?;
+    let second_columns = get_table_columns(&session_context, &second_table_names[0]).await?;
+
+    let first_combined_query = format!(
+      "SELECT {} FROM ({}) AS combined_first_{}",
+      first_columns,
+      first_table_names
+        .iter()
+        .map(|name| format!("SELECT {} FROM {}", first_columns, name))
+        .collect::<Vec<_>>()
+        .join(" UNION ALL "),
+      query_suffix
+    );
+
+    let second_combined_query = format!(
+      "SELECT {} FROM ({}) AS combined_second_{}",
+      second_columns,
+      second_table_names
+        .iter()
+        .map(|name| format!("SELECT {} FROM {}", second_columns, name))
+        .collect::<Vec<_>>()
+        .join(" UNION ALL "),
+      query_suffix
+    );
+
+    // Execute the combined queries
+    let first_df = session_context.sql(&first_combined_query).await?;
+    let second_df = session_context.sql(&second_combined_query).await?;
+
+    // Register the combined tables
+    let first_results = first_df.collect().await?;
+    let second_results = second_df.collect().await?;
+
+    let first_schema = first_results[0].schema();
+    let second_schema = second_results[0].schema();
+
+    let first_mem_table = MemTable::try_new(first_schema, vec![first_results])?;
+    let second_mem_table = MemTable::try_new(second_schema, vec![second_results])?;
+
+    let first_combined_name = format!("combined_first_{}", query_suffix);
+    let second_combined_name = format!("combined_second_{}", query_suffix);
+
+    session_context.register_table(&first_combined_name, Arc::new(first_mem_table))?;
+    session_context.register_table(&second_combined_name, Arc::new(second_mem_table))?;
+
+    let adjusted_sql_query = sql_query
+      .replace(&format!("FROM {}", first_table), &format!("FROM {}", first_combined_name))
+      .replace(&format!("JOIN {}", second_table), &format!("JOIN {}", second_combined_name))
+      // Also replace table names in the ON clause if they appear without aliases
+      .replace(&format!("{}.", first_table), &format!("{}.", first_combined_name))
+      .replace(&format!("{}.", second_table), &format!("{}.", second_combined_name));
+
+    let final_df = session_context.sql(&adjusted_sql_query).await?;
+    let final_results = final_df.collect().await?;
+
+    if is_json_format {
+      let json_result = record_batches_to_json(&final_results).unwrap();
+      Ok(DataFusionOutput::Json(json_result))
+    } else {
+      let final_schema = final_results[0].schema();
+      let final_mem_table = MemTable::try_new(final_schema, vec![final_results])?;
+      let final_df = session_context.read_table(Arc::new(final_mem_table))?;
+      Ok(DataFusionOutput::DataFrame(final_df))
+    }
+  }
+
+  fn parquet_file_writer(path: &Path, schema: Schema, array: Vec<Arc<dyn Array>>) -> Result<String, Box<dyn Error>> {
+    // Create a Parquet writer
+    let file = fs::File::create(&path)?;
+    let props = WriterProperties::builder().build();
+    let mut writer = ArrowWriter::try_new(file, Arc::new(schema.clone()), Some(props))?;
+    // Write the combined record batch to the Parquet file
+    let combined_batch = RecordBatch::try_new(Arc::new(schema), array)?;
+    writer.write(&combined_batch)?;
+    // Close the writer to ensure data is written to the file
+    writer.close()?;
+    Ok(format!("Data was successfully written to '{}'", path.to_string_lossy()))
+  }
+
+  pub fn build_files_list(&self, db_name: &str, table_name: &str, username: Option<&str>) -> Result<Vec<String>, Box<dyn Error>> {
+    // Reload metadata to ensure it's up-to-date
+    let metadata = self
+      .read_metadata()
+      .map_err(|e| DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))?;
+
+    // Validate if the database exists
+    let database = metadata
+      .databases
+      .get(db_name)
+      .ok_or_else(|| format!("Database '{}' does not exist.", db_name))?;
+
+    // Validate if the table exists within the database
+    let table = database
+      .tables
+      .get(table_name)
+      .ok_or_else(|| format!("Table '{}' does not exist in database '{}'.", table_name, db_name))?;
+
+    // Get the base table path
+    let base_table_path = Path::new(&table.path);
+
+    // Extract the base directory (root path) from the table path
+    let base_root = base_table_path
+      .ancestors()
+      .nth(3) // Adjust according to depth: "<base_path>/data/zivaring/activitydetails"
+      .ok_or_else(|| format!("Failed to determine base directory from '{}'", base_table_path.display()))?
+      .to_path_buf();
+
+    // Determine the final path
+    let final_table_path = if let Some(user) = username {
+      base_root.join("group").join(user).join(db_name).join(table_name) // Correct order
+    } else {
+      base_table_path.to_path_buf() // Default to the existing path
+    };
+
+    // Ensure the directory exists
+    if !final_table_path.exists() {
+      return Err(format!("Table path '{}' does not exist.", final_table_path.display()).into());
+    }
+
+    // Collect all files in the chosen directory
+    let mut file_list = Vec::new();
+    for entry in fs::read_dir(final_table_path)? {
+      let entry = entry?;
+      let path = entry.path();
+
+      // Only include files, ignore directories
+      if path.is_file() {
+        file_list.push(path.to_string_lossy().to_string());
+      }
+    }
+
+    // Sort files by their name for consistency
+    file_list.sort();
+
+    Ok(file_list)
   }
 
   fn validate_schema_structure(&self, schema: &Value) -> Result<(), Box<dyn Error>> {
     let schema_obj = schema.as_object().ok_or("Schema should be a JSON object")?;
 
     for (field_name, field_rules) in schema_obj {
+      // Skip validation for max_rows as it's a configuration property, not a data field
+      if field_name == "max_rows" {
+        continue;
+      }
+
       let field_rules_obj = field_rules
         .as_object()
         .ok_or(format!("Invalid validation rules for field '{}'", field_name))?;
@@ -384,9 +785,11 @@ impl DatabaseManager {
     Ok(())
   }
 
-  fn get_table_schema(&self, db_name: &str, table_name: &str) -> Result<serde_json::Value, Box<dyn Error>> {
-    // Look up the schema from the metadata or wherever it is stored
-    let database = self.metadata.databases.get(db_name).ok_or("Database not found")?;
+  pub fn get_table_schema(&self, db_name: &str, table_name: &str) -> Result<serde_json::Value, Box<dyn Error>> {
+    // Reload metadata to ensure it's up-to-date
+    let metadata = self.read_metadata().map_err(|e| format!("Failed to reload metadata: {}", e))?;
+    // Look up the schema from the metadata
+    let database = metadata.databases.get(db_name).ok_or("Database not found")?;
     let table = database.tables.get(table_name).ok_or("Table not found")?;
     Ok(table.schema.clone())
   }
@@ -404,6 +807,11 @@ impl DatabaseManager {
 
     // Validate each field in the schema
     for (field_name, field_rules) in schema_obj {
+      // Skip validation for max_rows as it's a configuration property, not a data field
+      if field_name == "max_rows" {
+        continue;
+      }
+
       let field_rules_obj = field_rules
         .as_object()
         .ok_or(format!("Invalid validation rules for field '{}'", field_name))?;
@@ -489,77 +897,254 @@ impl DatabaseManager {
     Ok(metadata)
   }
 
-  pub fn get_table_path(&self, db_name: &str, table_name: &str) -> Option<String> {
-    let metadata = self.read_metadata().unwrap();
-    if let Some(db) = metadata.databases.get(db_name) {
-      if let Some(table_path) = db.tables.get(table_name) {
-        return Some(table_path.path.clone());
-      }
-    }
-    None
+  fn save_metadata(&self) -> TokioResult<()> {
+    // Serialize the metadata structure and save it to the file
+    let json = serde_json::to_string(&self.metadata)?;
+    fs::write(&self.metadata_path, json)?;
+    Ok(())
   }
 
-  pub async fn query(
-    &self,
-    db_name: &str,
-    date_range: HashMap<&str, &str>,
-    sql_query: &str,
-    is_json_format: bool,
-  ) -> DataFusionResult<DataFusionOutput> {
-    let ctx = SessionContext::new();
-    let mut table_names = Vec::new();
-    let file_name = &extract_table_name(&sql_query);
-    let base_dir = format!("{}/{}/{}", &self.data_path, db_name, file_name);
+  pub fn update_metadata(&mut self, storage_path: &str) -> TokioResult<()> {
+    // Create a lock file path
+    let lock_file_path = format!("{}/metadata.lock", self.storage_path);
 
-    let file_list = generate_paths(&base_dir, file_name, date_range, Granularity::Day, false).unwrap();
+    // Try to acquire the lock with retries
+    let mut retries = 0;
+    let max_retries = 5;
+    let retry_delay = Duration::from_millis(100);
 
-    for (i, file_path) in file_list.iter().enumerate() {
-      if Path::new(file_path).exists() {
-        let table_name = format!("{}_{}", file_name, i);
-        match ctx.register_parquet(&table_name, file_path, ParquetReadOptions::default()).await {
-          Ok(_) => table_names.push(table_name),
-          Err(e) => eprintln!("Failed to register {}: {:?}", file_path, e),
+    let _lock_file = loop {
+      match File::create(&lock_file_path) {
+        Ok(file) => {
+          // Try to acquire an exclusive lock using fs2
+          if let Err(_) = file.lock_exclusive() {
+            if retries >= max_retries {
+              return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Failed to acquire metadata lock after multiple retries",
+              ));
+            }
+            retries += 1;
+            std::thread::sleep(retry_delay);
+            continue;
+          }
+          break file;
         }
-      } else {
-        eprintln!("File does not exist: {}", file_path);
+        Err(_) => {
+          if retries >= max_retries {
+            return Err(std::io::Error::new(
+              std::io::ErrorKind::Other,
+              "Failed to create lock file after multiple retries",
+            ));
+          }
+          retries += 1;
+          std::thread::sleep(retry_delay);
+        }
+      }
+    };
+
+    // Ensure the lock file is removed when we're done
+    struct LockGuard {
+      path: String,
+    }
+
+    impl Drop for LockGuard {
+      fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
       }
     }
 
-    if table_names.is_empty() {
-      return Err(DataFusionError::Plan("No valid tables found to query.".to_string()));
+    let _lock_guard = LockGuard { path: lock_file_path };
+
+    // Rest of the update_metadata implementation...
+    let new_data_path = storage_path.to_string() + "/data";
+    let mut metadata = self.read_metadata().unwrap();
+
+    for (db_name, db) in metadata.databases.iter_mut() {
+      for (table_name, table) in db.tables.iter_mut() {
+        let new_table_path = format!("{}/{}/{}", new_data_path, db_name, table_name);
+        table.path = new_table_path.clone();
+        println!("Updated path for table {}.{} To ({})", db_name, table_name, new_table_path);
+      }
     }
 
-    // Combine all tables into a single SQL query using UNION ALL
-    let combined_query = format!(
-      "SELECT * FROM ({}) AS combined_table",
-      table_names
-        .iter()
-        .map(|name| format!("SELECT * FROM {}", name))
-        .collect::<Vec<_>>()
-        .join(" UNION ALL ")
-    );
+    self.metadata = metadata;
+    self.save_metadata()?;
+    Ok(())
+  }
 
-    // Execute the combined query
-    let combined_df = ctx.sql(&combined_query).await?;
-    let combined_results = combined_df.collect().await?;
-    // Create an in-memory table from the combined results
-    let schema = combined_results[0].schema();
-    let mem_table = MemTable::try_new(schema, vec![combined_results])?;
-    ctx.register_table("combined_table", Arc::new(mem_table))?;
-    // Adjust the user-provided SQL query to run on the combined table
-    let adjusted_sql_query = sql_query.replace(file_name, "combined_table");
-    // Execute the user-provided SQL query on the combined table
-    let final_df = ctx.sql(&adjusted_sql_query).await?;
-    let final_results = final_df.collect().await?;
+  pub fn get_table_path(&self, db_name: &str, table_name: &str) -> Option<String> {
+    self.metadata.databases.get(db_name)?.tables.get(table_name)?.path.clone().into()
+  }
 
-    if is_json_format {
-      let json_result = record_batches_to_json(&final_results).unwrap();
-      Ok(DataFusionOutput::Json(json_result))
+  /// Update the last sync time and type for a table
+  pub fn update_sync_metadata(&mut self, db_name: &str, table_name: &str, sync_type: &str) -> Result<(), Box<dyn Error>> {
+    // Reload the metadata to ensure it's up to date
+    self.metadata = self.read_metadata()?;
+
+    if let Some(database) = self.metadata.databases.get_mut(db_name) {
+      if let Some(table) = database.tables.get_mut(table_name) {
+        let now = chrono::Utc::now();
+        let timestamp = now.to_rfc3339();
+
+        // Update the legacy fields for backward compatibility
+        table.last_sync_time = Some(timestamp.clone());
+        table.last_sync_type = Some(sync_type.to_string());
+
+        // Update the specific operation type field
+        match sync_type {
+          "sync" => table.last_sync_operation = Some(timestamp),
+          "sink" => table.last_sink_operation = Some(timestamp),
+          "fetch" => table.last_fetch_operation = Some(timestamp),
+          _ => {
+            // For any other type, just update the legacy fields
+            table.last_sync_time = Some(timestamp);
+            table.last_sync_type = Some(sync_type.to_string());
+          }
+        }
+
+        // Save the updated metadata
+        self.save_metadata()?;
+        Ok(())
+      } else {
+        Err(format!("Table '{}' not found in database '{}'", table_name, db_name).into())
+      }
     } else {
-      let final_schema = final_results[0].schema();
-      let final_mem_table = MemTable::try_new(final_schema, vec![final_results])?;
-      let final_df = ctx.read_table(Arc::new(final_mem_table))?;
-      Ok(DataFusionOutput::DataFrame(final_df))
+      Err(format!("Database '{}' not found", db_name).into())
     }
+  }
+
+  /// Get the last sync information for a table
+  pub fn get_sync_metadata(&self, db_name: &str, table_name: &str) -> Result<serde_json::Value, Box<dyn Error>> {
+    // Reload metadata to ensure we have the latest sync information
+    let metadata = self.read_metadata()?;
+
+    if let Some(database) = metadata.databases.get(db_name) {
+      if let Some(table) = database.tables.get(table_name) {
+        let sync_info = json!({
+          "table_name": table_name,
+          "database_name": db_name,
+          "last_sync_time": table.last_sync_time,
+          "last_sync_type": table.last_sync_type,
+          "last_sync_operation": table.last_sync_operation,
+          "last_sink_operation": table.last_sink_operation,
+          "last_fetch_operation": table.last_fetch_operation
+        });
+        Ok(sync_info)
+      } else {
+        Err(format!("Table '{}' not found in database '{}'", table_name, db_name).into())
+      }
+    } else {
+      Err(format!("Database '{}' not found", db_name).into())
+    }
+  }
+
+  /// Get sync metadata for all tables in a database
+  pub fn get_all_sync_metadata(&self, db_name: &str) -> Result<serde_json::Value, Box<dyn Error>> {
+    // Reload metadata to ensure we have the latest sync information
+    let metadata = self.read_metadata()?;
+
+    if let Some(database) = metadata.databases.get(db_name) {
+      let mut sync_info = Vec::new();
+
+      for (table_name, table) in &database.tables {
+        sync_info.push(json!({
+          "table_name": table_name,
+          "database_name": db_name,
+          "last_sync_time": table.last_sync_time,
+          "last_sync_type": table.last_sync_type,
+          "last_sync_operation": table.last_sync_operation,
+          "last_sink_operation": table.last_sink_operation,
+          "last_fetch_operation": table.last_fetch_operation
+        }));
+      }
+
+      Ok(json!({
+        "database_name": db_name,
+        "tables": sync_info
+      }))
+    } else {
+      Err(format!("Database '{}' not found", db_name).into())
+    }
+  }
+
+  fn enforce_row_limits(&self, db_name: &str, table_name: &str, datetime_field: &str) -> Result<(), Box<dyn Error>> {
+    // Get table schema to check for max_rows configuration
+    let table_schema = self.get_table_schema(db_name, table_name)?;
+    let schema_obj = table_schema.as_object().ok_or("Schema should be a JSON object")?;
+
+    // Check if max_rows is configured in the schema
+    let max_rows = if let Some(max_rows_value) = schema_obj.get("max_rows") {
+      max_rows_value.as_u64().unwrap_or(0) as usize
+    } else {
+      return Ok(()); // No row limiting configured
+    };
+
+    if max_rows == 0 {
+      return Ok(()); // No limit specified
+    }
+
+    // Load all records from the table
+    let file_list = self.build_files_list(db_name, table_name, None)?;
+    let mut all_records = Vec::new();
+
+    for file in &file_list {
+      if let Ok(records) = self.read_parquet_file(file) {
+        all_records.extend(records);
+      }
+    }
+
+    // If we're under the limit, no cleanup needed
+    if all_records.len() <= max_rows {
+      return Ok(());
+    }
+
+    // Sort records by timestamp (descending) and keep only the latest max_rows
+    all_records.sort_by(|a, b| {
+      let a_ts = a.get(datetime_field).and_then(|v| v.as_i64()).unwrap_or(0);
+      let b_ts = b.get(datetime_field).and_then(|v| v.as_i64()).unwrap_or(0);
+      b_ts.cmp(&a_ts) // Descending order (latest first)
+    });
+
+    let records_to_keep = all_records.into_iter().take(max_rows).collect::<Vec<_>>();
+
+    // Get table path for file operations
+    let table_path = self
+      .get_table_path(db_name, table_name)
+      .ok_or_else(|| format!("Table '{}.{}' not found", db_name, table_name))?;
+
+    // Group records by partition and rewrite files
+    let mut records_by_file: HashMap<String, Vec<Value>> = HashMap::new();
+
+    for record in records_to_keep {
+      let timestamp = record.get(datetime_field).and_then(|t| t.as_i64()).unwrap_or(0);
+      let partition_name = format!(
+        "{}_{}.parquet",
+        table_name,
+        rounded_timestamp(timestamp.try_into().unwrap(), self.bucket_interval)
+      );
+      let target_file = format!("{}/{}", table_path, partition_name);
+
+      records_by_file.entry(target_file).or_insert_with(Vec::new).push(record);
+    }
+
+    // Rewrite all files with the limited records
+    for (file_path, records) in records_by_file {
+      if !records.is_empty() {
+        let (arrays, schema) = json_to_arrow(&records)?;
+        Self::parquet_file_writer(Path::new(&file_path), schema, arrays)?;
+      }
+    }
+
+    // Remove empty files
+    for file in &file_list {
+      if let Ok(records) = self.read_parquet_file(file) {
+        if records.is_empty() {
+          let _ = fs::remove_file(file);
+        }
+      }
+    }
+
+    Ok(())
   }
 }

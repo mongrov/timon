@@ -1,28 +1,75 @@
-use arrow::array::{
-  Array, ArrayRef, BooleanArray, BooleanBuilder, Float64Array, Float64Builder, Int64Array, Int64Builder, ListArray, ListBuilder, StringArray,
-  StringBuilder, TimestampMillisecondArray,
-};
-use arrow::datatypes::{DataType, Field as ArrowField, Schema, TimeUnit};
 use base64::{engine::general_purpose, Engine as _};
-use chrono::{Datelike, NaiveDate, ParseError};
+use chrono::{DateTime, Datelike, Days, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc, Weekday};
+use datafusion::arrow::array::{
+  new_null_array, Array, ArrayRef, BooleanArray, BooleanBuilder, Date32Array, Float64Array, Float64Builder, Int32Array, Int64Array, Int64Builder,
+  ListArray, ListBuilder, StringArray, StringBuilder, StringViewArray, TimestampMillisecondArray, TimestampNanosecondArray,
+};
+use datafusion::arrow::buffer::OffsetBuffer;
+use datafusion::arrow::datatypes::{DataType, Field, Field as ArrowField, Schema, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
-use parquet::data_type::{AsBytes, Decimal};
-use parquet::record::{Field as ParquetField, Row};
+use datafusion::error::Result as DataFusionResult;
+use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReader;
+use datafusion::parquet::data_type::{AsBytes, Decimal};
+use datafusion::parquet::record::{Field as ParquetField, Row};
+use datafusion::prelude::SessionContext;
+use datafusion::scalar::ScalarValue;
+use json_rules_engine::{float_greater_than, float_less_than, int_greater_than, int_less_than, Condition};
 use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::error::Error;
+use std::fs::{self, metadata, File};
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, UNIX_EPOCH};
 
 pub fn record_batches_to_json(batches: &[RecordBatch]) -> Result<Value, serde_json::Error> {
-  // println!("batches >>> {:?}", batches);
   fn array_value_to_json(array: &ArrayRef, row_index: usize) -> serde_json::Value {
     match array.data_type() {
       DataType::Int64 => json!(array.as_any().downcast_ref::<Int64Array>().unwrap().value(row_index)),
+      DataType::Int32 => json!(array.as_any().downcast_ref::<Int32Array>().unwrap().value(row_index)),
       DataType::Float64 => json!(array.as_any().downcast_ref::<Float64Array>().unwrap().value(row_index)),
-      DataType::Utf8 => json!(array.as_any().downcast_ref::<StringArray>().unwrap().value(row_index)),
+      DataType::Utf8 => {
+        let string_array = array.as_any().downcast_ref::<StringArray>().unwrap();
+        if string_array.is_null(row_index) {
+          json!(null)
+        } else {
+          json!(string_array.value(row_index))
+        }
+      }
+      DataType::Utf8View => {
+        let string_view_array = array
+          .as_any()
+          .downcast_ref::<StringViewArray>()
+          .expect("Failed to downcast to StringViewArray");
+        if string_view_array.is_null(row_index) {
+          json!(null)
+        } else {
+          json!(string_view_array.value(row_index).to_string())
+        }
+      }
       DataType::Boolean => json!(array.as_any().downcast_ref::<BooleanArray>().unwrap().value(row_index)),
       DataType::Timestamp(TimeUnit::Millisecond, None) => json!(array.as_any().downcast_ref::<TimestampMillisecondArray>().unwrap().value(row_index)),
+      DataType::Timestamp(TimeUnit::Nanosecond, None) => {
+        let timestamp_ns = array.as_any().downcast_ref::<TimestampNanosecondArray>().unwrap().value(row_index);
+        let naive_datetime = DateTime::from_timestamp(
+          timestamp_ns / 1_000_000_000,          // Seconds
+          (timestamp_ns % 1_000_000_000) as u32, // Nanoseconds
+        )
+        .unwrap();
+        let local_time = naive_datetime.with_timezone(&Local);
+        json!(local_time.format("%Y-%m-%d %H:%M:%S").to_string())
+      }
+      DataType::Date32 => {
+        let base_date = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+        array
+          .as_any()
+          .downcast_ref::<Date32Array>()
+          .map(|date_array| date_array.value(row_index))
+          .and_then(|days_since_epoch| base_date.checked_add_days(Days::new(days_since_epoch as u64)))
+          .map_or(json!(null), |naive_date| json!(naive_date))
+      }
       DataType::List(_inner_field) => {
         let list_array = array.as_any().downcast_ref::<ListArray>().unwrap();
         let offsets = list_array.value_offsets();
@@ -56,7 +103,10 @@ pub fn record_batches_to_json(batches: &[RecordBatch]) -> Result<Value, serde_js
         let values = extract_list_values(values_array.as_ref(), start_idx, end_idx);
         json!(values)
       }
-      _ => json!(null),
+      datatype => {
+        println!("Warning: unsupported Datatype {}", datatype);
+        json!(null)
+      }
     }
   }
 
@@ -66,13 +116,16 @@ pub fn record_batches_to_json(batches: &[RecordBatch]) -> Result<Value, serde_js
     .flat_map(|batch| {
       let schema = batch.schema();
       let num_rows = batch.num_rows();
-      (0..num_rows).map(move |row_index| {
-        schema.fields().iter().enumerate().fold(HashMap::new(), |mut row, (col_index, field)| {
+      let mut rows = Vec::with_capacity(num_rows);
+      for row_index in 0..num_rows {
+        let mut row = HashMap::with_capacity(schema.fields().len());
+        for (col_index, field) in schema.fields().iter().enumerate() {
           let column = batch.column(col_index);
           row.insert(field.name().clone(), array_value_to_json(column, row_index));
-          row
-        })
-      })
+        }
+        rows.push(row);
+      }
+      rows
     })
     .collect();
 
@@ -166,7 +219,10 @@ pub fn json_to_arrow(json_values: &[Value]) -> Result<(Vec<ArrayRef>, Schema), B
             DataType::List(Box::new(ArrowField::new("item", DataType::Null, true)).into())
           }
         }
-        _ => DataType::Null,
+        datatype => {
+          println!("json_to_arrow: unsupported datatype {}", datatype);
+          DataType::Null
+        }
       };
 
       // Resolve potential conflicts by promoting types
@@ -312,51 +368,19 @@ pub fn json_to_arrow(json_values: &[Value]) -> Result<(Vec<ArrayRef>, Schema), B
   Ok((arrays, schema))
 }
 
-#[allow(dead_code)]
-pub enum Granularity {
-  Month,
-  Day,
-}
-
-pub fn generate_paths(
-  base_dir: &str,
-  file_name: &str,
-  date_range: HashMap<&str, &str>,
-  granularity: Granularity,
-  is_s3: bool,
-) -> Result<Vec<String>, ParseError> {
-  let start_date = NaiveDate::parse_from_str(date_range.get("start_date").unwrap(), "%Y-%m-%d")?;
-  let end_date = NaiveDate::parse_from_str(date_range.get("end_date").unwrap(), "%Y-%m-%d")?;
-  let mut current_date = start_date;
-
-  let mut file_list = Vec::new();
-  while current_date <= end_date {
-    let path = match granularity {
-      Granularity::Month => format!(
-        "{}{}/{}_{}.parquet",
-        if is_s3 { "s3://" } else { "" },
-        base_dir,
-        file_name,
-        current_date.format("%Y-%m")
-      ),
-      Granularity::Day => format!("{}/{}_{}.parquet", base_dir, file_name, current_date.format("%Y-%m-%d")),
-    };
-    file_list.push(path);
-    current_date = match granularity {
-      Granularity::Month => current_date
-        .with_month(current_date.month() % 12 + 1)
-        .unwrap_or_else(|| NaiveDate::from_ymd_opt(current_date.year() + 1, 1, 1).unwrap()),
-      Granularity::Day => current_date.succ_opt().unwrap(),
-    };
-  }
-  Ok(file_list)
-}
-
 pub fn extract_table_name(sql_query: &str) -> String {
-  Regex::new(r##"(?:FROM|JOIN)\s+[`\"]?(\w+)[`\"]?"##)
+  Regex::new(r#"(?i)(?:FROM|JOIN)\s+[`\"]?(\w+)['\"]?\s*(?:,|\b)"#)
     .unwrap()
     .captures_iter(sql_query)
-    .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
+    .filter_map(|cap| {
+      let table_name = cap.get(1)?.as_str();
+      // Exclude function-like entries (e.g., to_local_time) by checking if followed by '('
+      if sql_query.contains(&format!("{table_name}(")) {
+        None
+      } else {
+        Some(table_name.to_string())
+      }
+    })
     .nth(0)
     .unwrap_or_else(|| {
       eprintln!("No table name found in the SQL query.");
@@ -364,18 +388,473 @@ pub fn extract_table_name(sql_query: &str) -> String {
     })
 }
 
-pub fn get_unique_fields(schema: Value) -> Result<Vec<String>, Box<dyn Error>> {
-  let mut unique_fields = Vec::new();
+pub fn rounded_timestamp(timestamp: i64, interval: u32) -> String {
+  let dt = Utc.timestamp_opt(timestamp, 0).single().expect("Invalid timestamp");
 
+  let rounded_time = if interval >= 43200 {
+    // 30 days * 24 hours * 60 minutes = 43200
+    // For monthly intervals
+    dt.with_day(1)
+      .unwrap()
+      .with_hour(0)
+      .unwrap()
+      .with_minute(0)
+      .unwrap()
+      .with_second(0)
+      .unwrap()
+      .with_nanosecond(0)
+      .unwrap()
+  } else if interval >= 10080 {
+    // 7 days * 24 hours * 60 minutes = 10080
+    // For weekly intervals
+    let days_since_monday = dt.weekday().num_days_from_monday();
+    (dt - chrono::Duration::days(days_since_monday as i64))
+      .with_hour(0)
+      .unwrap()
+      .with_minute(0)
+      .unwrap()
+      .with_second(0)
+      .unwrap()
+      .with_nanosecond(0)
+      .unwrap()
+  } else if interval > 60 {
+    // For intervals greater than 60 minutes
+    let total_minutes = dt.hour() * 60 + dt.minute();
+    let rounded_total_minutes = (total_minutes / interval) * interval;
+    let rounded_hour = rounded_total_minutes / 60;
+    let rounded_minute = rounded_total_minutes % 60;
+
+    dt.with_hour(rounded_hour as u32)
+      .unwrap()
+      .with_minute(rounded_minute as u32)
+      .unwrap()
+      .with_second(0)
+      .unwrap()
+      .with_nanosecond(0)
+      .unwrap()
+  } else {
+    // For intervals within 60 minutes
+    let rounded_minute = (dt.minute() / interval) * interval;
+    dt.with_minute(rounded_minute)
+      .unwrap()
+      .with_second(0)
+      .unwrap()
+      .with_nanosecond(0)
+      .unwrap()
+  };
+
+  // Output format based on interval
+  if interval >= 43200 {
+    // Monthly format: YYYY-MM
+    rounded_time.format("%Y-%m").to_string()
+  } else if interval >= 10080 {
+    // Weekly format: YYYY-MM-DD
+    rounded_time.format("%Y-%m-%d").to_string()
+  } else if interval > 60 && interval % 60 == 0 {
+    // Hourly format: YYYY-MM-DD_HH
+    rounded_time.format("%Y-%m-%d_%H").to_string()
+  } else {
+    // Minute format: YYYY-MM-DD_HH-MM
+    rounded_time.format("%Y-%m-%d_%H-%M").to_string()
+  }
+}
+
+pub fn get_property_fields(schema: &Value, property: &str) -> Result<Vec<String>, Box<dyn Error>> {
+  let mut fields = Vec::new();
   if let Some(properties) = schema.as_object() {
     for (field_name, field_properties) in properties {
-      if let Some(unique) = field_properties.get("unique") {
-        if unique.as_bool() == Some(true) {
-          unique_fields.push(field_name.clone());
+      if let Some(prop_value) = field_properties.get(property) {
+        if prop_value.as_bool() == Some(true) {
+          fields.push(field_name.clone());
+        }
+      }
+    }
+  }
+  Ok(fields)
+}
+
+pub async fn get_table_columns(session_context: &SessionContext, table_name: &str) -> DataFusionResult<String> {
+  let df = session_context.sql(&format!("SELECT * FROM {} LIMIT 1", table_name)).await?;
+  let column_names: Vec<String> = df.schema().fields().iter().map(|field| format!("\"{}\"", field.name())).collect();
+  Ok(column_names.join(", "))
+}
+
+pub fn filter_files_by_date_range(files: Vec<String>, start_date: &str, end_date: &str) -> Result<Vec<String>, Box<dyn Error>> {
+  let start_date = NaiveDate::parse_from_str(start_date, "%Y-%m-%d")?;
+  let end_date = NaiveDate::parse_from_str(end_date, "%Y-%m-%d")?;
+  // Regex to match different file formats: YYYY-MM-DD, YYYY-MM, YYYY
+  let regx = Regex::new(r"(?P<year>\d{4})(?:-(?P<month>\d{2})(?:-(?P<day>\d{2}))?)?").expect("Invalid regex pattern");
+
+  let filtered_files: Vec<String> = files
+    .iter()
+    .filter(|file| {
+      if let Some(date_str) = file.split('/').last() {
+        if let Some(caps) = regx.captures(date_str) {
+          let year = caps["year"].parse::<i32>().ok();
+          let month = caps.name("month").map(|m| m.as_str().parse::<u32>().ok()).flatten();
+          let day = caps.name("day").map(|d| d.as_str().parse::<u32>().ok()).flatten();
+
+          if let Some(year) = year {
+            let file_date = match (month, day) {
+              (Some(m), Some(d)) => NaiveDate::from_ymd_opt(year, m, d),
+              (Some(m), None) => NaiveDate::from_ymd_opt(year, m, 1),
+              (None, None) => NaiveDate::from_ymd_opt(year, 1, 1),
+              (None, Some(_)) => todo!(),
+            };
+
+            if let Some(file_date) = file_date {
+              return file_date >= start_date && file_date <= end_date;
+            }
+          }
+        }
+      }
+      false
+    })
+    .cloned()
+    .collect();
+
+  Ok(filtered_files)
+}
+
+pub fn extract_query_time_range(sql_query: &str, bucket_interval: u32) -> Option<(i64, i64)> {
+  let re =
+    Regex::new(r#"WHERE\s+.*?\b(date|timestamp)\b\s+BETWEEN\s+['\"]?(\d+|[\d-]+\s+[\d:]+)['\"]?\s+AND\s+['\"]?(\d+|[\d-]+\s+[\d:]+)['\"]?"#).ok()?;
+  if let Some(captures) = re.captures(sql_query) {
+    let start_time_str = &captures[2];
+    let end_time_str = &captures[3];
+
+    // Try parsing as Unix timestamp first
+    if let (Ok(start), Ok(end)) = (start_time_str.parse::<i64>(), end_time_str.parse::<i64>()) {
+      // Convert to DateTime for proper handling
+      let start_dt = Utc.timestamp_opt(start, 0).single()?;
+      let end_dt = Utc.timestamp_opt(end, 0).single()?;
+
+      // For weekly intervals (10080 minutes = 7 days)
+      if bucket_interval == 10080 {
+        // Round to start of week (Monday) for start time
+        let start_week = start_dt.date_naive().week(Weekday::Mon);
+        let rounded_start = Utc
+          .with_ymd_and_hms(
+            start_week.first_day().year(),
+            start_week.first_day().month(),
+            start_week.first_day().day(),
+            0,
+            0,
+            0,
+          )
+          .single()?
+          .timestamp();
+
+        // For end time, we need to ensure it's the last second of the week
+        let end_week = end_dt.date_naive().week(Weekday::Mon);
+        let week_end = Utc
+          .with_ymd_and_hms(
+            end_week.last_day().year(),
+            end_week.last_day().month(),
+            end_week.last_day().day(),
+            23,
+            59,
+            59,
+          )
+          .single()?
+          .timestamp();
+
+        // Take the minimum of the week end and the original end time
+        let rounded_end = week_end.min(end);
+
+        // Ensure end time is at 23:59:59
+        let end_date = Utc.timestamp_opt(rounded_end, 0).single()?;
+        let rounded_end = Utc
+          .with_ymd_and_hms(end_date.year(), end_date.month(), end_date.day(), 23, 59, 59)
+          .single()?
+          .timestamp();
+
+        return Some((rounded_start, rounded_end));
+      }
+      // For daily intervals (1440 minutes = 1 day)
+      else if bucket_interval == 1440 {
+        // Round to start of day for start time
+        let rounded_start = Utc
+          .with_ymd_and_hms(start_dt.year(), start_dt.month(), start_dt.day(), 0, 0, 0)
+          .single()?
+          .timestamp();
+
+        // Round to end of day for end time
+        let rounded_end = Utc
+          .with_ymd_and_hms(end_dt.year(), end_dt.month(), end_dt.day(), 23, 59, 59)
+          .single()?
+          .timestamp();
+
+        return Some((rounded_start, rounded_end));
+      } else {
+        // For regular intervals, round to the nearest bucket
+        let rounded_start = (start / bucket_interval as i64) * bucket_interval as i64;
+        let rounded_end = ((end / bucket_interval as i64) + 1) * bucket_interval as i64 - 1;
+        return Some((rounded_start, rounded_end));
+      }
+    }
+
+    // If not Unix timestamp, try parsing as datetime string
+    let start_timestamp = parse_timestamp(start_time_str)?;
+    let end_timestamp = parse_timestamp(end_time_str)?;
+
+    // Round the timestamps according to the bucket interval
+    let rounded_start = rounded_timestamp(start_timestamp, bucket_interval);
+    let rounded_end = rounded_timestamp(end_timestamp, bucket_interval);
+
+    // Convert the rounded timestamps back to Unix timestamps
+    let start_dt = NaiveDateTime::parse_from_str(&format!("{} 00:00:00", rounded_start), "%Y-%m-%d %H:%M:%S").ok()?;
+    let end_dt = NaiveDateTime::parse_from_str(&format!("{} 23:59:59", rounded_end), "%Y-%m-%d %H:%M:%S").ok()?;
+
+    Some((Utc.from_utc_datetime(&start_dt).timestamp(), Utc.from_utc_datetime(&end_dt).timestamp()))
+  } else {
+    None
+  }
+}
+
+pub fn extract_partition_time(file_path: &str) -> i64 {
+  // Extract the filename from the path
+  let filename = Path::new(file_path).file_name().and_then(|name| name.to_str()).unwrap_or(file_path);
+
+  // Try hourly format (YYYY-MM-DD_HH-MM)
+  let hourly_re = Regex::new(r"(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})").unwrap();
+  if let Some(captures) = hourly_re.captures(filename) {
+    let date_part = &captures[1];
+    let hour = &captures[2];
+    let minute = &captures[3];
+    let datetime_str = format!("{} {}:{}:00", date_part, hour, minute);
+    if let Ok(naive_dt) = NaiveDateTime::parse_from_str(&datetime_str, "%Y-%m-%d %H:%M:%S") {
+      return Utc.from_utc_datetime(&naive_dt).timestamp();
+    }
+  }
+
+  // Try daily format (YYYY-MM-DD_00)
+  let daily_re = Regex::new(r"(\d{4}-\d{2}-\d{2})_00").unwrap();
+  if let Some(captures) = daily_re.captures(filename) {
+    let date_part = &captures[1];
+    let datetime_str = format!("{} 00:00:00", date_part);
+    if let Ok(naive_dt) = NaiveDateTime::parse_from_str(&datetime_str, "%Y-%m-%d %H:%M:%S") {
+      return Utc.from_utc_datetime(&naive_dt).timestamp();
+    }
+  }
+
+  // Try weeky format (YYYY-MM-DD)
+  let daily_no_suffix_re = Regex::new(r"(\d{4}-\d{2}-\d{2})(?:\.parquet)?$").unwrap();
+  if let Some(captures) = daily_no_suffix_re.captures(filename) {
+    let date_part = &captures[1];
+    let datetime_str = format!("{} 00:00:00", date_part);
+    if let Ok(naive_dt) = NaiveDateTime::parse_from_str(&datetime_str, "%Y-%m-%d %H:%M:%S") {
+      return Utc.from_utc_datetime(&naive_dt).timestamp();
+    }
+  }
+
+  // Try monthly format: _YYYY-MM(.parquet)
+  let monthly_re = Regex::new(r"_(\d{4}-\d{2})").unwrap();
+  if let Some(captures) = monthly_re.captures(filename) {
+    let date_part = &captures[1];
+    let datetime_str = format!("{}-01 00:00:00", date_part);
+    if let Ok(naive_dt) = NaiveDateTime::parse_from_str(&datetime_str, "%Y-%m-%d %H:%M:%S") {
+      return Utc.from_utc_datetime(&naive_dt).timestamp();
+    }
+  }
+
+  eprintln!("Failed to extract partition time from: {}", file_path);
+  i64::MIN // Indicate failure
+}
+
+pub fn get_monthly_partition_overlaps(partition_time: i64, query_start: i64, query_end: i64) -> bool {
+  let dt = Utc.timestamp_opt(partition_time, 0).single().unwrap();
+  let year = dt.year();
+  let month = dt.month();
+
+  // Get the first day of the month
+  let partition_start = Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0).single().unwrap().timestamp();
+
+  // Get the last day of the month using chrono's next_month logic
+  let first_of_next_month = if month == 12 {
+    NaiveDate::from_ymd_opt(year + 1, 1, 1).unwrap()
+  } else {
+    NaiveDate::from_ymd_opt(year, month + 1, 1).unwrap()
+  };
+  let last_day = first_of_next_month.pred_opt().unwrap().day();
+  let partition_end = Utc.with_ymd_and_hms(year, month, last_day, 23, 59, 59).single().unwrap().timestamp();
+
+  partition_end >= query_start && partition_start <= query_end
+}
+
+pub fn parse_timestamp(datetime_str: &str) -> Option<i64> {
+  // Parses either epoch timestamps or datetime strings
+  if let Ok(epoch) = datetime_str.parse::<i64>() {
+    Some(epoch)
+  } else {
+    NaiveDateTime::parse_from_str(datetime_str, "%Y-%m-%d %H:%M:%S")
+      .ok()
+      .map(|dt| Utc.from_utc_datetime(&dt).timestamp())
+  }
+}
+
+pub fn get_local_file_modified_time(local_path: &str) -> Option<DateTime<Utc>> {
+  if let Ok(metadata) = metadata(local_path) {
+    if let Ok(modified) = metadata.modified() {
+      let duration_since_epoch = modified.duration_since(UNIX_EPOCH).unwrap_or_default();
+      return Some(DateTime::<Utc>::from(UNIX_EPOCH + Duration::from_secs(duration_since_epoch.as_secs())));
+    }
+  }
+  None
+}
+
+pub fn combine_unique_batches(
+  local_batches: Vec<RecordBatch>,
+  s3_batches: Vec<RecordBatch>,
+  unique_fields: &[String],
+) -> Result<Vec<RecordBatch>, Box<dyn std::error::Error>> {
+  let schema = local_batches
+    .first()
+    .map(|b| b.schema())
+    .or_else(|| s3_batches.first().map(|b| b.schema()))
+    .ok_or("No batches provided")?;
+
+  let unique_indices: Vec<usize> = unique_fields
+    .iter()
+    .map(|field| schema.index_of(field).map_err(|e| format!("Field '{}' not found: {:?}", field, e)))
+    .collect::<Result<Vec<_>, _>>()?;
+
+  let mut unique_map: HashMap<Vec<ScalarValue>, Vec<ScalarValue>> = HashMap::new();
+
+  for batch in s3_batches.into_iter().chain(local_batches) {
+    let unified_batch = convert_batch_schema(&batch, &schema)?; // Fixed type mismatch
+
+    for row_index in 0..unified_batch.num_rows() {
+      let unique_key: Vec<ScalarValue> = unique_indices
+        .iter()
+        .map(|&index| ScalarValue::try_from_array(unified_batch.column(index), row_index).unwrap())
+        .collect();
+
+      let row_values: Vec<ScalarValue> = (0..unified_batch.num_columns())
+        .map(|col_index| ScalarValue::try_from_array(unified_batch.column(col_index), row_index).unwrap())
+        .collect();
+
+      unique_map.insert(unique_key, row_values);
+    }
+  }
+
+  let mut column_values: Vec<Vec<ScalarValue>> = vec![Vec::new(); schema.fields().len()];
+  for row_values in unique_map.values() {
+    for (col_idx, value) in row_values.iter().enumerate() {
+      column_values[col_idx].push(value.clone());
+    }
+  }
+
+  let mut final_columns = Vec::new();
+  for (col_idx, _field) in schema.fields().iter().enumerate() {
+    let column_data = &column_values[col_idx];
+    let array = ScalarValue::iter_to_array(column_data.iter().cloned())?;
+    final_columns.push(array);
+  }
+
+  let combined_unique_batches = RecordBatch::try_new(schema.clone(), final_columns)?;
+  Ok(vec![combined_unique_batches])
+}
+
+fn convert_batch_schema(batch: &RecordBatch, target_schema: &Schema) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+  let mut new_columns = Vec::new();
+  for field in target_schema.fields() {
+    let column = if let Some(existing_column) = batch.column_by_name(field.name()) {
+      if existing_column.data_type() != field.data_type() {
+        match field.data_type() {
+          DataType::List(inner_field) if *inner_field.data_type() == DataType::Int64 => {
+            let int_column = existing_column
+              .as_any()
+              .downcast_ref::<Int64Array>()
+              .ok_or("Failed to downcast column to Int64Array")?;
+
+            // Convert Int64Array into a ListArray
+            let values = Arc::new(int_column.clone()) as ArrayRef;
+            let offsets: Vec<i32> = (0..=int_column.len() as i32).collect();
+            let offset_buffer = OffsetBuffer::new(offsets.into());
+            let list_array = ListArray::new(Arc::new(Field::new("item", DataType::Int64, true)), offset_buffer, values, None);
+            Arc::new(list_array) as ArrayRef
+          }
+          _ => {
+            eprintln!("Warning: Cannot auto-convert {} to {}", existing_column.data_type(), field.data_type());
+            existing_column.clone()
+          }
+        }
+      } else {
+        existing_column.clone()
+      }
+    } else {
+      new_null_array(field.data_type(), batch.num_rows())
+    };
+    new_columns.push(column);
+  }
+  Ok(RecordBatch::try_new(Arc::new(target_schema.clone()), new_columns)?)
+}
+
+pub fn read_parquet_batches(file_path: &Path, batches: &mut Vec<RecordBatch>) -> Result<bool, Box<dyn std::error::Error>> {
+  let mut buffer = Vec::new();
+  File::open(file_path)?.read_to_end(&mut buffer)?;
+  let reader = ParquetRecordBatchReader::try_new(bytes::Bytes::from(buffer), 1024)?;
+  batches.extend(reader.collect::<Result<Vec<_>, _>>()?);
+  Ok(true)
+}
+
+pub async fn cleanup_old_files(processed_files: &[PathBuf]) {
+  let regx = Regex::new(r"(\d{4})-(\d{2})-(\d{2})").expect("Invalid regex pattern");
+  let current_date = chrono::Utc::now().naive_utc().date();
+  for file_path in processed_files {
+    if let Some(filename) = file_path.file_name().and_then(|n| n.to_str()) {
+      if let Some(caps) = regx.captures(filename) {
+        let file_date_str = format!("{}-{}-{}", &caps[1], &caps[2], &caps[3]);
+        if NaiveDate::parse_from_str(&file_date_str, "%Y-%m-%d").map_or(false, |file_date| file_date < current_date) {
+          if let Err(e) = fs::remove_file(file_path) {
+            eprintln!("Warning: Failed to delete file {}: {:?}", file_path.display(), e);
+          }
+        }
+      }
+    }
+  }
+}
+
+pub fn build_rules_tree(table_schema: Value) -> Vec<Condition> {
+  let mut conditions = Vec::new();
+
+  if let Some(schema_map) = table_schema.as_object() {
+    for (field, properties) in schema_map {
+      if let Some(field_type) = properties.get("type").and_then(|v| v.as_str()) {
+        let min = properties.get("min").and_then(|v| v.as_f64());
+        let max = properties.get("max").and_then(|v| v.as_f64());
+
+        match field_type {
+          "int" => {
+            if let Some(min_val) = min {
+              conditions.push(int_greater_than(field, min_val as i64));
+            }
+            if let Some(max_val) = max {
+              conditions.push(int_less_than(field, max_val as i64));
+            }
+          }
+          "float" => {
+            if let Some(min_val) = min {
+              conditions.push(float_greater_than(field, min_val));
+            }
+            if let Some(max_val) = max {
+              conditions.push(float_less_than(field, max_val));
+            }
+          }
+          "int|float" => {
+            if let Some(min_val) = min {
+              conditions.push(float_greater_than(field, min_val));
+            }
+            if let Some(max_val) = max {
+              conditions.push(float_less_than(field, max_val));
+            }
+          }
+          _ => {}
         }
       }
     }
   }
 
-  Ok(unique_fields)
+  conditions
 }

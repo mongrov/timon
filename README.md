@@ -4,10 +4,14 @@ This API provides a set of functions for managing databases and tables in both l
 
 ## Table of Contents
 
+# Mobile based API's
 1. [File Storage Functions](#file-storage-functions)
 2. [S3-Compatible Storage Functions](#s3-compatible-storage-functions)
 3. [Function Descriptions](#function-descriptions)
 
+# Utility CLI
+1. [Get The Latest Utility Build](#get-the-latest-utility-build)
+2. [How To Run The Utility](#how-to-run-the-utility)
 ---
 
 ## File Storage Functions
@@ -16,7 +20,7 @@ These functions manage databases and tables stored locally on the file system. D
 
 ```kotlin
 // Initialize Timon with a local storage path
-external fun initTimon(storagePath: String): String
+external fun initTimon(storagePath: String, bucketInterval: Number, userName: String): String
 
 // Create a new database
 external fun createDatabase(dbName: String): String
@@ -39,8 +43,8 @@ external fun deleteTable(dbName: String, tableName: String): String
 // Insert data into a table in JSON format
 external fun insert(dbName: String, tableName: String, jsonData: String): String
 
-// Query a database with a date range and SQL query
-external fun query(dbName: String, dateRange: Map<String, String>, sqlQuery: String): String
+// Query a database with SQL query
+external fun query(dbName: String, sqlQuery: String): String
 ```
 
 ## S3-Compatible Storage Functions
@@ -49,49 +53,105 @@ These functions manage data stored in an S3-compatible bucket, allowing for quer
 
 ```kotlin
 // Initialize S3-compatible storage with endpoint and credentials
-external fun initBucket(bucket_endpoint: String, bucket_name: String, access_key_id: String, secret_access_key: String): String
+external fun initBucket(bucket_endpoint: String, bucket_name: String, access_key_id: String, secret_access_key: String, bucket_region: String): String
 
-// Query the bucket with a date range and SQL query
-external fun queryBucket(dateRange: Map<String, String>, sqlQuery: String): String
+// Sink daily data to Parquet format in the bucket
+external fun cloudSinkParquet(dbName: String, tableName: String): String
 
-// Sink dayly data to Parquet format in the bucket
-external fun sinkDailyParquet(dbName: String, tableName: String): String
+// Fetch data from a given user and save it locally
+external fun cloudFetchParquet(userName: String, dbName: String, tableName: String, dateRange: Map<String, String>): String
 ```
 
-## Function Descriptions
+## Get The Latest Utility Build
 
-- **initTimon(storagePath: String)**
-Initializes the local file storage at the specified path.
+### Build the Binary
+Run the following command to build the utility with the necessary features:  
 
-- **createDatabase(dbName: String)**
-Creates a new database with the specified name.
+#### **Cross-Compile the Binary**
+Rust provides tools to cross-compile your code for different platforms. This involves building the binary for a platform different from your current one.
 
-- **createTable(dbName: String, tableName: String)**
-Creates a new table in the specified database.
+#### Example for Windows:
+On Linux or macOS, you can compile for Windows:
+```bash
+rustup target add x86_64-pc-windows-gnu
+cargo build --features dev_cli --release --target x86_64-pc-windows-gnu
+```
 
-- **listDatabases()**
-Lists all databases in the local storage.
+#### Example for macOS:
+On Linux, you can compile for macOS:
+```bash
+rustup target add x86_64-apple-darwin
+cargo build --features dev_cli --release --target x86_64-apple-darwin
+```
 
-- **listTables(dbName: String)**
-Lists all tables in the specified database.
+#### **Build Natively on Each Platform**
+If cross-compilation is not feasible, you can build the binary on each target platform natively. This ensures compatibility.
 
-- **deleteDatabase(dbName: String)**
-Deletes the specified database.
+#### On macOS:
+```bash
+cargo build --release
+```
 
-- **deleteTable(dbName: String, tableName: String)**
-Deletes the specified table from the given database.
+#### On Windows:
+```powershell
+cargo build --release
+```
 
-- **insert(dbName: String, tableName: String, jsonData: String)**
-Inserts JSON-formatted data into the specified table.
+#### **Use Cross (Simplified Cross-Compiling)**
+The [`cross`](https://github.com/cross-rs/cross) tool simplifies cross-compiling by providing pre-configured Docker containers for various targets. It automatically handles dependencies and toolchains.
 
-- **query(dbName: String, dateRange: Map<String, String>, sqlQuery: String)**
-Executes an SQL query on the specified database within the given date range.
+#### Install `cross`:
+```bash
+cargo install cross
+```
 
-- **initBucket(bucket_endpoint: String, bucket_name: String, access_key_id: String, secret_access_key: String)**
-Initializes an S3-compatible bucket for data storage.
+```bash
+cross build --release --target x86_64-pc-windows-gnu
+cross build --release --target x86_64-apple-darwin
+```
 
-- **queryBucket(dateRange: Map<String, String>, sqlQuery: String)**
-Queries data in the S3 bucket based on the given date range and SQL query.
 
-- **sinkDailyParquet(dbName: String, tableName: String)**
-Upload data from the specified database and table as Parquet files, organized by day into S3-compatible bucket.
+#### **Consider Using Rust's MUSL for Static Linking (Linux Only)**
+If targeting Linux systems with no shared libraries, you can build a statically linked binary using MUSL:
+```bash
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-musl
+```
+This produces a binary that works on most Linux distributions.
+
+### Summary
+- Use **cross-compilation** to build for other platforms without a native environment.
+- Use **`cross`** for easier cross-compilation.
+- If you have access to all platforms, build natively on each.
+
+---
+
+## How To Run The Utility
+
+### Available Commands
+
+#### 1. Convert JSON to Parquet
+To convert a JSON file to a Parquet file, use the following command:  
+```bash
+./tsdb_timon convert <json_file_path> <parquet_file_path>
+```
+
+**Example:**  
+```bash
+./tsdb_timon convert test_input.json test_output.parquet
+```
+
+#### 2. Execute SQL Query on Parquet
+Run an SQL query against the Parquet file:  
+```bash
+./tsdb_timon query <parquet_file_path> "<sql_query>"
+```
+
+**Example:**  
+```bash
+./tsdb_timon query test_output.parquet "SELECT * FROM timon"
+```
+
+### Notes:
+- The table name is always set to **`timon`**. Ensure all SQL queries reference the `timon` table explicitly.
+- Replace `<json_file_path>`, `<parquet_file_path>`, and `<sql_query>` with your respective input file paths and query.

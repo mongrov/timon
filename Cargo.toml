@@ -1,29 +1,45 @@
 [package]
 name = "tsdb_timon"
-version = "1.0.7"
+version = "1.0.45"
 edition = "2021"
 authors = ["Ahmed Boutaraa <ahmed@mongrov.com>"]
 description = "Efficient local storage and Amazon S3-compatible data synchronization for time-series data, leveraging Parquet for storage and DataFusion for querying, all wrapped in a simple and intuitive API."
 license = "Apache-2.0"
 repository = "https://github.com/mongrov/timon"
 keywords = ["parquet", "datafusion", "apache-arrow", "tsdb", "S3-storage-sync"]
-categories = ["embedded", "database", "filesystem", "os::android-apis"]
+categories = ["embedded", "database", "filesystem"]
 
 [dependencies]
 jni = "0.21.1"
-arrow = "52.0.0"
-parquet =  { version ="52.0.0", features = ["arrow"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-base64 = "0.22.0"
+serde_json = "1.0.138"
+base64 = "0.22.1"
 libc = "0.2.155"
-datafusion = "39.0"
+datafusion = "46.0.0"
 tokio = { version = "1", features = ["full"] }
 regex = "1.10.6"
-object_store = { version = "0.10.2", features = ["aws"] }
+object_store = { version = "0.11.2", features = ["aws"] }
+futures = "0.3.31"
 url = { version = "2.5.2" }
 chrono = "0.4.38"
 hex = "0.4.3"
+bytes = "1.10.0"
+json-rules-engine = "0.9.4"
+fs2 = "0.4.3"
+# optional dependencies
+clap = { version = "4.5.27", features = ["derive"], optional = true }
+actix-web = { version = "4.9.0", optional = true }
+actix-web-httpauth = { version = "0.8.2", optional = true }
+jsonwebtoken = { version = "9.3.0", optional = true }
+log = { version = "0.4.25", optional = true }
+env_logger = { version = "0.11.6", optional = true }
+
+[dev-dependencies]
+tempfile = "3.19.0"
+
+[features]
+dev_cli = ["clap"]
+cloud_server = ["actix-web", "actix-web-httpauth", "jsonwebtoken", "log", "env_logger"]
 
 [lib]
 name = "tsdb_timon"
