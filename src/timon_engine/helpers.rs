@@ -369,23 +369,67 @@ pub fn json_to_arrow(json_values: &[Value]) -> Result<(Vec<ArrayRef>, Schema), B
 }
 
 pub fn extract_table_name(sql_query: &str) -> String {
-  Regex::new(r#"(?i)(?:FROM|JOIN)\s+[`\"]?(\w+)['\"]?\s*(?:,|\b)"#)
-    .unwrap()
-    .captures_iter(sql_query)
-    .filter_map(|cap| {
-      let table_name = cap.get(1)?.as_str();
-      // Exclude function-like entries (e.g., to_local_time) by checking if followed by '('
-      if sql_query.contains(&format!("{table_name}(")) {
-        None
-      } else {
-        Some(table_name.to_string())
+  // First, collect all CTE names from WITH clauses to exclude them later
+  let cte_regex = Regex::new(r#"(?i)WITH\s+(?:RECURSIVE\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s+AS"#).unwrap();
+  let mut cte_names = std::collections::HashSet::new();
+
+  for cap in cte_regex.captures_iter(sql_query) {
+    if let Some(cte_name) = cap.get(1) {
+      cte_names.insert(cte_name.as_str().to_lowercase());
+    }
+  }
+
+  // Also collect CTE names from comma-separated WITH clauses
+  let cte_comma_regex = Regex::new(r#"(?i),\s*([a-zA-Z_][a-zA-Z0-9_]*)\s+AS"#).unwrap();
+  for cap in cte_comma_regex.captures_iter(sql_query) {
+    if let Some(cte_name) = cap.get(1) {
+      cte_names.insert(cte_name.as_str().to_lowercase());
+    }
+  }
+
+  // Remove comments to avoid matching table names in comments
+  let comment_regex = Regex::new(r"--.*?$").unwrap();
+  let sql_without_comments = comment_regex.replace_all(sql_query, "");
+
+  // Now look for table names in FROM/JOIN clauses with more specific pattern
+  // This pattern ensures we match actual table references, not parts of column names or other contexts
+  let table_regex = Regex::new(r#"(?i)(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:[a-zA-Z_][a-zA-Z0-9_]*\s*)?(?:WHERE|ON|GROUP|ORDER|HAVING|LIMIT|UNION|CROSS|LEFT|RIGHT|INNER|OUTER|,|\)|$|;)"#).unwrap();
+
+  for cap in table_regex.captures_iter(&sql_without_comments) {
+    if let Some(table_match) = cap.get(1) {
+      let table_name = table_match.as_str();
+      let table_name_lower = table_name.to_lowercase();
+
+      // Skip if it's a CTE name
+      if cte_names.contains(&table_name_lower) {
+        continue;
       }
-    })
-    .nth(0)
-    .unwrap_or_else(|| {
-      eprintln!("No table name found in the SQL query.");
-      String::new()
-    })
+
+      // Skip if it's a function call
+      if sql_without_comments.contains(&format!("{}(", table_name)) {
+        continue;
+      }
+
+      // Skip common SQL keywords that might be captured
+      if matches!(
+        table_name_lower.as_str(),
+        "select" | "where" | "group" | "order" | "having" | "limit" | "union" | "case" | "when" | "then" | "else" | "end" | "local" | "midnight"
+      ) {
+        continue;
+      }
+
+      // Skip if it looks like a column name (contains common column patterns)
+      if table_name_lower.contains("_date") || table_name_lower.contains("_time") || table_name_lower.contains("target_") {
+        continue;
+      }
+
+      // This looks like a real table name
+      return table_name.to_string();
+    }
+  }
+
+  eprintln!("No table name found in the SQL query.");
+  String::new()
 }
 
 pub fn rounded_timestamp(timestamp: i64, interval: u32) -> String {

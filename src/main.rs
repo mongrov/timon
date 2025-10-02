@@ -558,7 +558,7 @@ async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
 
   // Query HRV readings
   let start_time = Instant::now();
-  let hrv_query = format!(r#"SELECT * FROM hrv_readings"#);
+  let hrv_query = format!(r#"SELECT * FROM hrv_table"#);
   let hrv_result = query(DATABASE_NAME, &hrv_query, None).await?;
   let duration = start_time.elapsed();
   println!(
@@ -605,7 +605,7 @@ async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
 
   // Query for stress levels over time
   let start_time = Instant::now();
-  let stress_query = format!(r#"SELECT * FROM hrv_readings"#);
+  let stress_query = format!(r#"SELECT * FROM hrv_table"#);
   let stress_result = query(DATABASE_NAME, &stress_query, None).await?;
   let duration = start_time.elapsed();
   println!(
