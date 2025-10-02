@@ -612,7 +612,7 @@ impl DatabaseManager {
     // Generate a unique suffix for this query execution
     let query_suffix = chrono::Utc::now().timestamp_millis();
 
-    // Extract both table names from the join query
+    // Extract all table names from the join query
     let words: Vec<&str> = sql_query.split_whitespace().collect();
     let mut table_names = Vec::new();
 
@@ -624,111 +624,102 @@ impl DatabaseManager {
       }
     }
 
-    if table_names.len() != 2 {
+    if table_names.len() < 2 {
       return Err(DataFusionError::Execution(
-        "Invalid join query: must specify exactly two tables".to_string(),
+        "Invalid join query: must specify at least two tables".to_string(),
       ));
     }
 
-    let first_table = table_names[0];
-    let second_table = table_names[1];
-
-    // Get files for both tables
-    let first_table_files = self.build_files_list(db_name, first_table, username).map_err(|e| {
-      println!("Failed to get files for first table {}: {}", first_table, e);
-      DataFusionError::Execution(format!("Failed to get files for first table: {}", e))
-    })?;
-
-    let second_table_files = self.build_files_list(db_name, second_table, username).map_err(|e| {
-      println!("Failed to get files for second table {}: {}", second_table, e);
-      DataFusionError::Execution(format!("Failed to get files for second table: {}", e))
-    })?;
-
-    // Register all files for first table
-    let mut first_table_names = Vec::new();
-    for (i, file_path) in first_table_files.iter().enumerate() {
-      let temp_table_name = format!("{}_{}_{}", first_table, i, query_suffix);
-      if let Err(e) = session_context
-        .register_parquet(&temp_table_name, file_path, ParquetReadOptions::default())
-        .await
-      {
-        println!("Failed to register {}: {:?}", file_path, e);
-      } else {
-        first_table_names.push(temp_table_name);
+    // Remove duplicates while preserving order
+    let mut unique_table_names = Vec::new();
+    for table_name in table_names {
+      if !unique_table_names.contains(&table_name) {
+        unique_table_names.push(table_name);
       }
     }
 
-    // Register all files for second table
-    let mut second_table_names = Vec::new();
-    for (i, file_path) in second_table_files.iter().enumerate() {
-      let temp_table_name = format!("{}_{}_{}", second_table, i, query_suffix);
-      if let Err(e) = session_context
-        .register_parquet(&temp_table_name, file_path, ParquetReadOptions::default())
-        .await
-      {
-        println!("Failed to register {}: {:?}", file_path, e);
-      } else {
-        second_table_names.push(temp_table_name);
+    // Store information about each table
+    let mut table_info: HashMap<&str, (Vec<String>, Vec<String>, String)> = HashMap::new(); // table_name -> (file_paths, temp_table_names, columns)
+
+    // Process each unique table
+    for table_name in &unique_table_names {
+      // Get files for this table
+      let table_files = self.build_files_list(db_name, table_name, username).map_err(|e| {
+        println!("Failed to get files for table {}: {}", table_name, e);
+        DataFusionError::Execution(format!("Failed to get files for table {}: {}", table_name, e))
+      })?;
+
+      // Register all files for this table
+      let mut temp_table_names = Vec::new();
+      for (i, file_path) in table_files.iter().enumerate() {
+        let temp_table_name = format!("{}_{}_{}", table_name, i, query_suffix);
+        if let Err(e) = session_context
+          .register_parquet(&temp_table_name, file_path, ParquetReadOptions::default())
+          .await
+        {
+          println!("Failed to register {}: {:?}", file_path, e);
+        } else {
+          temp_table_names.push(temp_table_name);
+        }
       }
+
+      if temp_table_names.is_empty() {
+        println!("No valid files found for table: {}", table_name);
+        return Err(DataFusionError::Plan(format!("No valid files found for table: {}", table_name)));
+      }
+
+      // Get column names for this table
+      let columns = get_table_columns(&session_context, &temp_table_names[0]).await?;
+
+      table_info.insert(table_name, (table_files, temp_table_names, columns));
     }
 
-    if first_table_names.is_empty() || second_table_names.is_empty() {
-      println!("No valid tables found for join operation");
-      return Err(DataFusionError::Plan("No valid tables found for join operation".to_string()));
+    // Create combined tables for each unique table
+    let mut combined_table_names: HashMap<&str, String> = HashMap::new();
+
+    for (table_name, (_, temp_table_names, columns)) in &table_info {
+      let combined_query = format!(
+        "SELECT {} FROM ({}) AS combined_{}_{}",
+        columns,
+        temp_table_names
+          .iter()
+          .map(|name| format!("SELECT {} FROM {}", columns, name))
+          .collect::<Vec<_>>()
+          .join(" UNION ALL "),
+        table_name,
+        query_suffix
+      );
+
+      // Execute the combined query
+      let combined_df = session_context.sql(&combined_query).await?;
+      let combined_results = combined_df.collect().await?;
+
+      if combined_results.is_empty() {
+        return Err(DataFusionError::Plan(format!("No data found for table: {}", table_name)));
+      }
+
+      let schema = combined_results[0].schema();
+      let mem_table = MemTable::try_new(schema, vec![combined_results])?;
+
+      let combined_name = format!("combined_{}_{}", table_name, query_suffix);
+      session_context.register_table(&combined_name, Arc::new(mem_table))?;
+
+      combined_table_names.insert(table_name, combined_name);
     }
 
-    // Create combined tables for both sides of the join
-    let first_columns = get_table_columns(&session_context, &first_table_names[0]).await?;
-    let second_columns = get_table_columns(&session_context, &second_table_names[0]).await?;
+    // Replace all table names in the SQL query with their combined equivalents
+    let mut adjusted_sql_query = sql_query.to_string();
 
-    let first_combined_query = format!(
-      "SELECT {} FROM ({}) AS combined_first_{}",
-      first_columns,
-      first_table_names
-        .iter()
-        .map(|name| format!("SELECT {} FROM {}", first_columns, name))
-        .collect::<Vec<_>>()
-        .join(" UNION ALL "),
-      query_suffix
-    );
+    for (original_table, combined_table) in &combined_table_names {
+      // Replace in FROM clause
+      adjusted_sql_query = adjusted_sql_query.replace(&format!("FROM {}", original_table), &format!("FROM {}", combined_table));
 
-    let second_combined_query = format!(
-      "SELECT {} FROM ({}) AS combined_second_{}",
-      second_columns,
-      second_table_names
-        .iter()
-        .map(|name| format!("SELECT {} FROM {}", second_columns, name))
-        .collect::<Vec<_>>()
-        .join(" UNION ALL "),
-      query_suffix
-    );
+      // Replace in JOIN clauses
+      adjusted_sql_query = adjusted_sql_query.replace(&format!("JOIN {}", original_table), &format!("JOIN {}", combined_table));
 
-    // Execute the combined queries
-    let first_df = session_context.sql(&first_combined_query).await?;
-    let second_df = session_context.sql(&second_combined_query).await?;
-
-    // Register the combined tables
-    let first_results = first_df.collect().await?;
-    let second_results = second_df.collect().await?;
-
-    let first_schema = first_results[0].schema();
-    let second_schema = second_results[0].schema();
-
-    let first_mem_table = MemTable::try_new(first_schema, vec![first_results])?;
-    let second_mem_table = MemTable::try_new(second_schema, vec![second_results])?;
-
-    let first_combined_name = format!("combined_first_{}", query_suffix);
-    let second_combined_name = format!("combined_second_{}", query_suffix);
-
-    session_context.register_table(&first_combined_name, Arc::new(first_mem_table))?;
-    session_context.register_table(&second_combined_name, Arc::new(second_mem_table))?;
-
-    let adjusted_sql_query = sql_query
-      .replace(&format!("FROM {}", first_table), &format!("FROM {}", first_combined_name))
-      .replace(&format!("JOIN {}", second_table), &format!("JOIN {}", second_combined_name))
-      // Also replace table names in the ON clause if they appear without aliases
-      .replace(&format!("{}.", first_table), &format!("{}.", first_combined_name))
-      .replace(&format!("{}.", second_table), &format!("{}.", second_combined_name));
+      // Replace table prefixes in column references (e.g., table.column)
+      adjusted_sql_query = adjusted_sql_query.replace(&format!("{}.", original_table), &format!("{}.", combined_table));
+    }
 
     let final_df = session_context.sql(&adjusted_sql_query).await?;
     let final_results = final_df.collect().await?;

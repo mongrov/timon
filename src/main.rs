@@ -302,23 +302,47 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
         "unique": true,
         "datetime": true
       },
-      "heartRate": {
-        "type": "int"
-      },
-      "highBP": {
-        "type": "int"
-      },
       "hrv": {
         "type": "int"
       },
-      "lowBP": {
+      "heartRate": {
         "type": "int"
       },
       "stress": {
         "type": "int"
       },
+      "diastolicBP": {
+        "type": "int"
+      },
+      "systolicBP": {
+        "type": "int"
+      },
       "vascularAging": {
         "type": "int"
+      },
+      "is_sync": {
+        "type": "bool"
+      }
+    }
+    "#;
+
+  // Sleep Table Schema
+  let sleep_schema = r#"
+    {
+      "date":{
+        "type":"int",
+        "required":true,
+        "unique":true,
+        "datetime":true
+      },
+      "unitLength":{
+        "type":"int|float"
+      },
+      "quality":{
+        "type":"int|float"
+      },
+      "start":{
+        "type":"string"
       }
     }
     "#;
@@ -342,13 +366,16 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
   let activity_details_result = create_table(DATABASE_NAME, "activitydetails", &activity_details_schema);
   println!("Create activitydetails table -> {}", activity_details_result.unwrap());
 
+  let sleep_result = create_table(DATABASE_NAME, "sleep", &sleep_schema);
+  println!("Create sleep table -> {}", sleep_result.unwrap());
+
   let spo2_result = create_table(DATABASE_NAME, "spo2_readings", &spo2_schema);
   println!("Create SPO2 table -> {}", spo2_result.unwrap());
 
   let hr_result = create_table(DATABASE_NAME, "heart_rate", &heartrate_schema);
   println!("Create heart rate table -> {}", hr_result.unwrap());
 
-  let hrv_result = create_table(DATABASE_NAME, "hrv_readings", &hrv_schema);
+  let hrv_result = create_table(DATABASE_NAME, "hrv_table", &hrv_schema);
   println!("Create HRV table -> {}", hrv_result.unwrap());
 
   let temp_result = create_table(DATABASE_NAME, "temperature_readings", &temperature_schema);
@@ -365,8 +392,9 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
     let formatted_activity_details: Vec<serde_json::Value> = activity_details
       .iter()
       .map(|reading| {
-        let timestamp = reading["date"].as_i64().unwrap_or(0);
-        let date = DateTime::from_timestamp(timestamp, 0).unwrap_or(DateTime::<Utc>::MIN_UTC);
+        let date_str = reading["date"].as_str().unwrap_or("2025.01.01 00:00:00");
+        let naive_datetime = chrono::NaiveDateTime::parse_from_str(date_str, "%Y.%m.%d %H:%M:%S").unwrap_or_default();
+        let date = DateTime::<Utc>::from_naive_utc_and_offset(naive_datetime, Utc);
         json!({
           "date": date,
           "step": reading["step"],
@@ -386,8 +414,9 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
     let formatted_spo2: Vec<serde_json::Value> = spo2
       .iter()
       .map(|reading| {
-        let timestamp = reading["date"].as_i64().unwrap_or(0);
-        let date = DateTime::from_timestamp(timestamp, 0).unwrap_or(DateTime::<Utc>::MIN_UTC);
+        let date_str = reading["date"].as_str().unwrap_or("2025.01.01 00:00:00");
+        let naive_datetime = chrono::NaiveDateTime::parse_from_str(date_str, "%Y.%m.%d %H:%M:%S").unwrap_or_default();
+        let date = DateTime::<Utc>::from_naive_utc_and_offset(naive_datetime, Utc);
         json!({
           "date": date,
           "automaticSpo2Data": reading["automaticSpo2Data"]
@@ -404,8 +433,9 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
     let formatted_hr: Vec<serde_json::Value> = heartrate
       .iter()
       .map(|reading| {
-        let timestamp = reading["date"].as_i64().unwrap_or(0);
-        let date = DateTime::from_timestamp(timestamp, 0).unwrap_or(DateTime::<Utc>::MIN_UTC);
+        let date_str = reading["date"].as_str().unwrap_or("2025.01.01 00:00:00");
+        let naive_datetime = chrono::NaiveDateTime::parse_from_str(date_str, "%Y.%m.%d %H:%M:%S").unwrap_or_default();
+        let date = DateTime::<Utc>::from_naive_utc_and_offset(naive_datetime, Utc);
         json!({
           "date": date,
           "singleHR": reading["singleHR"]
@@ -422,22 +452,44 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
     let formatted_hrv: Vec<serde_json::Value> = hrv
       .iter()
       .map(|reading| {
-        let timestamp = reading["date"].as_i64().unwrap_or(0);
-        let date = DateTime::from_timestamp(timestamp, 0).unwrap_or(DateTime::<Utc>::MIN_UTC);
+        let date_str = reading["date"].as_str().unwrap_or("2025.01.01 00:00:00");
+        let naive_datetime = chrono::NaiveDateTime::parse_from_str(date_str, "%Y.%m.%d %H:%M:%S").unwrap_or_default();
+        let date = DateTime::<Utc>::from_naive_utc_and_offset(naive_datetime, Utc);
         json!({
           "date": date,
           "heartRate": reading["heartRate"],
-          "highBP": reading["highBP"],
           "hrv": reading["hrv"],
-          "lowBP": reading["lowBP"],
           "stress": reading["stress"],
-          "vascularAging": reading["vascularAging"]
+          "vascularAging": reading["vascularAging"],
+          "diastolicBP": reading["diastolicBP"],
+          "systolicBP": reading["systolicBP"],
         })
       })
       .collect();
     let hrv_json = serde_json::to_string(&formatted_hrv)?;
-    let insertion_result = insert(DATABASE_NAME, "hrv_readings", &hrv_json)?;
+    let insertion_result = insert(DATABASE_NAME, "hrv_table", &hrv_json)?;
     println!("HRV insertion result: {}", insertion_result);
+  }
+
+  // Insert sleep readings
+  if let Some(sleep) = json_data["sleep"].as_array() {
+    let formatted_sleep: Vec<serde_json::Value> = sleep
+      .iter()
+      .map(|reading| {
+        let date_str = reading["date"].as_str().unwrap_or("2025.01.01 00:00:00");
+        let naive_datetime = chrono::NaiveDateTime::parse_from_str(date_str, "%Y.%m.%d %H:%M:%S").unwrap_or_default();
+        let date = DateTime::<Utc>::from_naive_utc_and_offset(naive_datetime, Utc);
+        json!({
+          "date": date,
+          "unitLength": reading["unitLength"],
+          "quality": reading["quality"],
+          "start": reading["start"]
+        })
+      })
+      .collect();
+    let sleep_json = serde_json::to_string(&formatted_sleep)?;
+    let insertion_result = insert(DATABASE_NAME, "sleep", &sleep_json)?;
+    println!("Sleep insertion result: {}", insertion_result);
   }
 
   // Insert temperature readings
@@ -445,8 +497,9 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
     let formatted_temp: Vec<serde_json::Value> = temperature
       .iter()
       .map(|reading| {
-        let timestamp = reading["date"].as_i64().unwrap_or(0);
-        let date = DateTime::from_timestamp(timestamp, 0).unwrap_or(DateTime::<Utc>::MIN_UTC);
+        let date_str = reading["date"].as_str().unwrap_or("2025.01.01 00:00:00");
+        let naive_datetime = chrono::NaiveDateTime::parse_from_str(date_str, "%Y.%m.%d %H:%M:%S").unwrap_or_default();
+        let date = DateTime::<Utc>::from_naive_utc_and_offset(naive_datetime, Utc);
         json!({
           "date": date,
           "temperature": reading["temperature"]
@@ -575,7 +628,7 @@ async fn test_ziva_join_query() -> Result<(), Box<dyn std::error::Error>> {
   let result = query(DATABASE_NAME, sql_query, None).await?;
   let duration = start_time.elapsed();
   println!("Query time: {:.3} seconds", duration.as_secs_f64());
-  println!("Result: {:?}", result);
+  println!("Result: {}", result["json_value"]);
 
   Ok(())
 }
