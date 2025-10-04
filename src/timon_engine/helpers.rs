@@ -413,13 +413,8 @@ pub fn extract_table_name(sql_query: &str) -> String {
       // Skip common SQL keywords that might be captured
       if matches!(
         table_name_lower.as_str(),
-        "select" | "where" | "group" | "order" | "having" | "limit" | "union" | "case" | "when" | "then" | "else" | "end" | "local" | "midnight"
+        "select" | "where" | "group" | "order" | "having" | "limit" | "union" | "case" | "when" | "then" | "else" | "end"
       ) {
-        continue;
-      }
-
-      // Skip if it looks like a column name (contains common column patterns)
-      if table_name_lower.contains("_date") || table_name_lower.contains("_time") || table_name_lower.contains("target_") {
         continue;
       }
 
@@ -901,4 +896,110 @@ pub fn build_rules_tree(table_schema: Value) -> Vec<Condition> {
   }
 
   conditions
+}
+
+pub fn filter_actual_table_names(sql_query: &str, table_names: &[&str]) -> Vec<String> {
+  // Remove comments and normalize whitespace for better CTE detection
+  let comment_regex = Regex::new(r"--.*?$").unwrap();
+  let normalized_query = comment_regex.replace_all(sql_query, "");
+  let normalized_query = normalized_query.replace('\n', " ").replace('\r', " ");
+  let whitespace_regex = Regex::new(r"\s+").unwrap();
+  let normalized_query = whitespace_regex.replace_all(&normalized_query, " ");
+
+  // Collect all CTE names from WITH clauses
+  let mut cte_names = std::collections::HashSet::new();
+
+  // Pattern for initial WITH CTE
+  let with_cte_regex = Regex::new(r#"(?i)WITH\s+(?:RECURSIVE\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s+AS"#).unwrap();
+  for cap in with_cte_regex.captures_iter(&normalized_query) {
+    if let Some(cte_name) = cap.get(1) {
+      cte_names.insert(cte_name.as_str().to_lowercase());
+    }
+  }
+
+  // Pattern for subsequent CTEs (comma-separated)
+  let comma_cte_regex = Regex::new(r#"(?i),\s*([a-zA-Z_][a-zA-Z0-9_]*)\s+AS"#).unwrap();
+  for cap in comma_cte_regex.captures_iter(&normalized_query) {
+    if let Some(cte_name) = cap.get(1) {
+      cte_names.insert(cte_name.as_str().to_lowercase());
+    }
+  }
+
+  // More comprehensive pattern to catch CTEs that might be missed
+  let general_cte_regex = Regex::new(r#"(?i)([a-zA-Z_][a-zA-Z0-9_]*)\s+AS\s*\("#).unwrap();
+  for cap in general_cte_regex.captures_iter(&normalized_query) {
+    if let Some(cte_name) = cap.get(1) {
+      cte_names.insert(cte_name.as_str().to_lowercase());
+    }
+  }
+
+  // Collect column aliases and references that appear in non-table contexts
+  let mut column_aliases = std::collections::HashSet::new();
+
+  // Pattern to find column aliases in SELECT clauses (e.g., "column_name as alias" or "expression as alias")
+  let select_alias_regex = Regex::new(r#"(?i)SELECT\s+.*?\b\w+\s+AS\s+([a-zA-Z_][a-zA-Z0-9_]*)"#).unwrap();
+  for cap in select_alias_regex.captures_iter(&normalized_query) {
+    if let Some(alias) = cap.get(1) {
+      column_aliases.insert(alias.as_str().to_lowercase());
+    }
+  }
+
+  // Pattern to find column references that are part of compound column names (e.g., "target_date_local", "baseline_hrv")
+  for &table_name in table_names {
+    let table_name_lower = table_name.to_lowercase();
+
+    // Check if this name appears as part of a compound column name
+    let compound_patterns = [
+      format!(r"(?i)\b[a-zA-Z_][a-zA-Z0-9_]*_{}\b", regex::escape(table_name)), // prefix_tablename
+      format!(r"(?i)\b{}_{}\b", regex::escape(table_name), r"[a-zA-Z_][a-zA-Z0-9_]*"), // tablename_suffix
+      format!(
+        r"(?i)\b[a-zA-Z_][a-zA-Z0-9_]*_{}_{}\b",
+        regex::escape(table_name),
+        r"[a-zA-Z_][a-zA-Z0-9_]*"
+      ), // prefix_tablename_suffix
+    ];
+
+    for pattern in &compound_patterns {
+      if let Ok(regex) = Regex::new(pattern) {
+        if regex.is_match(&normalized_query) {
+          column_aliases.insert(table_name_lower.clone());
+          break;
+        }
+      }
+    }
+  }
+
+  // Filter out only what we can definitively identify as non-table constructs
+  table_names
+    .iter()
+    .filter_map(|&table_name| {
+      let table_name_lower = table_name.to_lowercase();
+
+      // Skip if it's a CTE name (definitive)
+      if cte_names.contains(&table_name_lower) {
+        return None;
+      }
+
+      // Skip if it's a column alias or reference (definitive)
+      if column_aliases.contains(&table_name_lower) {
+        return None;
+      }
+
+      // Skip if it's a function call (definitive)
+      if sql_query.contains(&format!("{}(", table_name)) {
+        return None;
+      }
+
+      // Skip only well-known SQL keywords (definitive)
+      if matches!(
+        table_name_lower.as_str(),
+        "select" | "where" | "group" | "order" | "having" | "limit" | "union" | "case" | "when" | "then" | "else" | "end"
+      ) {
+        return None;
+      }
+
+      // This could be a real table name - let it through
+      Some(table_name.to_string())
+    })
+    .collect()
 }
