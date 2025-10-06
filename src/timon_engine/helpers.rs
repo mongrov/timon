@@ -368,65 +368,6 @@ pub fn json_to_arrow(json_values: &[Value]) -> Result<(Vec<ArrayRef>, Schema), B
   Ok((arrays, schema))
 }
 
-pub fn extract_table_name(sql_query: &str) -> String {
-  // First, collect all CTE names from WITH clauses to exclude them later
-  let cte_regex = Regex::new(r#"(?i)WITH\s+(?:RECURSIVE\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s+AS"#).unwrap();
-  let mut cte_names = std::collections::HashSet::new();
-
-  for cap in cte_regex.captures_iter(sql_query) {
-    if let Some(cte_name) = cap.get(1) {
-      cte_names.insert(cte_name.as_str().to_lowercase());
-    }
-  }
-
-  // Also collect CTE names from comma-separated WITH clauses
-  let cte_comma_regex = Regex::new(r#"(?i),\s*([a-zA-Z_][a-zA-Z0-9_]*)\s+AS"#).unwrap();
-  for cap in cte_comma_regex.captures_iter(sql_query) {
-    if let Some(cte_name) = cap.get(1) {
-      cte_names.insert(cte_name.as_str().to_lowercase());
-    }
-  }
-
-  // Remove comments to avoid matching table names in comments
-  let comment_regex = Regex::new(r"--.*?$").unwrap();
-  let sql_without_comments = comment_regex.replace_all(sql_query, "");
-
-  // Now look for table names in FROM/JOIN clauses with more specific pattern
-  // This pattern ensures we match actual table references, not parts of column names or other contexts
-  let table_regex = Regex::new(r#"(?i)(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:[a-zA-Z_][a-zA-Z0-9_]*\s*)?(?:WHERE|ON|GROUP|ORDER|HAVING|LIMIT|UNION|CROSS|LEFT|RIGHT|INNER|OUTER|,|\)|$|;)"#).unwrap();
-
-  for cap in table_regex.captures_iter(&sql_without_comments) {
-    if let Some(table_match) = cap.get(1) {
-      let table_name = table_match.as_str();
-      let table_name_lower = table_name.to_lowercase();
-
-      // Skip if it's a CTE name
-      if cte_names.contains(&table_name_lower) {
-        continue;
-      }
-
-      // Skip if it's a function call
-      if sql_without_comments.contains(&format!("{}(", table_name)) {
-        continue;
-      }
-
-      // Skip common SQL keywords that might be captured
-      if matches!(
-        table_name_lower.as_str(),
-        "select" | "where" | "group" | "order" | "having" | "limit" | "union" | "case" | "when" | "then" | "else" | "end"
-      ) {
-        continue;
-      }
-
-      // This looks like a real table name
-      return table_name.to_string();
-    }
-  }
-
-  eprintln!("No table name found in the SQL query.");
-  String::new()
-}
-
 pub fn rounded_timestamp(timestamp: i64, interval: u32) -> String {
   let dt = Utc.timestamp_opt(timestamp, 0).single().expect("Invalid timestamp");
 
@@ -898,6 +839,112 @@ pub fn build_rules_tree(table_schema: Value) -> Vec<Condition> {
   conditions
 }
 
+pub fn extract_table_name(sql_query: &str) -> String {
+  // First, collect all CTE names from WITH clauses to exclude them later
+  let cte_regex = Regex::new(r#"(?i)WITH\s+(?:RECURSIVE\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s+AS"#).unwrap();
+  let mut cte_names = std::collections::HashSet::new();
+
+  for cap in cte_regex.captures_iter(sql_query) {
+    if let Some(cte_name) = cap.get(1) {
+      cte_names.insert(cte_name.as_str().to_lowercase());
+    }
+  }
+
+  // Also collect CTE names from comma-separated WITH clauses
+  let cte_comma_regex = Regex::new(r#"(?i),\s*([a-zA-Z_][a-zA-Z0-9_]*)\s+AS"#).unwrap();
+  for cap in cte_comma_regex.captures_iter(sql_query) {
+    if let Some(cte_name) = cap.get(1) {
+      cte_names.insert(cte_name.as_str().to_lowercase());
+    }
+  }
+
+  // Remove comments to avoid matching table names in comments
+  let comment_regex = Regex::new(r"--.*?$").unwrap();
+  let sql_without_comments = comment_regex.replace_all(sql_query, "");
+
+  // Now look for table names in FROM/JOIN clauses with more specific pattern
+  // This pattern ensures we match actual table references, not parts of column names or other contexts
+  let table_regex = Regex::new(r#"(?i)(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:\s+[a-zA-Z_][a-zA-Z0-9_]*)?(?:\s+(?:WHERE|ON|GROUP|ORDER|HAVING|LIMIT|UNION|CROSS|LEFT|RIGHT|INNER|OUTER|,|$|;)|\s*$)"#).unwrap();
+
+  for cap in table_regex.captures_iter(&sql_without_comments) {
+    if let Some(table_match) = cap.get(1) {
+      let table_name = table_match.as_str();
+      let table_name_lower = table_name.to_lowercase();
+
+      // Skip if the captured name is not a valid identifier (contains invalid characters)
+      if !table_name.chars().all(|c| c.is_alphanumeric() || c == '_') || table_name.is_empty() {
+        continue;
+      }
+
+      // Skip if it starts with a number (invalid table name)
+      if table_name.chars().next().map_or(true, |c| c.is_numeric()) {
+        continue;
+      }
+
+      // Skip if it's a CTE name
+      if cte_names.contains(&table_name_lower) {
+        continue;
+      }
+
+      // Skip if it's a function call
+      if sql_without_comments.contains(&format!("{}(", table_name)) {
+        continue;
+      }
+
+      // Skip common SQL keywords that might be captured
+      if matches!(
+        table_name_lower.as_str(),
+        "select" | "where" | "group" | "order" | "having" | "limit" | "union" | "case" | "when" | "then" | "else" | "end"
+      ) {
+        continue;
+      }
+
+      // This looks like a real table name
+      return table_name.to_string();
+    }
+  }
+
+  eprintln!("No table name found in the SQL query.");
+  String::new()
+}
+
+pub fn extract_all_table_names(sql_query: &str) -> Vec<String> {
+  // Remove comments and normalize whitespace
+  let comment_regex = Regex::new(r"--.*?$").unwrap();
+  let normalized_query = comment_regex.replace_all(sql_query, "");
+  let normalized_query = normalized_query.replace('\n', " ").replace('\r', " ");
+  let whitespace_regex = Regex::new(r"\s+").unwrap();
+  let normalized_query = whitespace_regex.replace_all(&normalized_query, " ");
+
+  // Extract table names from FROM and JOIN clauses
+  let mut table_names = Vec::new();
+  let table_regex = Regex::new(r#"(?i)(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)"#).unwrap();
+
+  for cap in table_regex.captures_iter(&normalized_query) {
+    if let Some(table_match) = cap.get(1) {
+      let table_name = table_match.as_str();
+
+      // Validate that it's a proper identifier
+      if table_name.chars().all(|c| c.is_alphanumeric() || c == '_')
+        && !table_name.is_empty()
+        && !table_name.chars().next().map_or(true, |c| c.is_numeric())
+      {
+        table_names.push(table_name.to_string());
+      }
+    }
+  }
+
+  // Remove duplicates while preserving order
+  let mut unique_table_names = Vec::new();
+  for table_name in table_names {
+    if !unique_table_names.contains(&table_name) {
+      unique_table_names.push(table_name);
+    }
+  }
+
+  unique_table_names
+}
+
 pub fn filter_actual_table_names(sql_query: &str, table_names: &[&str]) -> Vec<String> {
   // Remove comments and normalize whitespace for better CTE detection
   let comment_regex = Regex::new(r"--.*?$").unwrap();
@@ -945,8 +992,15 @@ pub fn filter_actual_table_names(sql_query: &str, table_names: &[&str]) -> Vec<S
   }
 
   // Pattern to find column references that are part of compound column names (e.g., "target_date_local", "baseline_hrv")
+  // But be more careful to avoid false positives for common table names like "sleep"
   for &table_name in table_names {
     let table_name_lower = table_name.to_lowercase();
+
+    // Skip common table names that are likely to appear in compound column names
+    // but are actually legitimate table names
+    if matches!(table_name_lower.as_str(), "sleep" | "user" | "data" | "time" | "date") {
+      continue;
+    }
 
     // Check if this name appears as part of a compound column name
     let compound_patterns = [
@@ -974,6 +1028,16 @@ pub fn filter_actual_table_names(sql_query: &str, table_names: &[&str]) -> Vec<S
     .iter()
     .filter_map(|&table_name| {
       let table_name_lower = table_name.to_lowercase();
+
+      // Skip if the name is not a valid identifier (contains invalid characters)
+      if !table_name.chars().all(|c| c.is_alphanumeric() || c == '_') || table_name.is_empty() {
+        return None;
+      }
+
+      // Skip if it starts with a number (invalid table name)
+      if table_name.chars().next().map_or(true, |c| c.is_numeric()) {
+        return None;
+      }
 
       // Skip if it's a CTE name (definitive)
       if cte_names.contains(&table_name_lower) {

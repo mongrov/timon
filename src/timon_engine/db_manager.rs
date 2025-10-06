@@ -1,6 +1,6 @@
 use super::helpers::{
-  build_rules_tree, extract_partition_time, extract_query_time_range, extract_table_name, filter_actual_table_names, get_monthly_partition_overlaps,
-  get_property_fields, get_table_columns, json_to_arrow, record_batches_to_json, rounded_timestamp, row_to_json,
+  build_rules_tree, extract_all_table_names, extract_partition_time, extract_query_time_range, extract_table_name, filter_actual_table_names,
+  get_monthly_partition_overlaps, get_property_fields, get_table_columns, json_to_arrow, record_batches_to_json, rounded_timestamp, row_to_json,
 };
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use datafusion::arrow::array::Array;
@@ -556,28 +556,11 @@ impl DatabaseManager {
 
     // Check if this is a JOIN query with multiple actual tables
     if sql_query.to_lowercase().contains("join") {
-      // Extract all table names from the join query
-      let words: Vec<&str> = sql_query.split_whitespace().collect();
-      let mut table_names = Vec::new();
-
-      for i in 0..words.len() {
-        if words[i].to_lowercase() == "from" && i + 1 < words.len() {
-          table_names.push(words[i + 1]);
-        } else if words[i].to_lowercase() == "join" && i + 1 < words.len() {
-          table_names.push(words[i + 1]);
-        }
-      }
-
-      // Remove duplicates while preserving order
-      let mut unique_table_names = Vec::new();
-      for table_name in table_names {
-        if !unique_table_names.contains(&table_name) {
-          unique_table_names.push(table_name);
-        }
-      }
-
+      // Extract all table names from the join query using proper parsing
+      let unique_table_names = extract_all_table_names(sql_query);
       // Filter to get only actual table names (not CTEs or aliases)
-      let actual_table_names = filter_actual_table_names(sql_query, &unique_table_names);
+      let unique_table_names_refs: Vec<&str> = unique_table_names.iter().map(|s| s.as_str()).collect();
+      let actual_table_names = filter_actual_table_names(sql_query, &unique_table_names_refs);
 
       // Only use handle_join_query if there are multiple actual tables
       if actual_table_names.len() > 1 {
@@ -680,10 +663,9 @@ impl DatabaseManager {
     // Process each actual table (filtered from CTEs and aliases)
     for table_name in &actual_table_names {
       // Get files for this table
-      let table_files = self.build_files_list(db_name, table_name, username).map_err(|e| {
-        println!("Failed to get files for table {}: {}", table_name, e);
-        DataFusionError::Execution(format!("Failed to get files for table {}: {}", table_name, e))
-      })?;
+      let table_files = self
+        .build_files_list(db_name, table_name, username)
+        .map_err(|e| DataFusionError::Execution(format!("Failed to get files for table {}: {}", table_name, e)))?;
 
       // Register all files for this table
       let mut temp_table_names = Vec::new();
@@ -700,7 +682,6 @@ impl DatabaseManager {
       }
 
       if temp_table_names.is_empty() {
-        println!("No valid files found for table: {}", table_name);
         return Err(DataFusionError::Plan(format!("No valid files found for table: {}", table_name)));
       }
 

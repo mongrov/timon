@@ -366,13 +366,13 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
   let activity_details_result = create_table(DATABASE_NAME, "activitydetails", &activity_details_schema);
   println!("Create activitydetails table -> {}", activity_details_result.unwrap());
 
-  let sleep_result = create_table(DATABASE_NAME, "sleep", &sleep_schema);
+  let sleep_result = create_table(DATABASE_NAME, "sleep_table", &sleep_schema);
   println!("Create sleep table -> {}", sleep_result.unwrap());
 
   let spo2_result = create_table(DATABASE_NAME, "spo2_readings", &spo2_schema);
   println!("Create SPO2 table -> {}", spo2_result.unwrap());
 
-  let hr_result = create_table(DATABASE_NAME, "heart_rate", &heartrate_schema);
+  let hr_result = create_table(DATABASE_NAME, "heartrate", &heartrate_schema);
   println!("Create heart rate table -> {}", hr_result.unwrap());
 
   let hrv_result = create_table(DATABASE_NAME, "hrv_table", &hrv_schema);
@@ -443,7 +443,7 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
       })
       .collect();
     let heartrate_json = serde_json::to_string(&formatted_hr)?;
-    let insertion_result = insert(DATABASE_NAME, "heart_rate", &heartrate_json)?;
+    let insertion_result = insert(DATABASE_NAME, "heartrate", &heartrate_json)?;
     println!("Heart rate insertion result: {}", insertion_result);
   }
 
@@ -488,7 +488,7 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
       })
       .collect();
     let sleep_json = serde_json::to_string(&formatted_sleep)?;
-    let insertion_result = insert(DATABASE_NAME, "sleep", &sleep_json)?;
+    let insertion_result = insert(DATABASE_NAME, "sleep_table", &sleep_json)?;
     println!("Sleep insertion result: {}", insertion_result);
   }
 
@@ -547,7 +547,7 @@ async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
 
   // Query heart rate readings
   let start_time = Instant::now();
-  let hr_query = format!(r#"SELECT * FROM heart_rate"#);
+  let hr_query = format!(r#"SELECT * FROM heartrate"#);
   let hr_result = query(DATABASE_NAME, &hr_query, None).await?;
   let duration = start_time.elapsed();
   println!(
@@ -583,7 +583,7 @@ async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
 
   // Query for average heart rate
   let start_time = Instant::now();
-  let avg_hr_query = format!(r#"SELECT * FROM heart_rate"#);
+  let avg_hr_query = format!(r#"SELECT * FROM heartrate"#);
   let avg_hr_result = query(DATABASE_NAME, &avg_hr_query, None).await?;
   let duration = start_time.elapsed();
   println!(
