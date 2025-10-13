@@ -552,8 +552,6 @@ impl DatabaseManager {
       return Err(DataFusionError::Plan("No valid tables found to query.".to_string()));
     }
 
-    let column_names = get_table_columns(&self.session_context, &table_names[0]).await?;
-
     // Check if this is a JOIN query with multiple actual tables
     if sql_query.to_lowercase().contains("join") {
       // Extract all table names from the join query using proper parsing
@@ -570,6 +568,8 @@ impl DatabaseManager {
       }
       // If only one actual table, continue with regular query processing
     }
+
+    let column_names = get_table_columns(&self.session_context, &table_names[0]).await?;
 
     let union_query = if table_names.len() == 1 {
       // Single partition - no need for UNION
@@ -588,9 +588,18 @@ impl DatabaseManager {
     };
 
     let adjusted_sql_query = sql_query.replace(&table_name, "combined_table");
+    // Check if the query already contains CTEs (WITH clause)
+    let has_cte = sql_query.trim_start().to_uppercase().starts_with("WITH");
 
     let final_query = if table_names.len() == 1 {
       adjusted_sql_query.replace("combined_table", &table_names[0])
+    } else if has_cte {
+      // If query already has CTEs, we need to inject combined_table as the first CTE
+      // Replace "WITH" with "WITH combined_table AS (...), "
+      let with_pattern = regex::Regex::new(r"(?i)^\s*WITH\s+").unwrap();
+      with_pattern
+        .replace(&adjusted_sql_query, &format!("WITH combined_table AS ({}), ", union_query))
+        .to_string()
     } else {
       format!("WITH combined_table AS ({}) {}", union_query, adjusted_sql_query)
     };
