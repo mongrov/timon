@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose, Engine as _};
-use chrono::{DateTime, Datelike, Days, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc, Weekday};
+use chrono::{DateTime, Datelike, Days, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc};
 use datafusion::arrow::array::{
   new_null_array, Array, ArrayRef, BooleanArray, BooleanBuilder, Date32Array, Float64Array, Float64Builder, Int32Array, Int64Array, Int64Builder,
   ListArray, ListBuilder, StringArray, StringBuilder, StringViewArray, TimestampMillisecondArray, TimestampNanosecondArray,
@@ -7,11 +7,9 @@ use datafusion::arrow::array::{
 use datafusion::arrow::buffer::OffsetBuffer;
 use datafusion::arrow::datatypes::{DataType, Field, Field as ArrowField, Schema, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::error::Result as DataFusionResult;
 use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReader;
 use datafusion::parquet::data_type::{AsBytes, Decimal};
 use datafusion::parquet::record::{Field as ParquetField, Row};
-use datafusion::prelude::SessionContext;
 use datafusion::scalar::ScalarValue;
 use json_rules_engine::{float_greater_than, float_less_than, int_greater_than, int_less_than, Condition};
 use regex::Regex;
@@ -453,12 +451,6 @@ pub fn get_property_fields(schema: &Value, property: &str) -> Result<Vec<String>
   Ok(fields)
 }
 
-pub async fn get_table_columns(session_context: &SessionContext, table_name: &str) -> DataFusionResult<String> {
-  let df = session_context.sql(&format!("SELECT * FROM {} LIMIT 1", table_name)).await?;
-  let column_names: Vec<String> = df.schema().fields().iter().map(|field| format!("\"{}\"", field.name())).collect();
-  Ok(column_names.join(", "))
-}
-
 pub fn filter_files_by_date_range(files: Vec<String>, start_date: &str, end_date: &str) -> Result<Vec<String>, Box<dyn Error>> {
   let start_date = NaiveDate::parse_from_str(start_date, "%Y-%m-%d")?;
   let end_date = NaiveDate::parse_from_str(end_date, "%Y-%m-%d")?;
@@ -494,172 +486,6 @@ pub fn filter_files_by_date_range(files: Vec<String>, start_date: &str, end_date
     .collect();
 
   Ok(filtered_files)
-}
-
-pub fn extract_query_time_range(sql_query: &str, bucket_interval: u32) -> Option<(i64, i64)> {
-  let re =
-    Regex::new(r#"WHERE\s+.*?\b(date|timestamp)\b\s+BETWEEN\s+['\"]?(\d+|[\d-]+\s+[\d:]+)['\"]?\s+AND\s+['\"]?(\d+|[\d-]+\s+[\d:]+)['\"]?"#).ok()?;
-  if let Some(captures) = re.captures(sql_query) {
-    let start_time_str = &captures[2];
-    let end_time_str = &captures[3];
-
-    // Try parsing as Unix timestamp first
-    if let (Ok(start), Ok(end)) = (start_time_str.parse::<i64>(), end_time_str.parse::<i64>()) {
-      // Convert to DateTime for proper handling
-      let start_dt = Utc.timestamp_opt(start, 0).single()?;
-      let end_dt = Utc.timestamp_opt(end, 0).single()?;
-
-      // For weekly intervals (10080 minutes = 7 days)
-      if bucket_interval == 10080 {
-        // Round to start of week (Monday) for start time
-        let start_week = start_dt.date_naive().week(Weekday::Mon);
-        let rounded_start = Utc
-          .with_ymd_and_hms(
-            start_week.first_day().year(),
-            start_week.first_day().month(),
-            start_week.first_day().day(),
-            0,
-            0,
-            0,
-          )
-          .single()?
-          .timestamp();
-
-        // For end time, we need to ensure it's the last second of the week
-        let end_week = end_dt.date_naive().week(Weekday::Mon);
-        let week_end = Utc
-          .with_ymd_and_hms(
-            end_week.last_day().year(),
-            end_week.last_day().month(),
-            end_week.last_day().day(),
-            23,
-            59,
-            59,
-          )
-          .single()?
-          .timestamp();
-
-        // Take the minimum of the week end and the original end time
-        let rounded_end = week_end.min(end);
-
-        // Ensure end time is at 23:59:59
-        let end_date = Utc.timestamp_opt(rounded_end, 0).single()?;
-        let rounded_end = Utc
-          .with_ymd_and_hms(end_date.year(), end_date.month(), end_date.day(), 23, 59, 59)
-          .single()?
-          .timestamp();
-
-        return Some((rounded_start, rounded_end));
-      }
-      // For daily intervals (1440 minutes = 1 day)
-      else if bucket_interval == 1440 {
-        // Round to start of day for start time
-        let rounded_start = Utc
-          .with_ymd_and_hms(start_dt.year(), start_dt.month(), start_dt.day(), 0, 0, 0)
-          .single()?
-          .timestamp();
-
-        // Round to end of day for end time
-        let rounded_end = Utc
-          .with_ymd_and_hms(end_dt.year(), end_dt.month(), end_dt.day(), 23, 59, 59)
-          .single()?
-          .timestamp();
-
-        return Some((rounded_start, rounded_end));
-      } else {
-        // For regular intervals, round to the nearest bucket
-        let rounded_start = (start / bucket_interval as i64) * bucket_interval as i64;
-        let rounded_end = ((end / bucket_interval as i64) + 1) * bucket_interval as i64 - 1;
-        return Some((rounded_start, rounded_end));
-      }
-    }
-
-    // If not Unix timestamp, try parsing as datetime string
-    let start_timestamp = parse_timestamp(start_time_str)?;
-    let end_timestamp = parse_timestamp(end_time_str)?;
-
-    // Round the timestamps according to the bucket interval
-    let rounded_start = rounded_timestamp(start_timestamp, bucket_interval);
-    let rounded_end = rounded_timestamp(end_timestamp, bucket_interval);
-
-    // Convert the rounded timestamps back to Unix timestamps
-    let start_dt = NaiveDateTime::parse_from_str(&format!("{} 00:00:00", rounded_start), "%Y-%m-%d %H:%M:%S").ok()?;
-    let end_dt = NaiveDateTime::parse_from_str(&format!("{} 23:59:59", rounded_end), "%Y-%m-%d %H:%M:%S").ok()?;
-
-    Some((Utc.from_utc_datetime(&start_dt).timestamp(), Utc.from_utc_datetime(&end_dt).timestamp()))
-  } else {
-    None
-  }
-}
-
-pub fn extract_partition_time(file_path: &str) -> i64 {
-  // Extract the filename from the path
-  let filename = Path::new(file_path).file_name().and_then(|name| name.to_str()).unwrap_or(file_path);
-
-  // Try hourly format (YYYY-MM-DD_HH-MM)
-  let hourly_re = Regex::new(r"(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})").unwrap();
-  if let Some(captures) = hourly_re.captures(filename) {
-    let date_part = &captures[1];
-    let hour = &captures[2];
-    let minute = &captures[3];
-    let datetime_str = format!("{} {}:{}:00", date_part, hour, minute);
-    if let Ok(naive_dt) = NaiveDateTime::parse_from_str(&datetime_str, "%Y-%m-%d %H:%M:%S") {
-      return Utc.from_utc_datetime(&naive_dt).timestamp();
-    }
-  }
-
-  // Try daily format (YYYY-MM-DD_00)
-  let daily_re = Regex::new(r"(\d{4}-\d{2}-\d{2})_00").unwrap();
-  if let Some(captures) = daily_re.captures(filename) {
-    let date_part = &captures[1];
-    let datetime_str = format!("{} 00:00:00", date_part);
-    if let Ok(naive_dt) = NaiveDateTime::parse_from_str(&datetime_str, "%Y-%m-%d %H:%M:%S") {
-      return Utc.from_utc_datetime(&naive_dt).timestamp();
-    }
-  }
-
-  // Try weeky format (YYYY-MM-DD)
-  let daily_no_suffix_re = Regex::new(r"(\d{4}-\d{2}-\d{2})(?:\.parquet)?$").unwrap();
-  if let Some(captures) = daily_no_suffix_re.captures(filename) {
-    let date_part = &captures[1];
-    let datetime_str = format!("{} 00:00:00", date_part);
-    if let Ok(naive_dt) = NaiveDateTime::parse_from_str(&datetime_str, "%Y-%m-%d %H:%M:%S") {
-      return Utc.from_utc_datetime(&naive_dt).timestamp();
-    }
-  }
-
-  // Try monthly format: _YYYY-MM(.parquet)
-  let monthly_re = Regex::new(r"_(\d{4}-\d{2})").unwrap();
-  if let Some(captures) = monthly_re.captures(filename) {
-    let date_part = &captures[1];
-    let datetime_str = format!("{}-01 00:00:00", date_part);
-    if let Ok(naive_dt) = NaiveDateTime::parse_from_str(&datetime_str, "%Y-%m-%d %H:%M:%S") {
-      return Utc.from_utc_datetime(&naive_dt).timestamp();
-    }
-  }
-
-  eprintln!("Failed to extract partition time from: {}", file_path);
-  i64::MIN // Indicate failure
-}
-
-pub fn get_monthly_partition_overlaps(partition_time: i64, query_start: i64, query_end: i64) -> bool {
-  let dt = Utc.timestamp_opt(partition_time, 0).single().unwrap();
-  let year = dt.year();
-  let month = dt.month();
-
-  // Get the first day of the month
-  let partition_start = Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0).single().unwrap().timestamp();
-
-  // Get the last day of the month using chrono's next_month logic
-  let first_of_next_month = if month == 12 {
-    NaiveDate::from_ymd_opt(year + 1, 1, 1).unwrap()
-  } else {
-    NaiveDate::from_ymd_opt(year, month + 1, 1).unwrap()
-  };
-  let last_day = first_of_next_month.pred_opt().unwrap().day();
-  let partition_end = Utc.with_ymd_and_hms(year, month, last_day, 23, 59, 59).single().unwrap().timestamp();
-
-  partition_end >= query_start && partition_start <= query_end
 }
 
 pub fn parse_timestamp(datetime_str: &str) -> Option<i64> {

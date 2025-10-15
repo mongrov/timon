@@ -1,6 +1,6 @@
 use super::helpers::{
-  build_rules_tree, extract_all_table_names, extract_partition_time, extract_query_time_range, extract_table_name, filter_actual_table_names,
-  get_monthly_partition_overlaps, get_property_fields, get_table_columns, json_to_arrow, record_batches_to_json, rounded_timestamp, row_to_json,
+  build_rules_tree, extract_all_table_names, extract_table_name, filter_actual_table_names, get_property_fields, json_to_arrow,
+  record_batches_to_json, rounded_timestamp, row_to_json,
 };
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use datafusion::arrow::array::Array;
@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs::File;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt, fs};
 use tokio::io::Result as TokioResult;
@@ -81,7 +81,6 @@ pub struct DatabaseManager {
   metadata_path: String,
   bucket_interval: u32,
   session_context: SessionContext,
-  registered_tables: Arc<Mutex<HashMap<String, Vec<String>>>>, // Maps table_name -> list of registered file paths
 }
 
 impl DatabaseManager {
@@ -126,7 +125,6 @@ impl DatabaseManager {
       metadata_path,
       bucket_interval,
       session_context: SessionContext::new(),
-      registered_tables: Arc::new(Mutex::new(HashMap::new())),
     };
 
     // Update metadata with the provided storage_path
@@ -439,172 +437,46 @@ impl DatabaseManager {
   }
 
   pub async fn query(&self, db_name: &str, sql_query: &str, username: Option<&str>, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
-    let table_name = extract_table_name(sql_query);
-    let query_time_range = extract_query_time_range(sql_query, self.bucket_interval);
-
-    let files_list_default_path = self
-      .build_files_list(db_name, &table_name, username)
-      .map_err(|e| DataFusionError::Execution(format!("Error building files list: {}", e)))?;
-
-    let files_list_group_path = username.map(|_| Vec::new()).unwrap_or_else(|| {
-      self
-        .build_files_list(db_name, &table_name, Some(&self.username))
-        .map_err(|e| DataFusionError::Execution(format!("Error building files list: {}", e)))
-        .unwrap_or_default()
-    });
-
-    let mut unique_files: HashSet<String> = HashSet::new();
-    let mut merged_files = Vec::new();
-
-    // Prioritize group path files, then add default path files if not present
-    for file in files_list_group_path.iter().chain(files_list_default_path.iter()) {
-      let file_name = Path::new(file).file_name().unwrap().to_string_lossy().to_string();
-      if unique_files.insert(file_name.clone()) {
-        merged_files.push(file.clone());
+    // Collect all referenced logical tables from the SQL and pre-register their directories
+    let mut referenced_tables = extract_all_table_names(sql_query);
+    if referenced_tables.is_empty() {
+      let single = extract_table_name(sql_query);
+      if !single.is_empty() {
+        referenced_tables.push(single);
       }
     }
 
-    let filtered_files = if let Some((start_time, end_time)) = query_time_range {
-      merged_files
-        .into_iter()
-        .filter(|file_path| {
-          let partition_time = extract_partition_time(file_path);
-          if self.bucket_interval >= 43200 {
-            get_monthly_partition_overlaps(partition_time, start_time, end_time)
-          } else {
-            partition_time >= start_time && partition_time <= end_time
+    if !referenced_tables.is_empty() {
+      let refs: Vec<&str> = referenced_tables.iter().map(|s| s.as_str()).collect();
+      let actual_tables = filter_actual_table_names(sql_query, &refs);
+      let actual_tables: Vec<String> = actual_tables.iter().map(|s| s.to_string()).collect();
+      for table_name in actual_tables {
+        let table_dir = match self.resolve_table_dir(db_name, &table_name, username) {
+          Ok(dir) => dir,
+          Err(e) => {
+            return Err(DataFusionError::Execution(format!(
+              "Failed to resolve table directory for '{}': {}",
+              table_name, e
+            )));
           }
-        })
-        .collect::<Vec<_>>()
-    } else {
-      merged_files
-    };
+        };
 
-    if filtered_files.is_empty() {
-      return Err(DataFusionError::Plan("No relevant partitions found for query".to_string()));
-    }
+        let needs_register = match self.session_context.table_exist(&table_name) {
+          Ok(exists) => !exists,
+          Err(_) => true,
+        };
 
-    // Check if we need to register new files for this table
-    let mut registered_tables_guard = self.registered_tables.lock().unwrap();
-    let registered_files = registered_tables_guard.get(&table_name).cloned().unwrap_or_default();
-    let mut files_to_register: Vec<String> = Vec::new();
-
-    for file_path in &filtered_files {
-      if Path::new(file_path).exists() && !registered_files.contains(file_path) {
-        files_to_register.push(file_path.clone());
-      }
-    }
-
-    // Register new files if any
-    let mut table_names = Vec::new();
-    if !files_to_register.is_empty() {
-      let mut new_registered_files = registered_files.clone();
-      for (i, file_path) in files_to_register.iter().enumerate() {
-        let temp_table_name = format!("{}_{}", table_name, registered_files.len() + i);
-        if let Err(e) = self
-          .session_context
-          .register_parquet(&temp_table_name, file_path, ParquetReadOptions::default())
-          .await
-        {
-          eprintln!("Failed to register {}: {:?}", file_path, e);
-        } else {
-          new_registered_files.push(file_path.clone());
-          table_names.push(temp_table_name);
-        }
-      }
-      // Update the registered tables map
-      registered_tables_guard.insert(table_name.clone(), new_registered_files);
-    }
-
-    // Add existing registered table names
-    for i in 0..registered_files.len() {
-      let temp_table_name = format!("{}_{}", table_name, i);
-      if let Ok(exists) = self.session_context.table_exist(&temp_table_name) {
-        if exists {
-          table_names.push(temp_table_name);
-        }
-      }
-    }
-
-    // If no tables are registered yet, register them now
-    if table_names.is_empty() {
-      let mut new_registered_files = Vec::new();
-      for (i, file_path) in filtered_files.iter().enumerate() {
-        if Path::new(file_path).exists() {
-          let temp_table_name = format!("{}_{}", table_name, i);
-          if let Err(e) = self
+        if needs_register {
+          self
             .session_context
-            .register_parquet(&temp_table_name, file_path, ParquetReadOptions::default())
-            .await
-          {
-            eprintln!("Failed to register {}: {:?}", file_path, e);
-          } else {
-            table_names.push(temp_table_name);
-            new_registered_files.push(file_path.clone());
-          }
+            .register_parquet(&table_name, &table_dir, ParquetReadOptions::default())
+            .await?;
         }
       }
-      // Update the registered tables map
-      registered_tables_guard.insert(table_name.clone(), new_registered_files);
     }
 
-    if table_names.is_empty() {
-      return Err(DataFusionError::Plan("No valid tables found to query.".to_string()));
-    }
-
-    // Check if this is a JOIN query with multiple actual tables
-    if sql_query.to_lowercase().contains("join") {
-      // Extract all table names from the join query using proper parsing
-      let unique_table_names = extract_all_table_names(sql_query);
-      // Filter to get only actual table names (not CTEs or aliases)
-      let unique_table_names_refs: Vec<&str> = unique_table_names.iter().map(|s| s.as_str()).collect();
-      let actual_table_names = filter_actual_table_names(sql_query, &unique_table_names_refs);
-
-      // Only use handle_join_query if there are multiple actual tables
-      if actual_table_names.len() > 1 {
-        return self
-          .handle_join_query(self.session_context.clone(), db_name, sql_query, username, is_json_format)
-          .await;
-      }
-      // If only one actual table, continue with regular query processing
-    }
-
-    let column_names = get_table_columns(&self.session_context, &table_names[0]).await?;
-
-    let union_query = if table_names.len() == 1 {
-      // Single partition - no need for UNION
-      format!("SELECT {} FROM {}", column_names, table_names[0])
-    } else {
-      // Multiple partitions - use UNION ALL but avoid intermediate collection
-      format!(
-        "SELECT {} FROM ({}) AS combined_table",
-        column_names,
-        table_names
-          .iter()
-          .map(|name| format!("SELECT {} FROM {}", column_names, name))
-          .collect::<Vec<_>>()
-          .join(" UNION ALL ")
-      )
-    };
-
-    let adjusted_sql_query = sql_query.replace(&table_name, "combined_table");
-    // Check if the query already contains CTEs (WITH clause)
-    let has_cte = sql_query.trim_start().to_uppercase().starts_with("WITH");
-
-    let final_query = if table_names.len() == 1 {
-      adjusted_sql_query.replace("combined_table", &table_names[0])
-    } else if has_cte {
-      // If query already has CTEs, we need to inject combined_table as the first CTE
-      // Replace "WITH" with "WITH combined_table AS (...), "
-      let with_pattern = regex::Regex::new(r"(?i)^\s*WITH\s+").unwrap();
-      with_pattern
-        .replace(&adjusted_sql_query, &format!("WITH combined_table AS ({}), ", union_query))
-        .to_string()
-    } else {
-      format!("WITH combined_table AS ({}) {}", union_query, adjusted_sql_query)
-    };
-
-    let final_df = self.session_context.sql(&final_query).await?;
+    // Execute the query directly without manual UNION/CTEs; ListingTable handles partitions
+    let final_df = self.session_context.sql(sql_query).await?;
     let final_results = final_df.collect().await?;
 
     let result = if is_json_format {
@@ -620,145 +492,39 @@ impl DatabaseManager {
     Ok(result)
   }
 
-  async fn handle_join_query(
-    &self,
-    session_context: SessionContext,
-    db_name: &str,
-    sql_query: &str,
-    username: Option<&str>,
-    is_json_format: bool,
-  ) -> DataFusionResult<DataFusionOutput> {
-    // Generate a unique suffix for this query execution
-    let query_suffix = chrono::Utc::now().timestamp_millis();
+  // Resolve the effective directory path for a logical table, preferring group/user path when provided
+  fn resolve_table_dir(&self, db_name: &str, table_name: &str, username: Option<&str>) -> Result<String, Box<dyn Error>> {
+    // Reload metadata to ensure it's up-to-date
+    let metadata = self.read_metadata()?;
 
-    // Extract all table names from the join query
-    let words: Vec<&str> = sql_query.split_whitespace().collect();
-    let mut table_names = Vec::new();
+    let database = metadata
+      .databases
+      .get(db_name)
+      .ok_or_else(|| format!("Database '{}' does not exist.", db_name))?;
 
-    for i in 0..words.len() {
-      if words[i].to_lowercase() == "from" && i + 1 < words.len() {
-        table_names.push(words[i + 1]);
-      } else if words[i].to_lowercase() == "join" && i + 1 < words.len() {
-        table_names.push(words[i + 1]);
+    let table = database
+      .tables
+      .get(table_name)
+      .ok_or_else(|| format!("Table '{}' does not exist in database '{}'.", table_name, db_name))?;
+
+    let base_table_path = Path::new(&table.path);
+
+    // Extract base root like "<storage>/data"
+    let base_root = base_table_path
+      .ancestors()
+      .nth(3)
+      .ok_or_else(|| format!("Failed to determine base directory from '{}'", base_table_path.display()))?
+      .to_path_buf();
+
+    let group_path = username.map(|user| base_root.join("group").join(user).join(db_name).join(table_name));
+
+    if let Some(group_dir) = group_path {
+      if group_dir.exists() {
+        return Ok(group_dir.to_string_lossy().to_string());
       }
     }
 
-    if table_names.len() < 2 {
-      return Err(DataFusionError::Execution(
-        "Invalid join query: must specify at least two tables".to_string(),
-      ));
-    }
-
-    // Remove duplicates while preserving order
-    let mut unique_table_names = Vec::new();
-    for table_name in table_names {
-      if !unique_table_names.contains(&table_name) {
-        unique_table_names.push(table_name);
-      }
-    }
-
-    // Filter to get only actual table names (not CTEs or aliases)
-    let actual_table_names = filter_actual_table_names(sql_query, &unique_table_names);
-    // If only one actual table, this shouldn't be handled as a join query
-    if actual_table_names.len() <= 1 {
-      return Err(DataFusionError::Execution(
-        "Join query contains only one actual table - should be handled as regular query".to_string(),
-      ));
-    }
-
-    // Store information about each table
-    let mut table_info: HashMap<&str, (Vec<String>, Vec<String>, String)> = HashMap::new(); // table_name -> (file_paths, temp_table_names, columns)
-
-    // Process each actual table (filtered from CTEs and aliases)
-    for table_name in &actual_table_names {
-      // Get files for this table
-      let table_files = self
-        .build_files_list(db_name, table_name, username)
-        .map_err(|e| DataFusionError::Execution(format!("Failed to get files for table {}: {}", table_name, e)))?;
-
-      // Register all files for this table
-      let mut temp_table_names = Vec::new();
-      for (i, file_path) in table_files.iter().enumerate() {
-        let temp_table_name = format!("{}_{}_{}", table_name, i, query_suffix);
-        if let Err(e) = session_context
-          .register_parquet(&temp_table_name, file_path, ParquetReadOptions::default())
-          .await
-        {
-          println!("Failed to register {}: {:?}", file_path, e);
-        } else {
-          temp_table_names.push(temp_table_name);
-        }
-      }
-
-      if temp_table_names.is_empty() {
-        return Err(DataFusionError::Plan(format!("No valid files found for table: {}", table_name)));
-      }
-
-      // Get column names for this table
-      let columns = get_table_columns(&session_context, &temp_table_names[0]).await?;
-
-      table_info.insert(table_name, (table_files, temp_table_names, columns));
-    }
-
-    // Create combined tables for each unique table
-    let mut combined_table_names: HashMap<&str, String> = HashMap::new();
-
-    for (table_name, (_, temp_table_names, columns)) in &table_info {
-      let combined_query = format!(
-        "SELECT {} FROM ({}) AS combined_{}_{}",
-        columns,
-        temp_table_names
-          .iter()
-          .map(|name| format!("SELECT {} FROM {}", columns, name))
-          .collect::<Vec<_>>()
-          .join(" UNION ALL "),
-        table_name,
-        query_suffix
-      );
-
-      // Execute the combined query
-      let combined_df = session_context.sql(&combined_query).await?;
-      let combined_results = combined_df.collect().await?;
-
-      if combined_results.is_empty() {
-        return Err(DataFusionError::Plan(format!("No data found for table: {}", table_name)));
-      }
-
-      let schema = combined_results[0].schema();
-      let mem_table = MemTable::try_new(schema, vec![combined_results])?;
-
-      let combined_name = format!("combined_{}_{}", table_name, query_suffix);
-      session_context.register_table(&combined_name, Arc::new(mem_table))?;
-
-      combined_table_names.insert(table_name, combined_name);
-    }
-
-    // Replace all table names in the SQL query with their combined equivalents
-    let mut adjusted_sql_query = sql_query.to_string();
-
-    for (original_table, combined_table) in &combined_table_names {
-      // Replace in FROM clause
-      adjusted_sql_query = adjusted_sql_query.replace(&format!("FROM {}", original_table), &format!("FROM {}", combined_table));
-
-      // Replace in JOIN clauses
-      adjusted_sql_query = adjusted_sql_query.replace(&format!("JOIN {}", original_table), &format!("JOIN {}", combined_table));
-
-      // Replace table prefixes in column references (e.g., table.column)
-      adjusted_sql_query = adjusted_sql_query.replace(&format!("{}.", original_table), &format!("{}.", combined_table));
-    }
-
-    let final_df = session_context.sql(&adjusted_sql_query).await?;
-    let final_results = final_df.collect().await?;
-
-    if is_json_format {
-      let json_result = record_batches_to_json(&final_results).unwrap();
-      Ok(DataFusionOutput::Json(json_result))
-    } else {
-      let final_schema = final_results[0].schema();
-      let final_mem_table = MemTable::try_new(final_schema, vec![final_results])?;
-      let final_df = session_context.read_table(Arc::new(final_mem_table))?;
-      Ok(DataFusionOutput::DataFrame(final_df))
-    }
+    Ok(base_table_path.to_string_lossy().to_string())
   }
 
   fn parquet_file_writer(path: &Path, schema: Schema, array: Vec<Arc<dyn Array>>) -> Result<String, Box<dyn Error>> {
