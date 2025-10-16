@@ -628,7 +628,7 @@ async fn test_ziva_join_query() -> Result<(), Box<dyn std::error::Error>> {
   let result = query(DATABASE_NAME, sql_query, None).await?;
   let duration = start_time.elapsed();
   println!("Query time: {:.3} seconds", duration.as_secs_f64());
-  println!("Result: {}", result["json_value"]);
+  println!("JOIN Query Result: {} status: {}", result["json_value"], result["status"]);
 
   Ok(())
 }
@@ -704,9 +704,9 @@ async fn test_ziva_range_selction_query() -> Result<(), Box<dyn std::error::Erro
   const DATABASE_NAME: &str = "zivaring";
   let _ = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
 
-  const QUERY_2: &str = "SELECT COUNT(*) AS total FROM activitydetails WHERE date BETWEEN '1746641700' AND '1746728099'";
+  const QUERY_2: &str = "SELECT COUNT(*) AS total FROM activitydetails WHERE date BETWEEN '1758499200' AND '1758585599'";
   let result = query(DATABASE_NAME, QUERY_2, None).await?;
-  println!("Result: {:?}", result);
+  println!("Range Selction Result: {} status: {}", result["json_value"], result["status"]);
 
   Ok(())
 }

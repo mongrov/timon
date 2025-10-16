@@ -1,7 +1,4 @@
-use super::helpers::{
-  build_rules_tree, extract_all_table_names, extract_table_name, filter_actual_table_names, get_property_fields, json_to_arrow,
-  record_batches_to_json, rounded_timestamp, row_to_json,
-};
+use super::helpers::{build_rules_tree, get_property_fields, json_to_arrow, record_batches_to_json, rounded_timestamp, row_to_json};
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use datafusion::arrow::array::Array;
 use datafusion::arrow::datatypes::Schema;
@@ -437,31 +434,18 @@ impl DatabaseManager {
   }
 
   pub async fn query(&self, db_name: &str, sql_query: &str, username: Option<&str>, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
-    // Collect all referenced logical tables from the SQL and pre-register their directories
-    let mut referenced_tables = extract_all_table_names(sql_query);
-    if referenced_tables.is_empty() {
-      let single = extract_table_name(sql_query);
-      if !single.is_empty() {
-        referenced_tables.push(single);
-      }
-    }
+    // Register all tables in the database upfront to ensure they're available for complex queries
+    let metadata = self
+      .read_metadata()
+      .map_err(|e| DataFusionError::Execution(format!("Failed to read metadata: {}", e)))?;
 
-    if !referenced_tables.is_empty() {
-      let refs: Vec<&str> = referenced_tables.iter().map(|s| s.as_str()).collect();
-      let actual_tables = filter_actual_table_names(sql_query, &refs);
-      let actual_tables: Vec<String> = actual_tables.iter().map(|s| s.to_string()).collect();
-      for table_name in actual_tables {
-        let table_dir = match self.resolve_table_dir(db_name, &table_name, username) {
-          Ok(dir) => dir,
-          Err(e) => {
-            return Err(DataFusionError::Execution(format!(
-              "Failed to resolve table directory for '{}': {}",
-              table_name, e
-            )));
-          }
-        };
+    if let Some(database) = metadata.databases.get(db_name) {
+      for (table_name, _table) in &database.tables {
+        let table_dir = self
+          .resolve_table_dir(db_name, table_name, username)
+          .map_err(|e| DataFusionError::Execution(format!("Failed to resolve table directory for '{}': {}", table_name, e)))?;
 
-        let needs_register = match self.session_context.table_exist(&table_name) {
+        let needs_register = match self.session_context.table_exist(table_name) {
           Ok(exists) => !exists,
           Err(_) => true,
         };
@@ -469,7 +453,7 @@ impl DatabaseManager {
         if needs_register {
           self
             .session_context
-            .register_parquet(&table_name, &table_dir, ParquetReadOptions::default())
+            .register_parquet(table_name, &table_dir, ParquetReadOptions::default())
             .await?;
         }
       }
@@ -512,7 +496,7 @@ impl DatabaseManager {
     // Extract base root like "<storage>/data"
     let base_root = base_table_path
       .ancestors()
-      .nth(3)
+      .nth(2)
       .ok_or_else(|| format!("Failed to determine base directory from '{}'", base_table_path.display()))?
       .to_path_buf();
 
@@ -564,7 +548,7 @@ impl DatabaseManager {
     // Extract the base directory (root path) from the table path
     let base_root = base_table_path
       .ancestors()
-      .nth(3) // Adjust according to depth: "<base_path>/data/zivaring/activitydetails"
+      .nth(2) // Adjust according to depth: "<base_path>/data/zivaring/activitydetails"
       .ok_or_else(|| format!("Failed to determine base directory from '{}'", base_table_path.display()))?
       .to_path_buf();
 
