@@ -395,6 +395,17 @@ pub fn rounded_timestamp(timestamp: i64, interval: u32) -> String {
       .unwrap()
       .with_nanosecond(0)
       .unwrap()
+  } else if interval >= 1440 {
+    // 1 day * 24 hours * 60 minutes = 1440
+    // For daily intervals
+    dt.with_hour(0)
+      .unwrap()
+      .with_minute(0)
+      .unwrap()
+      .with_second(0)
+      .unwrap()
+      .with_nanosecond(0)
+      .unwrap()
   } else if interval > 60 {
     // For intervals greater than 60 minutes
     let total_minutes = dt.hour() * 60 + dt.minute();
@@ -427,6 +438,9 @@ pub fn rounded_timestamp(timestamp: i64, interval: u32) -> String {
     rounded_time.format("%Y-%m").to_string()
   } else if interval >= 10080 {
     // Weekly format: YYYY-MM-DD
+    rounded_time.format("%Y-%m-%d").to_string()
+  } else if interval >= 1440 {
+    // Daily format: YYYY-MM-DD
     rounded_time.format("%Y-%m-%d").to_string()
   } else if interval > 60 && interval % 60 == 0 {
     // Hourly format: YYYY-MM-DD_HH

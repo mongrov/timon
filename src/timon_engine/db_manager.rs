@@ -1,9 +1,11 @@
 use super::helpers::{build_rules_tree, get_property_fields, json_to_arrow, record_batches_to_json, rounded_timestamp, row_to_json};
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use datafusion::arrow::array::Array;
-use datafusion::arrow::datatypes::Schema;
+use datafusion::arrow::datatypes::{DataType, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::dataframe::DataFrame;
+use datafusion::datasource::file_format::parquet::ParquetFormat;
+use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl};
 use datafusion::datasource::MemTable;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::parquet::arrow::ArrowWriter;
@@ -392,12 +394,12 @@ impl DatabaseManager {
       }
 
       let timestamp = new_record.get(datetime_field).and_then(|t| t.as_i64()).unwrap_or(0);
-      let partition_name = format!(
-        "{}_{}.parquet",
-        table_name,
-        rounded_timestamp(timestamp.try_into().unwrap(), self.bucket_interval)
-      );
-      let target_file = format!("{}/{}", table_path, partition_name);
+      let partition_value = rounded_timestamp(timestamp.try_into().unwrap(), self.bucket_interval);
+
+      // Use Hive-style partitioning: date=YYYY-MM-DD/data.parquet
+      let partition_dir = format!("{}/date={}", table_path, partition_value);
+      fs::create_dir_all(&partition_dir).ok(); // Create partition directory if it doesn't exist
+      let target_file = format!("{}/data.parquet", partition_dir);
 
       if let Some((file, index)) = record_index.get(&key) {
         // Update existing record in-place
@@ -451,10 +453,27 @@ impl DatabaseManager {
         };
 
         if needs_register {
-          self
-            .session_context
-            .register_parquet(table_name, &table_dir, ParquetReadOptions::default())
+          // Create ListingOptions with partition column for Hive-style partitioning
+          let file_format = ParquetFormat::default();
+          let listing_options = ListingOptions::new(Arc::new(file_format))
+            .with_file_extension(".parquet")
+            .with_table_partition_cols(vec![(
+              "date".to_string(),
+              DataType::Utf8, // Partition values are stored as strings in directory names
+            )]);
+
+          // Create the listing table URL
+          let table_url = ListingTableUrl::parse(&table_dir).map_err(|e| DataFusionError::Execution(format!("Failed to parse table URL: {}", e)))?;
+
+          // Configure the listing table and infer schema from parquet files
+          let config = ListingTableConfig::new(table_url)
+            .with_listing_options(listing_options)
+            .infer_schema(&self.session_context.state())
             .await?;
+
+          let listing_table = ListingTable::try_new(config)?;
+
+          self.session_context.register_table(table_name, Arc::new(listing_table))?;
         }
       }
     }
