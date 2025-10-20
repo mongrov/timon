@@ -160,7 +160,7 @@ async fn test_local_storage() {
   println!("Time taken for insertion: {:.3} seconds", duration.as_secs_f64());
 
   let sql_query = format!(r#"SELECT * FROM activitydetails ORDER BY date ASC"#);
-  let query_result = query(DATABASE_NAME, &sql_query, None).await;
+  let query_result = query(DATABASE_NAME, &sql_query, None, None).await;
   println!("query_result: {}", query_result.unwrap()["json_value"]);
 
   // let start_time = Instant::now(); // Start timing
@@ -218,6 +218,7 @@ fn main() {
     let _ = insert_ziva_data_six_months().await;
     let _ = test_ziva_range_selction_query().await;
     let _ = test_max_rows().await;
+    let _ = test_partition_limit().await;
     let _ = test_sleep_queries().await;
     let _ = test_hrv_queries().await;
     let _ = test_rhr_queries().await;
@@ -237,7 +238,7 @@ Monthly = 43200
 async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
   const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
-  let timon_result = init_timon(STORAGE_PATH, 1440, USERNAME).unwrap();
+  let timon_result = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
   println!("init_timon -> {}", timon_result);
 
   const DATABASE_NAME: &str = "zivaring";
@@ -531,7 +532,7 @@ async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
   // Query activity details
   let start_time = Instant::now();
   let activity_details_query = format!(r#"SELECT * FROM activitydetails"#);
-  let activity_details_result = query(DATABASE_NAME, &activity_details_query, None).await?;
+  let activity_details_result = query(DATABASE_NAME, &activity_details_query, None, None).await?;
   let duration = start_time.elapsed();
   println!(
     "Activity details {} (Time taken: {:.3} seconds)",
@@ -542,7 +543,7 @@ async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
   // Query SPO2 readings
   let start_time = Instant::now();
   let spo2_query = format!(r#"SELECT * FROM spo2_readings"#);
-  let spo2_result = query(DATABASE_NAME, &spo2_query, None).await?;
+  let spo2_result = query(DATABASE_NAME, &spo2_query, None, None).await?;
   let duration = start_time.elapsed();
   println!(
     "SPO2 readings {} (Time taken: {:.3} seconds)",
@@ -553,7 +554,7 @@ async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
   // Query heart rate readings
   let start_time = Instant::now();
   let hr_query = format!(r#"SELECT * FROM heartrate"#);
-  let hr_result = query(DATABASE_NAME, &hr_query, None).await?;
+  let hr_result = query(DATABASE_NAME, &hr_query, None, None).await?;
   let duration = start_time.elapsed();
   println!(
     "Heart rate readings {} (Time taken: {:.3} seconds)",
@@ -564,7 +565,7 @@ async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
   // Query HRV readings
   let start_time = Instant::now();
   let hrv_query = format!(r#"SELECT * FROM hrv_table"#);
-  let hrv_result = query(DATABASE_NAME, &hrv_query, None).await?;
+  let hrv_result = query(DATABASE_NAME, &hrv_query, None, None).await?;
   let duration = start_time.elapsed();
   println!(
     "HRV readings {} (Time taken: {:.3} seconds)",
@@ -575,7 +576,7 @@ async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
   // Query temperature readings
   let start_time = Instant::now();
   let temp_query = format!(r#"SELECT * FROM temperature_readings"#);
-  let temp_result = query(DATABASE_NAME, &temp_query, None).await?;
+  let temp_result = query(DATABASE_NAME, &temp_query, None, None).await?;
   let duration = start_time.elapsed();
   println!(
     "Temperature readings {} (Time taken: {:.3} seconds)",
@@ -589,7 +590,7 @@ async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
   // Query for average heart rate
   let start_time = Instant::now();
   let avg_hr_query = format!(r#"SELECT * FROM heartrate"#);
-  let avg_hr_result = query(DATABASE_NAME, &avg_hr_query, None).await?;
+  let avg_hr_result = query(DATABASE_NAME, &avg_hr_query, None, None).await?;
   let duration = start_time.elapsed();
   println!(
     "Average heart rate {} (Time taken: {:.3} seconds)",
@@ -600,7 +601,7 @@ async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
   // Query for max SPO2
   let start_time = Instant::now();
   let max_spo2_query = format!(r#"SELECT * FROM spo2_readings"#);
-  let max_spo2_result = query(DATABASE_NAME, &max_spo2_query, None).await?;
+  let max_spo2_result = query(DATABASE_NAME, &max_spo2_query, None, None).await?;
   let duration = start_time.elapsed();
   println!(
     "Max SPO2: {} (Time taken: {:.3} seconds)",
@@ -611,7 +612,7 @@ async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
   // Query for stress levels over time
   let start_time = Instant::now();
   let stress_query = format!(r#"SELECT * FROM hrv_table"#);
-  let stress_result = query(DATABASE_NAME, &stress_query, None).await?;
+  let stress_result = query(DATABASE_NAME, &stress_query, None, None).await?;
   let duration = start_time.elapsed();
   println!(
     "Stress levels over time: {} (Time taken: {:.3} seconds)",
@@ -626,11 +627,11 @@ async fn test_ziva_join_query() -> Result<(), Box<dyn std::error::Error>> {
   const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
   const DATABASE_NAME: &str = "zivaring";
-  let _ = init_timon(STORAGE_PATH, 1440, USERNAME).unwrap();
+  let _ = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
 
   let start_time = Instant::now();
   let sql_query = "SELECT * FROM activitydetails JOIN spo2_readings ON to_char(to_timestamp(activitydetails.timestamp), 'YYYY-MM-DD') = to_char(to_timestamp(spo2_readings.timestamp), 'YYYY-MM-DD') LIMIT 100";
-  let result = query(DATABASE_NAME, sql_query, None).await?;
+  let result = query(DATABASE_NAME, sql_query, None, None).await?;
   let duration = start_time.elapsed();
   println!("Query time: {:.3} seconds", duration.as_secs_f64());
   println!("JOIN Query Result: {} status: {}", result["json_value"], result["status"]);
@@ -666,7 +667,7 @@ async fn insert_ziva_data_six_months() -> Result<(), Box<dyn std::error::Error>>
   const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
   const DATABASE_NAME: &str = "zivaring";
-  let _ = init_timon(STORAGE_PATH, 1440, USERNAME).unwrap();
+  let _ = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
   let _ = create_database(DATABASE_NAME);
 
   // SPO2 Table Schema
@@ -695,7 +696,7 @@ async fn insert_ziva_data_six_months() -> Result<(), Box<dyn std::error::Error>>
 
   const QUERY: &str = "SELECT * FROM spo2_readings ORDER BY date ASC";
   let start_time = std::time::Instant::now();
-  let result = query(DATABASE_NAME, QUERY, None).await?;
+  let result = query(DATABASE_NAME, QUERY, None, None).await?;
   let duration = start_time.elapsed();
   println!("Query execution time: {:.3} seconds", duration.as_secs_f64());
   println!("Result: {:?}", result.get("status").unwrap());
@@ -707,10 +708,10 @@ async fn test_ziva_range_selction_query() -> Result<(), Box<dyn std::error::Erro
   const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
   const DATABASE_NAME: &str = "zivaring";
-  let _ = init_timon(STORAGE_PATH, 1440, USERNAME).unwrap();
+  let _ = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
 
   const QUERY_2: &str = "SELECT COUNT(*) AS total FROM activitydetails WHERE date BETWEEN '2025-08-27' AND '2025-09-20'";
-  let result = query(DATABASE_NAME, QUERY_2, None).await?;
+  let result = query(DATABASE_NAME, QUERY_2, None, None).await?;
   println!("Range Selction Result: {} status: {}", result["json_value"], result["status"]);
 
   Ok(())
@@ -719,7 +720,7 @@ async fn test_ziva_range_selction_query() -> Result<(), Box<dyn std::error::Erro
 async fn test_max_rows() -> Result<(), Box<dyn std::error::Error>> {
   const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
-  let _ = init_timon(STORAGE_PATH, 1440, USERNAME).unwrap();
+  let _ = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
 
   const DATABASE_NAME: &str = "test_maxrows";
   let database_result = create_database(DATABASE_NAME);
@@ -759,16 +760,40 @@ async fn test_max_rows() -> Result<(), Box<dyn std::error::Error>> {
   println!("Insert battery_readings -> {}", battery_readings_result.unwrap());
 
   let sql_query = format!(r#"SELECT battery_level FROM battery_readings ORDER BY date ASC"#);
-  let query_result = query(DATABASE_NAME, &sql_query, None).await;
+  let query_result = query(DATABASE_NAME, &sql_query, None, None).await;
   println!("query_result: {}", query_result.unwrap()["json_value"]);
 
   let sql_query = format!(r#"SELECT COUNT(*) as total FROM battery_readings"#);
-  let query_result = query(DATABASE_NAME, &sql_query, None).await;
+  let query_result = query(DATABASE_NAME, &sql_query, None, None).await;
   println!("query_result count: {}", query_result.unwrap()["json_value"]);
 
   let sql_query = format!(r#"SELECT MIN(battery_level) as min_battery, MAX(battery_level) as max_battery FROM battery_readings"#);
-  let query_result = query(DATABASE_NAME, &sql_query, None).await;
+  let query_result = query(DATABASE_NAME, &sql_query, None, None).await;
   println!("query_result: {}", query_result.unwrap()["json_value"]);
+
+  Ok(())
+}
+
+async fn test_partition_limit() -> Result<(), Box<dyn std::error::Error>> {
+  const STORAGE_PATH: &str = "tmp";
+  const USERNAME: &str = "ahmed_test";
+  const DATABASE_NAME: &str = "zivaring";
+  let _ = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
+
+  println!("\n=== Testing Partition Limit Functionality ===");
+
+  // Test querying last 3 partitions
+  let sql_query = "SELECT COUNT(*) AS total FROM activitydetails";
+  let result = query(DATABASE_NAME, sql_query, None, Some(2)).await?;
+  println!("Last 2 partitions result: {} status: {}", result["json_value"], result["status"]);
+
+  // Test querying last 7 partitions
+  let result2 = query(DATABASE_NAME, sql_query, None, Some(3)).await?;
+  println!("Last 3 partitions result: {} status: {}", result2["json_value"], result2["status"]);
+
+  // Test without partition limit (all partitions)
+  let result3 = query(DATABASE_NAME, sql_query, None, None).await?;
+  println!("All partitions result: {} status: {}", result3["json_value"], result3["status"]);
 
   Ok(())
 }
@@ -777,13 +802,13 @@ async fn test_sleep_queries() -> Result<(), Box<dyn std::error::Error>> {
   println!("Testing Sleep Queries for Daily Vitality Score");
   const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
-  let _ = init_timon(STORAGE_PATH, 1440, USERNAME).unwrap();
+  let _ = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
 
   // Test 1: Get last night's sleep data (minute-by-minute objects)
   println!("\n=== LAST NIGHT'S SLEEP DATA ===");
 
-  let sleep_dates = vec!["2025-09-22"];
-  for date_label in &sleep_dates {
+  let sleep_dates = vec![("2025-09-22", 1758499200, 1758585599)];
+  for (date_label, start_ts, end_ts) in &sleep_dates {
     println!("\n--- Sleep data for {} ---", date_label);
 
     let last_night_query = format!(
@@ -796,7 +821,7 @@ async fn test_sleep_queries() -> Result<(), Box<dyn std::error::Error>> {
           FROM (
             SELECT start, COUNT(*) as session_minutes
             FROM sleep_table
-            WHERE date = '{}'  -- Use date instead of timestamp
+            WHERE timestamp BETWEEN {} AND {}
             GROUP BY start
           ) as session_counts
         ) AS sleep_longest_session,
@@ -804,12 +829,12 @@ async fn test_sleep_queries() -> Result<(), Box<dyn std::error::Error>> {
         COUNT(CASE WHEN quality = 2 THEN 1 END) / 60.0 AS sleep_deep_hours,
         COUNT(CASE WHEN quality = 3 THEN 1 END) / 60.0 AS sleep_rem_hours
       FROM sleep_table
-      WHERE date = '{}'  -- Use date instead of timestamp
+      WHERE timestamp BETWEEN {} AND {}
       "#,
-      date_label, date_label
+      start_ts, end_ts, start_ts, end_ts
     );
 
-    let last_night_result = query("zivaring", &last_night_query, None).await?;
+    let last_night_result = query("zivaring", &last_night_query, None, None).await?;
     // println!("Last night's sleep data: {}", last_night_result["json_value"]);
     let last_night_value = last_night_result["json_value"][0].clone();
     println!(
@@ -831,11 +856,18 @@ async fn test_sleep_queries() -> Result<(), Box<dyn std::error::Error>> {
 
   // For sleep consistency, we need to analyze sleep sessions from each of the previous 6 days
   // Let's query each day separately to get sleep sessions per day
-  let consistency_dates = vec!["2025-09-22", "2025-09-21", "2025-09-20", "2025-09-19", "2025-09-18", "2025-09-17"];
+  let consistency_dates = vec![
+    ("2025-09-22", 1758499200, 1758585599), // Sep 22: 00:00 to 23:59
+    ("2025-09-21", 1758412800, 1758499199), // Sep 21: 00:00 to 23:59
+    ("2025-09-20", 1758326400, 1758412799), // Sep 20: 00:00 to 23:59
+    ("2025-09-19", 1758240000, 1758326399), // Sep 19: 00:00 to 23:59
+    ("2025-09-18", 1758153600, 1758239999), // Sep 18: 00:00 to 23:59
+    ("2025-09-17", 1758067200, 1758153599), // Sep 17: 00:00 to 23:59
+  ];
 
   // Collect all consistency data first
   let mut consistency_data = Vec::new();
-  for date_label in &consistency_dates {
+  for (date_label, start_ts, end_ts) in &consistency_dates {
     let day_consistency_query = format!(
       r#"
       SELECT
@@ -845,14 +877,14 @@ async fn test_sleep_queries() -> Result<(), Box<dyn std::error::Error>> {
       FROM (
         SELECT start, COUNT(*) as session_duration
         FROM sleep_table
-        WHERE date = '{}'
+        WHERE timestamp BETWEEN {} AND {}
         GROUP BY start
       ) as daily_sessions
     "#,
-      date_label, date_label
+      date_label, start_ts, end_ts
     );
 
-    let day_result = query("zivaring", &day_consistency_query, None).await?;
+    let day_result = query("zivaring", &day_consistency_query, None, None).await?;
     println!("day_result {} status: {} \n", day_result["json_value"], day_result["status"]);
     if let Some(day_data) = day_result["json_value"].as_array().and_then(|arr| arr.get(0)) {
       if let (Some(sessions), Some(minutes)) = (day_data["sessions_count"].as_i64(), day_data["total_sleep_minutes"].as_i64()) {
@@ -897,7 +929,7 @@ async fn test_sleep_queries() -> Result<(), Box<dyn std::error::Error>> {
 
     // Display individual night data
     println!("\n=== INDIVIDUAL NIGHT DATA ===");
-    for (i, date_label) in consistency_dates.iter().enumerate() {
+    for (i, (date_label, _, _)) in consistency_dates.iter().enumerate() {
       if i < consistency_data.len() {
         let (sessions, minutes) = consistency_data[i];
         println!(
@@ -922,7 +954,7 @@ async fn test_hrv_queries() -> Result<(), Box<dyn std::error::Error>> {
   println!("\n=== HRV QUERIES FOR RECOVERY COMPONENT ===");
   const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
-  let _ = init_timon(STORAGE_PATH, 1440, USERNAME).unwrap();
+  let _ = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
 
   let rhr_hrv_query = r#"
   WITH date_params AS (
@@ -1127,7 +1159,7 @@ async fn test_hrv_queries() -> Result<(), Box<dyn std::error::Error>> {
   CROSS JOIN hrv_recovery_score hrs;
   "#;
 
-  let hrv_score_result = query("zivaring", rhr_hrv_query, None).await?;
+  let hrv_score_result = query("zivaring", rhr_hrv_query, None, None).await?;
   println!(
     "Resting Heart Rate Result: {} status: {}",
     hrv_score_result["json_value"], hrv_score_result["status"]
@@ -1140,7 +1172,7 @@ async fn test_rhr_queries() -> Result<(), Box<dyn std::error::Error>> {
   println!("\n=== RHR QUERIES FOR HEART HEALTH COMPONENT ===");
   const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
-  let _ = init_timon(STORAGE_PATH, 1440, USERNAME).unwrap();
+  let _ = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
 
   let rhr_sql_query = r#"
   WITH date_params AS (
@@ -1344,7 +1376,7 @@ async fn test_rhr_queries() -> Result<(), Box<dyn std::error::Error>> {
   FROM date_params dp
   CROSS JOIN rhr_analysis ra;
   "#;
-  let rhr_score_result = query("zivaring", rhr_sql_query, None).await?;
+  let rhr_score_result = query("zivaring", rhr_sql_query, None, None).await?;
   println!(
     "Resting Heart Rate Result: {} status: {}",
     rhr_score_result["json_value"], rhr_score_result["status"]
@@ -1357,7 +1389,7 @@ async fn test_vitality_queries() -> Result<(), Box<dyn std::error::Error>> {
   println!("\n=== VITALITY QUERIES COMPONENT ===");
   const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
-  let _ = init_timon(STORAGE_PATH, 1440, USERNAME).unwrap();
+  let _ = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
 
   let vitality_sql_query = r#"
   WITH date_params AS (
@@ -2045,7 +2077,7 @@ async fn test_vitality_queries() -> Result<(), Box<dyn std::error::Error>> {
   FROM vitality_calculation;
   "#;
 
-  let vitality_result = query("zivaring", vitality_sql_query, None).await?;
+  let vitality_result = query("zivaring", vitality_sql_query, None, None).await?;
   println!("vitality Result: {} status: {}", vitality_result["json_value"], vitality_result["status"]);
 
   Ok(())
@@ -2055,7 +2087,7 @@ async fn ziva_app_queries() -> Result<(), Box<dyn std::error::Error>> {
   println!("\n=== ZIVA APP QUERIES COMPONENT ===");
   const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
-  let _ = init_timon(STORAGE_PATH, 1440, USERNAME).unwrap();
+  let _ = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
 
   let query_x = r#"
   WITH transformed AS (
@@ -2079,7 +2111,7 @@ async fn ziva_app_queries() -> Result<(), Box<dyn std::error::Error>> {
     ORDER BY day, hour;
   "#;
 
-  let result_x = query("zivaring", &query_x, None).await?;
+  let result_x = query("zivaring", &query_x, None, None).await?;
   println!("result_x: {} status: {}", result_x["json_value"], result_x["status"]);
 
   Ok(())

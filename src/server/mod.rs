@@ -120,7 +120,7 @@ pub async fn insert_handler(req: web::Json<InsertRequest>) -> impl Responder {
 
 // Query data
 pub async fn query_handler(req: web::Json<QueryRequest>) -> impl Responder {
-  match query(&req.db_name, &req.sql_query).await {
+  match query(&req.db_name, &req.sql_query, None, None).await {
     Ok(result) => HttpResponse::Ok().json(QueryResponse { result: result.to_string() }),
     Err(e) => HttpResponse::InternalServerError().json(format!("Error: {}", e)),
   }

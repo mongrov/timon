@@ -264,9 +264,9 @@ pub fn insert(db_name: &str, table_name: &str, json_data: &str) -> Result<Value,
 }
 
 #[allow(dead_code)]
-pub async fn query(db_name: &str, sql_query: &str, username: Option<&str>) -> Result<Value, String> {
+pub async fn query(db_name: &str, sql_query: &str, username: Option<&str>, limit_partitions: Option<usize>) -> Result<Value, String> {
   let database_manager = get_database_manager().map_err(|e| e.to_string())?;
-  match database_manager.query(db_name, sql_query, username, true).await {
+  match database_manager.query(db_name, sql_query, username, true, limit_partitions).await {
     Ok(db_manager::DataFusionOutput::Json(data)) => {
       let json_value = serde_json::to_value(&data).map_err(|e| e.to_string())?;
       let result = TimonResult {
@@ -290,9 +290,9 @@ pub async fn query(db_name: &str, sql_query: &str, username: Option<&str>) -> Re
 }
 
 #[allow(dead_code)]
-pub async fn query_df(db_name: &str, sql_query: &str, username: Option<&str>) -> Result<DataFrame, String> {
+pub async fn query_df(db_name: &str, sql_query: &str, username: Option<&str>, limit_partitions: Option<usize>) -> Result<DataFrame, String> {
   let database_manager = get_database_manager().map_err(|e| e.to_string())?;
-  match database_manager.query(db_name, sql_query, username, false).await {
+  match database_manager.query(db_name, sql_query, username, false, limit_partitions).await {
     Ok(db_manager::DataFusionOutput::DataFrame(df)) => Ok(df),
     Ok(db_manager::DataFusionOutput::Json(_)) => Err("Expected DataFrame output, but got JSON".to_string()),
     Err(err) => {

@@ -208,7 +208,14 @@ pub mod android {
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn nativeQuery(mut env: JNIEnv, _class: JClass, db_name: JString, sql_query: JString, username: JString) -> jstring {
+  pub unsafe extern "C" fn nativeQuery(
+    mut env: JNIEnv,
+    _class: JClass,
+    db_name: JString,
+    sql_query: JString,
+    username: JString,
+    limit_partitions: jint,
+  ) -> jstring {
     // Convert Java strings to Rust strings
     let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get db_name java string!").into();
     let rust_sql_query: String = env.get_string(&sql_query).expect("Couldn't get sql_query java string!").into();
@@ -218,10 +225,13 @@ pub mod android {
       Some(env.get_string(&username).expect("Couldn't get username java string!").into())
     };
 
+    // Convert limit_partitions: if -1 or 0, use None; otherwise use Some(value)
+    let rust_limit_partitions = if limit_partitions > 0 { Some(limit_partitions as usize) } else { None };
+
     // Call the async query function
     match Runtime::new()
       .unwrap()
-      .block_on(query(&rust_db_name, &rust_sql_query, rust_username.as_deref()))
+      .block_on(query(&rust_db_name, &rust_sql_query, rust_username.as_deref(), rust_limit_partitions))
     {
       Ok(result) => {
         let json_string = result.to_string();
@@ -484,7 +494,7 @@ pub mod android {
       },
       NativeMethod {
         name: "nativeQuery".into(),
-        sig: "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;".into(),
+        sig: "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)Ljava/lang/String;".into(),
         fn_ptr: nativeQuery as *mut c_void,
       },
       NativeMethod {
@@ -730,13 +740,16 @@ pub mod ios {
   }
 
   #[no_mangle]
-  pub extern "C" fn nativeQuery(db_name: *const c_char, sql_query: *const c_char, username: *const c_char) -> *mut c_char {
+  pub extern "C" fn nativeQuery(db_name: *const c_char, sql_query: *const c_char, username: *const c_char, limit_partitions: i32) -> *mut c_char {
     unsafe {
       match (c_str_to_string(db_name), c_str_to_string(sql_query), c_str_to_string(username).ok()) {
         (Ok(rust_db_name), Ok(rust_sql_query), rust_username) => {
+          // Convert limit_partitions: if -1 or 0, use None; otherwise use Some(value)
+          let rust_limit_partitions = if limit_partitions > 0 { Some(limit_partitions as usize) } else { None };
+
           match Runtime::new()
             .unwrap()
-            .block_on(query(&rust_db_name, &rust_sql_query, rust_username.as_deref()))
+            .block_on(query(&rust_db_name, &rust_sql_query, rust_username.as_deref(), rust_limit_partitions))
           {
             Ok(result) => {
               let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "[]".to_string());

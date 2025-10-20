@@ -435,7 +435,14 @@ impl DatabaseManager {
     Ok(invalid_json_values)
   }
 
-  pub async fn query(&self, db_name: &str, sql_query: &str, username: Option<&str>, is_json_format: bool) -> DataFusionResult<DataFusionOutput> {
+  pub async fn query(
+    &self,
+    db_name: &str,
+    sql_query: &str,
+    username: Option<&str>,
+    is_json_format: bool,
+    limit_partitions: Option<usize>,
+  ) -> DataFusionResult<DataFusionOutput> {
     // Register all tables in the database upfront to ensure they're available for complex queries
     let metadata = self
       .read_metadata()
@@ -478,8 +485,55 @@ impl DatabaseManager {
       }
     }
 
+    // If limit_partitions is set, modify the SQL query to only scan last N partitions
+    let effective_sql = if let Some(limit) = limit_partitions {
+      // Get all partition directories for all tables in the database
+      let mut all_partitions = Vec::new();
+      if let Some(database) = metadata.databases.get(db_name) {
+        for (table_name, _) in &database.tables {
+          let table_dir = self
+            .resolve_table_dir(db_name, table_name, username)
+            .map_err(|e| DataFusionError::Execution(format!("Failed to resolve table directory: {}", e)))?;
+
+          if let Ok(entries) = std::fs::read_dir(&table_dir) {
+            for entry in entries.flatten() {
+              if entry.path().is_dir() {
+                if let Some(name) = entry.path().file_name().and_then(|n| n.to_str()) {
+                  if name.starts_with("date=") {
+                    let date_value = name.strip_prefix("date=").unwrap_or("");
+                    if !all_partitions.contains(&date_value.to_string()) {
+                      all_partitions.push(date_value.to_string());
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // Sort and take last N partitions (most recent)
+      all_partitions.sort();
+      let selected_dates: Vec<_> = all_partitions.iter().rev().take(limit).cloned().collect();
+      if !selected_dates.is_empty() {
+        // Build IN clause for the selected dates
+        let date_list = selected_dates.iter().map(|d| format!("'{}'", d)).collect::<Vec<_>>().join(", ");
+        // Inject date filter into the SQL query
+        let has_where = sql_query.to_uppercase().contains("WHERE");
+        if has_where {
+          format!("{} AND date IN ({})", sql_query, date_list)
+        } else {
+          format!("{} WHERE date IN ({})", sql_query, date_list)
+        }
+      } else {
+        sql_query.to_string()
+      }
+    } else {
+      sql_query.to_string()
+    };
+
     // Execute the query directly without manual UNION/CTEs; ListingTable handles partitions
-    let final_df = self.session_context.sql(sql_query).await?;
+    let final_df = self.session_context.sql(&effective_sql).await?;
     let final_results = final_df.collect().await?;
 
     let result = if is_json_format {
