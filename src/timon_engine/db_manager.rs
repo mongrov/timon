@@ -24,6 +24,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use std::{fmt, fs};
 use tokio::io::Result as TokioResult;
+use tokio::sync::Semaphore;
 
 pub enum DataFusionOutput {
   Json(Value),
@@ -463,51 +464,59 @@ impl DatabaseManager {
       .get_metadata_cached()
       .map_err(|e| DataFusionError::Execution(format!("Failed to read metadata: {}", e)))?;
 
-    // Only register tables that are referenced in the query
+    // Validate that all tables exist before attempting registration
     if let Some(database) = metadata.databases.get(db_name) {
       for table_name in &table_names {
-        // Check if this table exists in the database
-        if let Some(_table) = database.tables.get(table_name) {
-          let table_dir = self
-            .resolve_table_dir(db_name, table_name, username)
-            .map_err(|e| DataFusionError::Execution(format!("Failed to resolve table directory for '{}': {}", table_name, e)))?;
-
-          let needs_register = match self.session_context.table_exist(table_name) {
-            Ok(exists) => !exists,
-            Err(_) => true,
-          };
-
-          if needs_register {
-            // Create ListingOptions with partition column for Hive-style partitioning
-            let file_format = ParquetFormat::default();
-            let listing_options = ListingOptions::new(Arc::new(file_format))
-              .with_file_extension(".parquet")
-              .with_table_partition_cols(vec![(
-                "date".to_string(),
-                DataType::Utf8, // Partition values are stored as strings in directory names
-              )]);
-
-            // Create the listing table URL
-            let table_url =
-              ListingTableUrl::parse(&table_dir).map_err(|e| DataFusionError::Execution(format!("Failed to parse table URL: {}", e)))?;
-
-            // Configure the listing table and infer schema from parquet files
-            let config = ListingTableConfig::new(table_url)
-              .with_listing_options(listing_options)
-              .infer_schema(&self.session_context.state())
-              .await?;
-
-            let listing_table = ListingTable::try_new(config)?;
-
-            self.session_context.register_table(table_name, Arc::new(listing_table))?;
-          }
-        } else {
-          // Table referenced in query doesn't exist in database
+        if !database.tables.contains_key(table_name) {
           return Err(DataFusionError::Plan(format!(
             "Table '{}' referenced in query does not exist in database '{}'",
             table_name, db_name
           )));
         }
+      }
+
+      // Register tables in parallel with a semaphore to limit concurrency
+      // Limit to 10 concurrent registrations to avoid resource exhaustion
+      let semaphore = Arc::new(Semaphore::new(10));
+      let mut registration_tasks = Vec::new();
+
+      for table_name in &table_names {
+        let table_name = table_name.clone();
+        let db_name = db_name.to_string();
+        let username = username.map(|u| u.to_string());
+        let self_clone = self.clone();
+        let semaphore_clone = semaphore.clone();
+
+        // Spawn a task for each table registration
+        let task = async move {
+          // Acquire semaphore permit before registering
+          let _permit = semaphore_clone
+            .acquire()
+            .await
+            .map_err(|e| DataFusionError::Execution(format!("Failed to acquire semaphore: {}", e)))?;
+
+          // Register the table
+          self_clone.register_single_table(&db_name, &table_name, username.as_deref()).await
+        };
+
+        registration_tasks.push(task);
+      }
+
+      // Execute all registration tasks in parallel
+      let results = futures::future::join_all(registration_tasks).await;
+
+      // Check for any errors during registration
+      // We collect all errors but continue processing to register as many tables as possible
+      let errors: Vec<_> = results.into_iter().filter_map(|r| r.err()).collect();
+
+      if !errors.is_empty() {
+        // Return the first error, but log all of them
+        for (i, error) in errors.iter().enumerate() {
+          if i > 0 {
+            eprintln!("Additional table registration error: {}", error);
+          }
+        }
+        return Err(errors.into_iter().next().unwrap());
       }
     }
 
@@ -573,6 +582,50 @@ impl DatabaseManager {
     };
 
     Ok(result)
+  }
+
+  /// Register a single table in the DataFusion session context
+  /// This is extracted as a separate method to enable parallel table registration
+  async fn register_single_table(&self, db_name: &str, table_name: &str, username: Option<&str>) -> DataFusionResult<()> {
+    // Check if table already exists in session context
+    let needs_register = match self.session_context.table_exist(table_name) {
+      Ok(exists) => !exists,
+      Err(_) => true,
+    };
+
+    if !needs_register {
+      return Ok(());
+    }
+
+    // Resolve table directory
+    let table_dir = self
+      .resolve_table_dir(db_name, table_name, username)
+      .map_err(|e| DataFusionError::Execution(format!("Failed to resolve table directory for '{}': {}", table_name, e)))?;
+
+    // Create ListingOptions with partition column for Hive-style partitioning
+    let file_format = ParquetFormat::default();
+    let listing_options = ListingOptions::new(Arc::new(file_format))
+      .with_file_extension(".parquet")
+      .with_table_partition_cols(vec![(
+        "date".to_string(),
+        DataType::Utf8, // Partition values are stored as strings in directory names
+      )]);
+
+    // Create the listing table URL
+    let table_url = ListingTableUrl::parse(&table_dir).map_err(|e| DataFusionError::Execution(format!("Failed to parse table URL: {}", e)))?;
+
+    // Configure the listing table and infer schema from parquet files
+    let config = ListingTableConfig::new(table_url)
+      .with_listing_options(listing_options)
+      .infer_schema(&self.session_context.state())
+      .await?;
+
+    let listing_table = ListingTable::try_new(config)?;
+
+    // Register the table in the session context
+    self.session_context.register_table(table_name, Arc::new(listing_table))?;
+
+    Ok(())
   }
 
   // Resolve the effective directory path for a logical table, preferring group/user path when provided
