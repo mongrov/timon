@@ -19,8 +19,8 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs::File;
 use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 use std::{fmt, fs};
 use tokio::io::Result as TokioResult;
 
@@ -80,6 +80,10 @@ pub struct DatabaseManager {
   metadata_path: String,
   bucket_interval: u32,
   session_context: SessionContext,
+  // Metadata cache with TTL
+  cached_metadata: Arc<RwLock<Option<Metadata>>>,
+  cache_timestamp: Arc<RwLock<Option<Instant>>>,
+  cache_ttl: Duration,
 }
 
 impl DatabaseManager {
@@ -124,6 +128,10 @@ impl DatabaseManager {
       metadata_path,
       bucket_interval,
       session_context: SessionContext::new(),
+      // Initialize cache - infinite TTL, only invalidated on writes
+      cached_metadata: Arc::new(RwLock::new(None)),
+      cache_timestamp: Arc::new(RwLock::new(None)),
+      cache_ttl: Duration::MAX, // Infinite cache - only invalidated on metadata changes
     };
 
     // Update metadata with the provided storage_path
@@ -137,7 +145,7 @@ impl DatabaseManager {
   pub fn create_database(&mut self, db_name: &str) -> Result<(), DataFusionError> {
     // Reload the metadata to ensure it's up to date
     self.metadata = self
-      .read_metadata()
+      .get_metadata_cached()
       .map_err(|e| DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))?;
 
     let db_data_path = format!("{}/{}", self.data_path, db_name);
@@ -165,7 +173,7 @@ impl DatabaseManager {
   pub fn create_table(&mut self, db_name: &str, table_name: &str, schema_json: &str) -> Result<String, Box<dyn Error>> {
     // Reload the metadata to ensure it's up to date
     self.metadata = self
-      .read_metadata()
+      .get_metadata_cached()
       .map_err(|e| DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))?;
 
     // Parse the schema JSON
@@ -216,7 +224,7 @@ impl DatabaseManager {
   pub fn list_databases(&mut self) -> Result<Vec<String>, DataFusionError> {
     // Reload the metadata to ensure it's up to date
     self.metadata = self
-      .read_metadata()
+      .get_metadata_cached()
       .map_err(|e| DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))?;
 
     // Attempt to read metadata file and handle potential errors
@@ -239,7 +247,7 @@ impl DatabaseManager {
   pub fn list_tables(&mut self, db_name: &str) -> Result<Vec<String>, DataFusionError> {
     // Reload the metadata to ensure it's up to date
     self.metadata = self
-      .read_metadata()
+      .get_metadata_cached()
       .map_err(|e| DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))?;
 
     // Check if the database exists in the metadata
@@ -255,7 +263,7 @@ impl DatabaseManager {
   pub fn delete_database(&mut self, db_name: &str) -> Result<(), DataFusionError> {
     // Reload the metadata to ensure it's up to date
     self.metadata = self
-      .read_metadata()
+      .get_metadata_cached()
       .map_err(|e| DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))?;
 
     // Remove the database from metadata and save changes
@@ -277,7 +285,7 @@ impl DatabaseManager {
   pub fn delete_table(&mut self, db_name: &str, table_name: &str) -> Result<(), DataFusionError> {
     // Reload the metadata to ensure it's up to date
     self.metadata = self
-      .read_metadata()
+      .get_metadata_cached()
       .map_err(|e| DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))
       .unwrap();
 
@@ -308,7 +316,7 @@ impl DatabaseManager {
 
   pub fn insert(&mut self, db_name: &str, table_name: &str, json_data: &str) -> Result<Vec<Value>, Box<dyn Error>> {
     // Reload metadata
-    self.metadata = self.read_metadata()?;
+    self.metadata = self.get_metadata_cached()?;
 
     let mut new_json_values: Vec<Value> = serde_json::from_str(json_data)?;
     let table_path = self
@@ -445,7 +453,7 @@ impl DatabaseManager {
   ) -> DataFusionResult<DataFusionOutput> {
     // Register all tables in the database upfront to ensure they're available for complex queries
     let metadata = self
-      .read_metadata()
+      .get_metadata_cached()
       .map_err(|e| DataFusionError::Execution(format!("Failed to read metadata: {}", e)))?;
 
     if let Some(database) = metadata.databases.get(db_name) {
@@ -552,7 +560,7 @@ impl DatabaseManager {
   // Resolve the effective directory path for a logical table, preferring group/user path when provided
   fn resolve_table_dir(&self, db_name: &str, table_name: &str, username: Option<&str>) -> Result<String, Box<dyn Error>> {
     // Reload metadata to ensure it's up-to-date
-    let metadata = self.read_metadata()?;
+    let metadata = self.get_metadata_cached()?;
 
     let database = metadata
       .databases
@@ -600,7 +608,7 @@ impl DatabaseManager {
   pub fn build_files_list(&self, db_name: &str, table_name: &str, username: Option<&str>) -> Result<Vec<String>, Box<dyn Error>> {
     // Reload metadata to ensure it's up-to-date
     let metadata = self
-      .read_metadata()
+      .get_metadata_cached()
       .map_err(|e| DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))?;
 
     // Validate if the database exists
@@ -686,7 +694,7 @@ impl DatabaseManager {
 
   pub fn get_table_schema(&self, db_name: &str, table_name: &str) -> Result<serde_json::Value, Box<dyn Error>> {
     // Reload metadata to ensure it's up-to-date
-    let metadata = self.read_metadata().map_err(|e| format!("Failed to reload metadata: {}", e))?;
+    let metadata = self.get_metadata_cached().map_err(|e| format!("Failed to reload metadata: {}", e))?;
     // Look up the schema from the metadata
     let database = metadata.databases.get(db_name).ok_or("Database not found")?;
     let table = database.tables.get(table_name).ok_or("Table not found")?;
@@ -796,10 +804,72 @@ impl DatabaseManager {
     Ok(metadata)
   }
 
+  /// Get metadata with caching support (infinite TTL, invalidated only on writes)
+  fn get_metadata_cached(&self) -> Result<Metadata, Box<dyn Error>> {
+    // Check if we have a valid cache
+    let cache_timestamp = self.cache_timestamp.read().unwrap();
+    let should_refresh = match *cache_timestamp {
+      Some(timestamp) => Instant::now().duration_since(timestamp) > self.cache_ttl,
+      None => true,
+    };
+    drop(cache_timestamp);
+
+    if should_refresh {
+      // Cache expired or doesn't exist, refresh it
+      let fresh_metadata = self.read_metadata()?;
+
+      // Update cache with write lock
+      let mut cached_metadata = self.cached_metadata.write().unwrap();
+      *cached_metadata = Some(fresh_metadata.clone());
+      drop(cached_metadata);
+
+      let mut cache_timestamp = self.cache_timestamp.write().unwrap();
+      *cache_timestamp = Some(Instant::now());
+      drop(cache_timestamp);
+
+      Ok(fresh_metadata)
+    } else {
+      // Return cached metadata
+      let cached_metadata = self.cached_metadata.read().unwrap();
+      match &*cached_metadata {
+        Some(metadata) => Ok(metadata.clone()),
+        None => {
+          // Shouldn't happen, but handle gracefully
+          drop(cached_metadata);
+          let fresh_metadata = self.read_metadata()?;
+
+          let mut cached_metadata = self.cached_metadata.write().unwrap();
+          *cached_metadata = Some(fresh_metadata.clone());
+          drop(cached_metadata);
+
+          let mut cache_timestamp = self.cache_timestamp.write().unwrap();
+          *cache_timestamp = Some(Instant::now());
+          drop(cache_timestamp);
+
+          Ok(fresh_metadata)
+        }
+      }
+    }
+  }
+
+  /// Manually invalidate the metadata cache
+  /// Should be called after any operation that modifies metadata (create_table, delete_table, etc.)
+  fn invalidate_cache(&self) {
+    let mut cached_metadata = self.cached_metadata.write().unwrap();
+    *cached_metadata = None;
+    drop(cached_metadata);
+
+    let mut cache_timestamp = self.cache_timestamp.write().unwrap();
+    *cache_timestamp = None;
+    drop(cache_timestamp);
+  }
+
   fn save_metadata(&self) -> TokioResult<()> {
     // Serialize the metadata structure and save it to the file
     let json = serde_json::to_string(&self.metadata)?;
     fs::write(&self.metadata_path, json)?;
+    // Invalidate cache after saving metadata
+    self.invalidate_cache();
     Ok(())
   }
 
@@ -857,7 +927,7 @@ impl DatabaseManager {
 
     // Rest of the update_metadata implementation...
     let new_data_path = storage_path.to_string() + "/data";
-    let mut metadata = self.read_metadata().unwrap();
+    let mut metadata = self.get_metadata_cached().unwrap();
 
     for (db_name, db) in metadata.databases.iter_mut() {
       for (table_name, table) in db.tables.iter_mut() {
@@ -878,7 +948,7 @@ impl DatabaseManager {
   /// Update the last sync time and type for a table
   pub fn update_sync_metadata(&mut self, db_name: &str, table_name: &str, sync_type: &str) -> Result<(), Box<dyn Error>> {
     // Reload the metadata to ensure it's up to date
-    self.metadata = self.read_metadata()?;
+    self.metadata = self.get_metadata_cached()?;
 
     if let Some(database) = self.metadata.databases.get_mut(db_name) {
       if let Some(table) = database.tables.get_mut(table_name) {
@@ -915,7 +985,7 @@ impl DatabaseManager {
   /// Get the last sync information for a table
   pub fn get_sync_metadata(&self, db_name: &str, table_name: &str) -> Result<serde_json::Value, Box<dyn Error>> {
     // Reload metadata to ensure we have the latest sync information
-    let metadata = self.read_metadata()?;
+    let metadata = self.get_metadata_cached()?;
 
     if let Some(database) = metadata.databases.get(db_name) {
       if let Some(table) = database.tables.get(table_name) {
@@ -940,7 +1010,7 @@ impl DatabaseManager {
   /// Get sync metadata for all tables in a database
   pub fn get_all_sync_metadata(&self, db_name: &str) -> Result<serde_json::Value, Box<dyn Error>> {
     // Reload metadata to ensure we have the latest sync information
-    let metadata = self.read_metadata()?;
+    let metadata = self.get_metadata_cached()?;
 
     if let Some(database) = metadata.databases.get(db_name) {
       let mut sync_info = Vec::new();
