@@ -2,6 +2,7 @@ pub mod cloud_sync;
 pub mod db_manager;
 pub mod errors;
 pub mod helpers;
+pub mod sql_query_parser;
 
 use cloud_sync::CloudStorageManager;
 use datafusion::prelude::DataFrame;

@@ -1,4 +1,5 @@
 use super::helpers::{build_rules_tree, get_property_fields, json_to_arrow, record_batches_to_json, rounded_timestamp, row_to_json};
+use super::sql_query_parser::extract_table_names_and_ctes;
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use datafusion::arrow::array::Array;
 use datafusion::arrow::datatypes::{DataType, Schema};
@@ -451,44 +452,61 @@ impl DatabaseManager {
     is_json_format: bool,
     limit_partitions: Option<usize>,
   ) -> DataFusionResult<DataFusionOutput> {
-    // Register all tables in the database upfront to ensure they're available for complex queries
+    // Extract table names and CTE names from the AST
+    let (mut table_names, cte_names) =
+      extract_table_names_and_ctes(&sql_query).map_err(|e| DataFusionError::Execution(format!("Failed to extract table names: {}", e)))?;
+    // Remove CTE names from table names (CTEs are not real tables)
+    table_names.retain(|name| !cte_names.contains(name));
+
+    // Load metadata
     let metadata = self
       .get_metadata_cached()
       .map_err(|e| DataFusionError::Execution(format!("Failed to read metadata: {}", e)))?;
 
+    // Only register tables that are referenced in the query
     if let Some(database) = metadata.databases.get(db_name) {
-      for (table_name, _table) in &database.tables {
-        let table_dir = self
-          .resolve_table_dir(db_name, table_name, username)
-          .map_err(|e| DataFusionError::Execution(format!("Failed to resolve table directory for '{}': {}", table_name, e)))?;
+      for table_name in &table_names {
+        // Check if this table exists in the database
+        if let Some(_table) = database.tables.get(table_name) {
+          let table_dir = self
+            .resolve_table_dir(db_name, table_name, username)
+            .map_err(|e| DataFusionError::Execution(format!("Failed to resolve table directory for '{}': {}", table_name, e)))?;
 
-        let needs_register = match self.session_context.table_exist(table_name) {
-          Ok(exists) => !exists,
-          Err(_) => true,
-        };
+          let needs_register = match self.session_context.table_exist(table_name) {
+            Ok(exists) => !exists,
+            Err(_) => true,
+          };
 
-        if needs_register {
-          // Create ListingOptions with partition column for Hive-style partitioning
-          let file_format = ParquetFormat::default();
-          let listing_options = ListingOptions::new(Arc::new(file_format))
-            .with_file_extension(".parquet")
-            .with_table_partition_cols(vec![(
-              "date".to_string(),
-              DataType::Utf8, // Partition values are stored as strings in directory names
-            )]);
+          if needs_register {
+            // Create ListingOptions with partition column for Hive-style partitioning
+            let file_format = ParquetFormat::default();
+            let listing_options = ListingOptions::new(Arc::new(file_format))
+              .with_file_extension(".parquet")
+              .with_table_partition_cols(vec![(
+                "date".to_string(),
+                DataType::Utf8, // Partition values are stored as strings in directory names
+              )]);
 
-          // Create the listing table URL
-          let table_url = ListingTableUrl::parse(&table_dir).map_err(|e| DataFusionError::Execution(format!("Failed to parse table URL: {}", e)))?;
+            // Create the listing table URL
+            let table_url =
+              ListingTableUrl::parse(&table_dir).map_err(|e| DataFusionError::Execution(format!("Failed to parse table URL: {}", e)))?;
 
-          // Configure the listing table and infer schema from parquet files
-          let config = ListingTableConfig::new(table_url)
-            .with_listing_options(listing_options)
-            .infer_schema(&self.session_context.state())
-            .await?;
+            // Configure the listing table and infer schema from parquet files
+            let config = ListingTableConfig::new(table_url)
+              .with_listing_options(listing_options)
+              .infer_schema(&self.session_context.state())
+              .await?;
 
-          let listing_table = ListingTable::try_new(config)?;
+            let listing_table = ListingTable::try_new(config)?;
 
-          self.session_context.register_table(table_name, Arc::new(listing_table))?;
+            self.session_context.register_table(table_name, Arc::new(listing_table))?;
+          }
+        } else {
+          // Table referenced in query doesn't exist in database
+          return Err(DataFusionError::Plan(format!(
+            "Table '{}' referenced in query does not exist in database '{}'",
+            table_name, db_name
+          )));
         }
       }
     }
