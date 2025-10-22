@@ -799,22 +799,33 @@ impl DatabaseManager {
       return Err(format!("Table path '{}' does not exist.", final_table_path.display()).into());
     }
 
-    // Collect all files in the chosen directory
+    // Collect all files in the chosen directory (recursively to support partitioned tables)
     let mut file_list = Vec::new();
-    for entry in fs::read_dir(final_table_path)? {
-      let entry = entry?;
-      let path = entry.path();
-
-      // Only include files, ignore directories
-      if path.is_file() {
-        file_list.push(path.to_string_lossy().to_string());
-      }
-    }
+    self.collect_files_recursive(&final_table_path, &mut file_list)?;
 
     // Sort files by their name for consistency
     file_list.sort();
 
     Ok(file_list)
+  }
+
+  /// Helper method to recursively collect all files from a directory
+  fn collect_files_recursive(&self, dir: &Path, file_list: &mut Vec<String>) -> Result<(), Box<dyn Error>> {
+    if dir.is_dir() {
+      for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.is_dir() {
+          // Recursively collect files from subdirectories
+          self.collect_files_recursive(&path, file_list)?;
+        } else if path.is_file() {
+          // Add file to the list
+          file_list.push(path.to_string_lossy().to_string());
+        }
+      }
+    }
+    Ok(())
   }
 
   fn validate_schema_structure(&self, schema: &Value) -> Result<(), Box<dyn Error>> {

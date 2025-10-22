@@ -346,66 +346,60 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
   ) -> Result<Option<String>, Box<dyn std::error::Error>> {
     let s3_store = &self.s3_store;
     let file_path = PathBuf::from(file);
-    let filename = file_path.file_name().and_then(|n| n.to_str());
 
-    let regx =
-      Regex::new(r"^(?P<table>.+?)_(?P<year>\d{4})-(?P<month>\d{2})(?:-(?P<day>\d{2})?(?:_(?P<hour>\d{2})?(?:-(?P<minute>\d{2}))?)?)?\.parquet$")
-        .expect("Invalid regex pattern");
+    // Regex for partitioned format: date=YYYY-MM-DD
+    let partition_regx = Regex::new(r"date=(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})").expect("Invalid partition regex");
 
-    if let Some(name) = filename {
-      if let Some(caps) = regx.captures(name) {
-        let year = caps.name("year").map(|m| m.as_str()).unwrap_or("0000");
-        let month = caps.name("month").map(|m| m.as_str()).unwrap_or("00");
-        let day = caps.name("day").map(|m| m.as_str()).unwrap_or("00");
-        let hour = caps.name("hour").map(|m| m.as_str()).unwrap_or("00");
+    // Extract date from parent directory path
+    let parent_path = file_path.parent().and_then(|p| p.to_str()).unwrap_or("");
 
-        let target_path = match (caps.name("day"), caps.name("hour"), caps.name("minute")) {
-          (Some(_), Some(_), Some(_)) => format!("{}/{}/{}/{}/{}/{}/{}/{}", username, db_name, table_name, year, month, day, hour, name),
-          (Some(_), Some(_), None) => format!("{}/{}/{}/{}/{}/{}/{}", username, db_name, table_name, year, month, day, name),
-          (Some(_), None, None) => format!("{}/{}/{}/{}/{}/{}", username, db_name, table_name, year, month, name),
-          (None, None, None) => format!("{}/{}/{}/{}/{}", username, db_name, table_name, year, name),
-          _ => unreachable!(),
-        };
+    if let Some(caps) = partition_regx.captures(parent_path) {
+      let year = caps.name("year").map(|m| m.as_str()).unwrap_or("0000");
+      let month = caps.name("month").map(|m| m.as_str()).unwrap_or("00");
+      let day = caps.name("day").map(|m| m.as_str()).unwrap_or("00");
 
-        let s3_temp_path = format!("{}/merge_workspace/{}/{}", self.db_manager.get_storage_path(), username, name);
-        let mut s3_batches = Vec::new();
+      // Generate S3 filename that includes the date
+      let s3_filename = format!("{}_{}-{}-{}.parquet", table_name, year, month, day);
+      let target_path = format!("{}/{}/{}/{}/{}/{}", username, db_name, table_name, year, month, s3_filename);
 
-        let local_modified_datetime = get_local_file_modified_time(&file_path.to_string_lossy()).unwrap_or_default();
+      let s3_temp_path = format!("{}/merge_workspace/{}/{}", self.db_manager.get_storage_path(), username, s3_filename);
+      let mut s3_batches = Vec::new();
 
-        // Use `head()` to check if file exists and get metadata
-        let s3_modified_datetime = match s3_store.store_head(&StorePath::from(target_path.clone())).await {
-          Ok(meta) => meta.last_modified,
-          Err(_) => {
-            println!("S3 file does not exist, uploading local file...");
-            self.upload_to_bucket(&file_path.to_string_lossy(), &target_path).await?;
-            println!("Successfully uploaded new: '{}'", file_path.to_string_lossy());
-            return Ok(None);
-          }
-        };
+      let local_modified_datetime = get_local_file_modified_time(&file_path.to_string_lossy()).unwrap_or_default();
 
-        // Compare timestamps before downloading
-        if local_modified_datetime > s3_modified_datetime {
-          println!("Local file is newer than S3, downloading S3 version for merge...");
-          let s3_available = self
-            .download_from_bucket(&target_path, &s3_temp_path)
-            .await
-            .map(|_| read_parquet_batches(Path::new(&s3_temp_path), &mut s3_batches).is_ok())
-            .unwrap_or(false);
-
-          let mut local_batches = Vec::new();
-          read_parquet_batches(&file_path, &mut local_batches)?;
-
-          if s3_available {
-            let merged_batches = combine_unique_batches(local_batches, s3_batches, unique_fields)?;
-            if !merged_batches.is_empty() {
-              batches.extend(merged_batches);
-              processed_files.push(PathBuf::from(&s3_temp_path));
-              return Ok(Some(target_path));
-            }
-          }
-        } else {
-          println!("Local file is older or identical to S3, '{}' skipping download", name);
+      // Use `head()` to check if file exists and get metadata
+      let s3_modified_datetime = match s3_store.store_head(&StorePath::from(target_path.clone())).await {
+        Ok(meta) => meta.last_modified,
+        Err(_) => {
+          println!("S3 file does not exist, uploading local file...");
+          self.upload_to_bucket(&file_path.to_string_lossy(), &target_path).await?;
+          println!("Successfully uploaded new: '{}'", file_path.to_string_lossy());
+          return Ok(None);
         }
+      };
+
+      // Compare timestamps before downloading
+      if local_modified_datetime > s3_modified_datetime {
+        println!("Local file is newer than S3, downloading S3 version for merge...");
+        let s3_available = self
+          .download_from_bucket(&target_path, &s3_temp_path)
+          .await
+          .map(|_| read_parquet_batches(Path::new(&s3_temp_path), &mut s3_batches).is_ok())
+          .unwrap_or(false);
+
+        let mut local_batches = Vec::new();
+        read_parquet_batches(&file_path, &mut local_batches)?;
+
+        if s3_available {
+          let merged_batches = combine_unique_batches(local_batches, s3_batches, unique_fields)?;
+          if !merged_batches.is_empty() {
+            batches.extend(merged_batches);
+            processed_files.push(PathBuf::from(&s3_temp_path));
+            return Ok(Some(target_path));
+          }
+        }
+      } else {
+        println!("Local file is older or identical to S3, '{}' skipping download", s3_filename);
       }
     }
 
