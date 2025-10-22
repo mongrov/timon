@@ -6,7 +6,7 @@ pub mod timon_engine;
 pub mod android {
   use crate::timon_engine::{
     cloud_fetch_parquet, cloud_sink_parquet, cloud_sync_parquet, create_database, create_table, delete_database, delete_table, get_all_sync_metadata,
-    get_sync_metadata, init_bucket, init_timon, insert, list_databases, list_tables, query,
+    get_sync_metadata, init_bucket, init_timon, insert, list_databases, list_tables, preload_tables, query,
   };
   use jni::objects::{JClass, JObject, JString, JValue};
   use jni::sys::{jint, jstring};
@@ -241,6 +241,58 @@ pub mod android {
       Err(e) => {
         let error_message = env
           .new_string(format!("Error querying Parquet files: {:?}", e))
+          .expect("Couldn't create java string!");
+        error_message.into_raw()
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub unsafe extern "C" fn nativePreloadTables(
+    mut env: JNIEnv,
+    _class: JClass,
+    db_name: JString,
+    table_names: JObject,
+    username: JString,
+  ) -> jstring {
+    // Convert Java strings to Rust strings
+    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get db_name java string!").into();
+    let rust_username: Option<String> = if username.is_null() {
+      None
+    } else {
+      Some(env.get_string(&username).expect("Couldn't get username java string!").into())
+    };
+
+    // Convert Java String[] array to Rust Vec<String>
+    let mut rust_table_names: Vec<String> = Vec::new();
+
+    // Convert JObject to JObjectArray
+    let table_names_array: jni::objects::JObjectArray = table_names.into();
+
+    // Get the length of the array
+    let array_length = env.get_array_length(&table_names_array).expect("Failed to get array length");
+
+    // Iterate through the array and convert each element
+    for i in 0..array_length {
+      let element = env.get_object_array_element(&table_names_array, i).expect("Failed to get array element");
+      let j_string: JString = element.into();
+      let rust_string: String = env.get_string(&j_string).expect("Failed to convert Java String to Rust String").into();
+      rust_table_names.push(rust_string);
+    }
+
+    // Call the async preload_tables function
+    match Runtime::new()
+      .unwrap()
+      .block_on(preload_tables(&rust_db_name, rust_table_names, rust_username.as_deref()))
+    {
+      Ok(result) => {
+        let json_string = result.to_string();
+        let output = env.new_string(json_string).expect("Couldn't create success string!");
+        output.into_raw()
+      }
+      Err(e) => {
+        let error_message = env
+          .new_string(format!("Error preloading tables: {:?}", e))
           .expect("Couldn't create java string!");
         error_message.into_raw()
       }
@@ -527,6 +579,11 @@ pub mod android {
         sig: "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;".into(),
         fn_ptr: nativeGetSyncMetadata as *mut c_void,
       },
+      NativeMethod {
+        name: "nativePreloadTables".into(),
+        sig: "(Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;".into(),
+        fn_ptr: nativePreloadTables as *mut c_void,
+      },
     ];
 
     env.register_native_methods(class, &methods).expect("Failed to register native methods");
@@ -538,7 +595,7 @@ pub mod android {
 pub mod ios {
   use crate::timon_engine::{
     cloud_fetch_parquet, cloud_sink_parquet, cloud_sync_parquet, create_database, create_table, delete_database, delete_table, get_all_sync_metadata,
-    get_sync_metadata, init_bucket, init_timon, insert, list_databases, list_tables, query,
+    get_sync_metadata, init_bucket, init_timon, insert, list_databases, list_tables, preload_tables, query,
   };
   use libc::c_char;
   use std::collections::HashMap;
@@ -757,6 +814,46 @@ pub mod ios {
             }
             Err(err) => {
               let err_message = serde_json::json!({ "error": format!("Error querying Parquet files: {:?}", err) }).to_string();
+              string_to_c_str(err_message)
+            }
+          }
+        }
+        _ => {
+          let err_message = serde_json::json!({ "error": "Invalid arguments" }).to_string();
+          string_to_c_str(err_message)
+        }
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub extern "C" fn nativePreloadTables(db_name: *const c_char, table_names_json: *const c_char, username: *const c_char) -> *mut c_char {
+    unsafe {
+      match (
+        c_str_to_string(db_name),
+        c_str_to_string(table_names_json),
+        c_str_to_string(username).ok(),
+      ) {
+        (Ok(rust_db_name), Ok(rust_table_names_json), rust_username) => {
+          // Parse the JSON array of table names
+          match serde_json::from_str::<Vec<String>>(&rust_table_names_json) {
+            Ok(rust_table_names) => {
+              match Runtime::new()
+                .unwrap()
+                .block_on(preload_tables(&rust_db_name, rust_table_names, rust_username.as_deref()))
+              {
+                Ok(result) => {
+                  let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
+                  string_to_c_str(json_string)
+                }
+                Err(err) => {
+                  let err_message = serde_json::json!({ "error": format!("Error preloading tables: {:?}", err) }).to_string();
+                  string_to_c_str(err_message)
+                }
+              }
+            }
+            Err(parse_err) => {
+              let err_message = serde_json::json!({ "error": format!("Failed to parse table names JSON: {:?}", parse_err) }).to_string();
               string_to_c_str(err_message)
             }
           }

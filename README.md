@@ -45,7 +45,43 @@ external fun insert(dbName: String, tableName: String, jsonData: String): String
 
 // Query a database with SQL query
 external fun query(dbName: String, sqlQuery: String): String
+
+// Pre-load specific tables at startup to eliminate first-query latency
+// Returns JSON with status and list of successfully loaded tables
+external fun preloadTables(dbName: String, tableNames: Array<String>, userName: String?): String
 ```
+
+### Usage Example: Pre-warming Tables
+
+The `preloadTables` function is designed to be called at app startup to register frequently-used tables with DataFusion, eliminating the latency of on-demand registration during the first query.
+
+**React Native/TypeScript:**
+```typescript
+import { preloadTables } from './test-rust-module';
+
+// At app initialization (e.g., in useEffect or App startup)
+useEffect(() => {
+  preloadTables("mydb", ["users", "posts", "comments"], "username");
+}, []);
+
+// Later queries to these tables will be instant!
+const result = await query("mydb", "SELECT * FROM users", "username");
+```
+
+**Response Format:**
+```json
+{
+  "status": 200,
+  "message": "Successfully preloaded 3 table(s) in database 'mydb'",
+  "json_value": ["users", "posts", "comments"]
+}
+```
+
+**Benefits:**
+- ✅ Eliminates first-query latency by pre-registering tables
+- ✅ Parallel table loading (up to 10 concurrent registrations)
+- ✅ Automatically skips already-registered tables
+- ✅ Gracefully handles missing tables (logs warning, continues loading others)
 
 ## S3-Compatible Storage Functions
 

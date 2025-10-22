@@ -303,6 +303,31 @@ pub async fn query_df(db_name: &str, sql_query: &str, username: Option<&str>, li
   }
 }
 
+#[allow(dead_code)]
+pub async fn preload_tables(db_name: &str, table_names: Vec<String>, username: Option<&str>) -> Result<Value, String> {
+  let database_manager = get_database_manager().map_err(|e| e.to_string())?;
+  match database_manager.preload_tables(db_name, table_names, username).await {
+    Ok(loaded_tables) => {
+      let json_value = serde_json::to_value(&loaded_tables).map_err(|e| e.to_string())?;
+      let result = TimonResult {
+        status: 200,
+        message: format!("Successfully preloaded {} table(s) in database '{}'", loaded_tables.len(), db_name),
+        json_value: Some(json_value),
+      };
+      serde_json::to_value(&result).map_err(|e| e.to_string())
+    }
+    Err(err) => {
+      let timon_error: TimonError = err.into();
+      let result = TimonResult {
+        status: timon_error.status_code(),
+        message: timon_error.to_string(),
+        json_value: None,
+      };
+      serde_json::to_value(&result).map_err(|e| e.to_string())
+    }
+  }
+}
+
 /* ******************************** S3 Compatible Storage ********************************
 * @ init_bucket(bucket_endpoint, bucket_name, access_key_id, secret_access_key)
 * @ cloud_sync_parquet(db_name, table_name, date_range, username?)
