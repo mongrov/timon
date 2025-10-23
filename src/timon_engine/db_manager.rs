@@ -1251,12 +1251,10 @@ impl DatabaseManager {
 
     for record in records_to_keep {
       let timestamp = record.get(datetime_field).and_then(|t| t.as_i64()).unwrap_or(0);
-      let partition_name = format!(
-        "{}_{}.parquet",
-        table_name,
-        rounded_timestamp(timestamp.try_into().unwrap(), self.bucket_interval)
-      );
-      let target_file = format!("{}/{}", table_path, partition_name);
+      let partition_value = rounded_timestamp(timestamp.try_into().unwrap(), self.bucket_interval);
+      // Use Hive-style partitioning to match the insert function
+      let partition_dir = format!("{}/partition_date={}", table_path, partition_value);
+      let target_file = format!("{}/data.parquet", partition_dir);
 
       records_by_file.entry(target_file).or_insert_with(Vec::new).push(record);
     }

@@ -210,20 +210,20 @@ async fn test_s3_sync() {
 #[cfg(all(not(feature = "dev_cli"), not(feature = "cloud_server")))]
 fn main() {
   tokio::runtime::Runtime::new().expect("Failed to create runtime").block_on(async {
-    test_local_storage().await;
-    test_s3_sync().await;
-    let _ = test_ziva_ring_insert().await;
-    let _ = test_ziva_ring_query().await;
-    let _ = test_ziva_join_query().await;
-    let _ = insert_ziva_data_six_months().await;
-    let _ = test_ziva_range_selction_query().await;
-    let _ = test_max_rows().await;
-    let _ = test_partition_limit().await;
-    let _ = test_sleep_queries().await;
-    let _ = test_hrv_queries().await;
-    let _ = test_rhr_queries().await;
-    let _ = test_vitality_queries().await;
-    let _ = ziva_app_queries().await;
+    // test_local_storage().await;
+    // test_s3_sync().await;
+    // let _ = test_ziva_ring_insert().await;
+    // let _ = test_ziva_ring_query().await;
+    // let _ = test_ziva_join_query().await;
+    // let _ = insert_ziva_data_six_months().await;
+    // let _ = test_ziva_range_selction_query().await;
+    // let _ = test_max_rows().await;
+    // let _ = test_partition_limit().await;
+    // let _ = test_sleep_queries().await;
+    // let _ = test_hrv_queries().await;
+    // let _ = test_rhr_queries().await;
+    // let _ = test_vitality_queries().await;
+    // let _ = ziva_app_queries().await;
   });
 }
 
@@ -235,10 +235,11 @@ Weekly = 10080
 Monthly = 43200
 */
 
+#[allow(dead_code)]
 async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
   const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
-  let timon_result = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
+  let timon_result = init_timon(STORAGE_PATH, 43200, USERNAME).unwrap();
   println!("init_timon -> {}", timon_result);
 
   const DATABASE_NAME: &str = "zivaring";
@@ -523,11 +524,12 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
   Ok(())
 }
 
+#[allow(dead_code)]
 async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
   const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
   const DATABASE_NAME: &str = "zivaring";
-  let _ = init_timon(STORAGE_PATH, 60, USERNAME).unwrap();
+  let _ = init_timon(STORAGE_PATH, 43200, USERNAME).unwrap();
 
   // Query activity details
   let start_time = Instant::now();
@@ -623,11 +625,12 @@ async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
   Ok(())
 }
 
+#[allow(dead_code)]
 async fn test_ziva_join_query() -> Result<(), Box<dyn std::error::Error>> {
   const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
   const DATABASE_NAME: &str = "zivaring";
-  let _ = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
+  let _ = init_timon(STORAGE_PATH, 43200, USERNAME).unwrap();
 
   let start_time = Instant::now();
   let sql_query = "SELECT * FROM activitydetails JOIN spo2_readings ON to_char(to_timestamp(activitydetails.date), 'YYYY-MM-DD') = to_char(to_timestamp(spo2_readings.date), 'YYYY-MM-DD') LIMIT 100";
@@ -663,11 +666,12 @@ fn generate_spo2_data(start: &str, end: &str) -> Result<String, Box<dyn std::err
   Ok(serde_json::to_string(&data)?)
 }
 
+#[allow(dead_code)]
 async fn insert_ziva_data_six_months() -> Result<(), Box<dyn std::error::Error>> {
   const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
   const DATABASE_NAME: &str = "zivaring";
-  let _ = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
+  let _ = init_timon(STORAGE_PATH, 43200, USERNAME).unwrap();
   let _ = create_database(DATABASE_NAME);
 
   // SPO2 Table Schema
@@ -704,11 +708,12 @@ async fn insert_ziva_data_six_months() -> Result<(), Box<dyn std::error::Error>>
   Ok(())
 }
 
+#[allow(dead_code)]
 async fn test_ziva_range_selction_query() -> Result<(), Box<dyn std::error::Error>> {
   const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
   const DATABASE_NAME: &str = "zivaring";
-  let _ = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
+  let _ = init_timon(STORAGE_PATH, 43200, USERNAME).unwrap();
 
   const QUERY_2: &str = "SELECT COUNT(*) AS total FROM activitydetails WHERE partition_date BETWEEN '2025-08-27' AND '2025-09-20'";
   let result = query(DATABASE_NAME, QUERY_2, None, None).await?;
@@ -717,16 +722,17 @@ async fn test_ziva_range_selction_query() -> Result<(), Box<dyn std::error::Erro
   Ok(())
 }
 
+#[allow(dead_code)]
 async fn test_max_rows() -> Result<(), Box<dyn std::error::Error>> {
   const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
-  let _ = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
+  let _ = init_timon(STORAGE_PATH, 43200, USERNAME).unwrap();
 
   const DATABASE_NAME: &str = "test_maxrows";
   let database_result = create_database(DATABASE_NAME);
   println!("create_database -> {}", database_result.unwrap());
 
-  let activity_details_schema = r#"
+  let battery_readings_schema = r#"
     {
       "date": {
         "type": "int",
@@ -737,12 +743,12 @@ async fn test_max_rows() -> Result<(), Box<dyn std::error::Error>> {
       "battery_level": {
         "type": "int"
       },
-      "max_rows": 100
+      "max_rows": 10
     }
   "#;
 
-  let activity_details_result = create_table(DATABASE_NAME, "battery_readings", &activity_details_schema);
-  println!("Create battery_readings table -> {}", activity_details_result.unwrap());
+  let battery_table_result = create_table(DATABASE_NAME, "battery_readings", &battery_readings_schema);
+  println!("Create battery_readings table -> {}", battery_table_result.unwrap());
 
   let battery_readings_json = r#"
     [
@@ -774,21 +780,22 @@ async fn test_max_rows() -> Result<(), Box<dyn std::error::Error>> {
   Ok(())
 }
 
+#[allow(dead_code)]
 async fn test_partition_limit() -> Result<(), Box<dyn std::error::Error>> {
   const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
   const DATABASE_NAME: &str = "zivaring";
-  let _ = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
+  let _ = init_timon(STORAGE_PATH, 43200, USERNAME).unwrap();
 
   println!("\n=== Testing Partition Limit Functionality ===");
 
   // Test querying last 3 partitions
-  let sql_query = "SELECT COUNT(*) AS total FROM activitydetails";
-  let result = query(DATABASE_NAME, sql_query, None, Some(2)).await?;
+  let sql_query = "SELECT COUNT(*) AS total FROM hrv_table";
+  let result = query(DATABASE_NAME, sql_query, None, Some(1)).await?;
   println!("Last 2 partitions result: {} status: {}", result["json_value"], result["status"]);
 
   // Test querying last 7 partitions
-  let result2 = query(DATABASE_NAME, sql_query, None, Some(3)).await?;
+  let result2 = query(DATABASE_NAME, sql_query, None, Some(2)).await?;
   println!("Last 3 partitions result: {} status: {}", result2["json_value"], result2["status"]);
 
   // Test without partition limit (all partitions)
@@ -798,11 +805,12 @@ async fn test_partition_limit() -> Result<(), Box<dyn std::error::Error>> {
   Ok(())
 }
 
+#[allow(dead_code)]
 async fn test_sleep_queries() -> Result<(), Box<dyn std::error::Error>> {
   println!("Testing Sleep Queries for Daily Vitality Score");
   const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
-  let _ = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
+  let _ = init_timon(STORAGE_PATH, 43200, USERNAME).unwrap();
 
   // Test 1: Get last night's sleep data (minute-by-minute objects)
   println!("\n=== LAST NIGHT'S SLEEP DATA ===");
@@ -950,11 +958,12 @@ async fn test_sleep_queries() -> Result<(), Box<dyn std::error::Error>> {
   Ok(())
 }
 
+#[allow(dead_code)]
 async fn test_hrv_queries() -> Result<(), Box<dyn std::error::Error>> {
   println!("\n=== HRV QUERIES FOR RECOVERY COMPONENT ===");
   const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
-  let _ = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
+  let _ = init_timon(STORAGE_PATH, 43200, USERNAME).unwrap();
 
   let rhr_hrv_query = r#"
   WITH date_params AS (
@@ -1168,11 +1177,12 @@ async fn test_hrv_queries() -> Result<(), Box<dyn std::error::Error>> {
   Ok(())
 }
 
+#[allow(dead_code)]
 async fn test_rhr_queries() -> Result<(), Box<dyn std::error::Error>> {
   println!("\n=== RHR QUERIES FOR HEART HEALTH COMPONENT ===");
   const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
-  let _ = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
+  let _ = init_timon(STORAGE_PATH, 43200, USERNAME).unwrap();
 
   let rhr_sql_query = r#"
   WITH date_params AS (
@@ -1385,11 +1395,12 @@ async fn test_rhr_queries() -> Result<(), Box<dyn std::error::Error>> {
   Ok(())
 }
 
+#[allow(dead_code)]
 async fn test_vitality_queries() -> Result<(), Box<dyn std::error::Error>> {
   println!("\n=== VITALITY QUERIES COMPONENT ===");
   const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
-  let _ = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
+  let _ = init_timon(STORAGE_PATH, 43200, USERNAME).unwrap();
 
   let vitality_sql_query = r#"
   WITH date_params AS (
@@ -2083,11 +2094,12 @@ async fn test_vitality_queries() -> Result<(), Box<dyn std::error::Error>> {
   Ok(())
 }
 
+#[allow(dead_code)]
 async fn ziva_app_queries() -> Result<(), Box<dyn std::error::Error>> {
   println!("\n=== ZIVA APP QUERIES COMPONENT ===");
   const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
-  let _ = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
+  let _ = init_timon(STORAGE_PATH, 43200, USERNAME).unwrap();
 
   let query_x = r#"
   WITH transformed AS (
