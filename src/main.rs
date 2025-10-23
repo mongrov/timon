@@ -72,7 +72,7 @@ async fn test_local_storage() {
 
   let table_schema = r#"
     {
-      "timestamp": {
+      "date": {
         "type": "int",
         "required": true,
         "unique": true,
@@ -248,7 +248,7 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
   // Activity Details Table Schema
   let activity_details_schema = r#"
     {
-      "timestamp": {
+      "date": {
         "type": "int",
         "required": true,
         "unique": true,
@@ -272,7 +272,7 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
   // SPO2 Table Schema
   let spo2_schema = r#"
     {
-      "timestamp": {
+      "date": {
         "type": "int",
         "required": true,
         "unique": true,
@@ -287,7 +287,7 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
   // Heart Rate Table Schema
   let heartrate_schema = r#"
     {
-      "timestamp": {
+      "date": {
         "type": "int",
         "required": true,
         "unique": true,
@@ -302,7 +302,7 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
   // HRV Table Schema
   let hrv_schema = r#"
     {
-      "timestamp": {
+      "date": {
         "type": "int",
         "required": true,
         "unique": true,
@@ -335,7 +335,7 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
   // Sleep Table Schema
   let sleep_schema = r#"
     {
-      "timestamp": {
+      "date": {
         "type":"int",
         "required":true,
         "unique":true,
@@ -356,7 +356,7 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
   // Temperature Table Schema
   let temperature_schema = r#"
     {
-      "timestamp": {
+      "date": {
         "type": "int",
         "required": true,
         "unique": true,
@@ -398,11 +398,11 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
     let formatted_activity_details: Vec<serde_json::Value> = activity_details
       .iter()
       .map(|reading| {
-        let date_str = reading["timestamp"].as_str().unwrap_or("2025.01.01 00:00:00");
+        let date_str = reading["date"].as_str().unwrap_or("2025.01.01 00:00:00");
         let naive_datetime = chrono::NaiveDateTime::parse_from_str(date_str, "%Y.%m.%d %H:%M:%S").unwrap_or_default();
-        let timestamp = DateTime::<Utc>::from_naive_utc_and_offset(naive_datetime, Utc);
+        let date = DateTime::<Utc>::from_naive_utc_and_offset(naive_datetime, Utc);
         json!({
-          "timestamp": timestamp,
+          "date": date,
           "step": reading["step"],
           "arraySteps": reading["arraySteps"],
           "calories": reading["calories"],
@@ -420,11 +420,11 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
     let formatted_spo2: Vec<serde_json::Value> = spo2
       .iter()
       .map(|reading| {
-        let date_str = reading["timestamp"].as_str().unwrap_or("2025.01.01 00:00:00");
+        let date_str = reading["date"].as_str().unwrap_or("2025.01.01 00:00:00");
         let naive_datetime = chrono::NaiveDateTime::parse_from_str(date_str, "%Y.%m.%d %H:%M:%S").unwrap_or_default();
-        let timestamp = DateTime::<Utc>::from_naive_utc_and_offset(naive_datetime, Utc);
+        let date = DateTime::<Utc>::from_naive_utc_and_offset(naive_datetime, Utc);
         json!({
-          "timestamp": timestamp,
+          "date": date,
           "automaticSpo2Data": reading["automaticSpo2Data"]
         })
       })
@@ -439,11 +439,11 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
     let formatted_hr: Vec<serde_json::Value> = heartrate
       .iter()
       .map(|reading| {
-        let date_str = reading["timestamp"].as_str().unwrap_or("2025.01.01 00:00:00");
+        let date_str = reading["date"].as_str().unwrap_or("2025.01.01 00:00:00");
         let naive_datetime = chrono::NaiveDateTime::parse_from_str(date_str, "%Y.%m.%d %H:%M:%S").unwrap_or_default();
-        let timestamp = DateTime::<Utc>::from_naive_utc_and_offset(naive_datetime, Utc);
+        let date = DateTime::<Utc>::from_naive_utc_and_offset(naive_datetime, Utc);
         json!({
-          "timestamp": timestamp,
+          "date": date,
           "singleHR": reading["singleHR"]
         })
       })
@@ -458,11 +458,11 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
     let formatted_hrv: Vec<serde_json::Value> = hrv
       .iter()
       .map(|reading| {
-        let date_str = reading["timestamp"].as_str().unwrap_or("2025.01.01 00:00:00");
+        let date_str = reading["date"].as_str().unwrap_or("2025.01.01 00:00:00");
         let naive_datetime = chrono::NaiveDateTime::parse_from_str(date_str, "%Y.%m.%d %H:%M:%S").unwrap_or_default();
-        let timestamp = DateTime::<Utc>::from_naive_utc_and_offset(naive_datetime, Utc);
+        let date = DateTime::<Utc>::from_naive_utc_and_offset(naive_datetime, Utc);
         json!({
-          "timestamp": timestamp,
+          "date": date,
           "heartRate": reading["heartRate"],
           "hrv": reading["hrv"],
           "stress": reading["stress"],
@@ -482,11 +482,11 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
     let formatted_sleep: Vec<serde_json::Value> = sleep
       .iter()
       .map(|reading| {
-        let date_str = reading["timestamp"].as_str().unwrap_or("2025.01.01 00:00:00");
+        let date_str = reading["date"].as_str().unwrap_or("2025.01.01 00:00:00");
         let naive_datetime = chrono::NaiveDateTime::parse_from_str(date_str, "%Y.%m.%d %H:%M:%S").unwrap_or_default();
-        let timestamp = DateTime::<Utc>::from_naive_utc_and_offset(naive_datetime, Utc);
+        let date = DateTime::<Utc>::from_naive_utc_and_offset(naive_datetime, Utc);
         json!({
-          "timestamp": timestamp,
+          "date": date,
           "unitLength": reading["unitLength"],
           "quality": reading["quality"],
           "start": reading["start"]
@@ -503,11 +503,11 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
     let formatted_temp: Vec<serde_json::Value> = temperature
       .iter()
       .map(|reading| {
-        let date_str = reading["timestamp"].as_str().unwrap_or("2025.01.01 00:00:00");
+        let date_str = reading["date"].as_str().unwrap_or("2025.01.01 00:00:00");
         let naive_datetime = chrono::NaiveDateTime::parse_from_str(date_str, "%Y.%m.%d %H:%M:%S").unwrap_or_default();
-        let timestamp = DateTime::<Utc>::from_naive_utc_and_offset(naive_datetime, Utc);
+        let date = DateTime::<Utc>::from_naive_utc_and_offset(naive_datetime, Utc);
         json!({
-          "timestamp": timestamp,
+          "date": date,
           "temperature": reading["temperature"]
         })
       })
@@ -630,7 +630,7 @@ async fn test_ziva_join_query() -> Result<(), Box<dyn std::error::Error>> {
   let _ = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
 
   let start_time = Instant::now();
-  let sql_query = "SELECT * FROM activitydetails JOIN spo2_readings ON to_char(to_timestamp(activitydetails.timestamp), 'YYYY-MM-DD') = to_char(to_timestamp(spo2_readings.timestamp), 'YYYY-MM-DD') LIMIT 100";
+  let sql_query = "SELECT * FROM activitydetails JOIN spo2_readings ON to_char(to_timestamp(activitydetails.date), 'YYYY-MM-DD') = to_char(to_timestamp(spo2_readings.date), 'YYYY-MM-DD') LIMIT 100";
   let result = query(DATABASE_NAME, sql_query, None, None).await?;
   let duration = start_time.elapsed();
   println!("Query time: {:.3} seconds", duration.as_secs_f64());
@@ -673,7 +673,7 @@ async fn insert_ziva_data_six_months() -> Result<(), Box<dyn std::error::Error>>
   // SPO2 Table Schema
   let spo2_schema = r#"
     {
-      "timestamp": {
+      "date": {
         "type": "int",
         "required": true,
         "unique": true,
@@ -710,7 +710,7 @@ async fn test_ziva_range_selction_query() -> Result<(), Box<dyn std::error::Erro
   const DATABASE_NAME: &str = "zivaring";
   let _ = init_timon(STORAGE_PATH, 10080, USERNAME).unwrap();
 
-  const QUERY_2: &str = "SELECT COUNT(*) AS total FROM activitydetails WHERE date BETWEEN '2025-08-27' AND '2025-09-20'";
+  const QUERY_2: &str = "SELECT COUNT(*) AS total FROM activitydetails WHERE partition_date BETWEEN '2025-08-27' AND '2025-09-20'";
   let result = query(DATABASE_NAME, QUERY_2, None, None).await?;
   println!("Range Selction Result: {} status: {}", result["json_value"], result["status"]);
 
@@ -728,7 +728,7 @@ async fn test_max_rows() -> Result<(), Box<dyn std::error::Error>> {
 
   let activity_details_schema = r#"
     {
-      "timestamp": {
+      "date": {
         "type": "int",
         "required": true,
         "unique": true,
@@ -821,7 +821,7 @@ async fn test_sleep_queries() -> Result<(), Box<dyn std::error::Error>> {
           FROM (
             SELECT start, COUNT(*) as session_minutes
             FROM sleep_table
-            WHERE timestamp BETWEEN {} AND {}
+            WHERE date BETWEEN {} AND {}
             GROUP BY start
           ) as session_counts
         ) AS sleep_longest_session,
@@ -829,7 +829,7 @@ async fn test_sleep_queries() -> Result<(), Box<dyn std::error::Error>> {
         COUNT(CASE WHEN quality = 2 THEN 1 END) / 60.0 AS sleep_deep_hours,
         COUNT(CASE WHEN quality = 3 THEN 1 END) / 60.0 AS sleep_rem_hours
       FROM sleep_table
-      WHERE timestamp BETWEEN {} AND {}
+      WHERE date BETWEEN {} AND {}
       "#,
       start_ts, end_ts, start_ts, end_ts
     );
@@ -877,7 +877,7 @@ async fn test_sleep_queries() -> Result<(), Box<dyn std::error::Error>> {
       FROM (
         SELECT start, COUNT(*) as session_duration
         FROM sleep_table
-        WHERE timestamp BETWEEN {} AND {}
+        WHERE date BETWEEN {} AND {}
         GROUP BY start
       ) as daily_sessions
     "#,
@@ -971,13 +971,13 @@ async fn test_hrv_queries() -> Result<(), Box<dyn std::error::Error>> {
 
   today_hrv_data AS (
       SELECT 
-          TO_TIMESTAMP(h.timestamp) as hrv_timestamp,
+          TO_TIMESTAMP(h.date) as hrv_timestamp,
           h.hrv,
           h.stress,
           h."heartRate"
       FROM hrv_table h
       CROSS JOIN date_params dp
-      WHERE TO_TIMESTAMP(h.timestamp) 
+      WHERE TO_TIMESTAMP(h.date) 
           BETWEEN dp.day_start_utc AND dp.day_end_utc
       AND h.hrv > 0
       AND h.hrv < 200
@@ -997,11 +997,11 @@ async fn test_hrv_queries() -> Result<(), Box<dyn std::error::Error>> {
 
   baseline_hrv_data AS (
       SELECT 
-          DATE_TRUNC('day', TO_TIMESTAMP(h.timestamp)) as day_utc,
+          DATE_TRUNC('day', TO_TIMESTAMP(h.date)) as day_utc,
           h.hrv
       FROM hrv_table h
       CROSS JOIN date_params dp
-      WHERE TO_TIMESTAMP(h.timestamp) 
+      WHERE TO_TIMESTAMP(h.date) 
           BETWEEN dp.baseline_start_utc AND dp.day_start_utc
       AND h.hrv > 0
       AND h.hrv < 200
@@ -1190,11 +1190,11 @@ async fn test_rhr_queries() -> Result<(), Box<dyn std::error::Error>> {
   -- sleep timestamps (epoch seconds as BIGINT + timestamp)
   sleep_timestamps AS (
     SELECT
-      CAST(s.timestamp AS BIGINT) AS sleep_epoch,
-      to_timestamp_seconds(CAST(s.timestamp AS BIGINT)) AS sleep_timestamp_utc
+      CAST(s.date AS BIGINT) AS sleep_epoch,
+      to_timestamp_seconds(CAST(s.date AS BIGINT)) AS sleep_timestamp_utc
     FROM sleep_table s
     CROSS JOIN date_params dp
-    WHERE to_timestamp_seconds(CAST(s.timestamp AS BIGINT))
+    WHERE to_timestamp_seconds(CAST(s.date AS BIGINT))
       BETWEEN dp.sleep_window_start_utc AND dp.sleep_window_end_utc
   ),
 
@@ -1202,14 +1202,14 @@ async fn test_rhr_queries() -> Result<(), Box<dyn std::error::Error>> {
   hr_during_sleep AS (
     SELECT
       hr."singleHR" AS heart_rate,
-      CAST(hr.timestamp AS BIGINT) AS hr_epoch,
-      to_timestamp_seconds(CAST(hr.timestamp AS BIGINT)) AS hr_timestamp_utc
+      CAST(hr.date AS BIGINT) AS hr_epoch,
+      to_timestamp_seconds(CAST(hr.date AS BIGINT)) AS hr_timestamp_utc
     FROM heartrate hr
     WHERE hr."singleHR" BETWEEN 40 AND 120
       AND EXISTS (
         SELECT 1
         FROM sleep_timestamps st
-        WHERE ABS(CAST(hr.timestamp AS BIGINT) - st.sleep_epoch) <= 30
+        WHERE ABS(CAST(hr.date AS BIGINT) - st.sleep_epoch) <= 30
       )
   ),
 
@@ -1231,7 +1231,7 @@ async fn test_rhr_queries() -> Result<(), Box<dyn std::error::Error>> {
       hr."singleHR" AS heart_rate
     FROM heartrate hr
     WHERE hr."singleHR" BETWEEN 40 AND 120
-      AND to_timestamp_seconds(CAST(hr.timestamp AS BIGINT))
+      AND to_timestamp_seconds(CAST(hr.date AS BIGINT))
         BETWEEN (SELECT day_start_utc FROM date_params)
         AND (SELECT day_end_utc FROM date_params)
   ),
@@ -1292,16 +1292,16 @@ async fn test_rhr_queries() -> Result<(), Box<dyn std::error::Error>> {
   -- baseline per day: compute daily counts + percentile safely per day
   baseline_rhr_data AS (
     SELECT
-      DATE_TRUNC('day', to_timestamp_seconds(CAST(hr.timestamp AS BIGINT))) AS day_utc,
+      DATE_TRUNC('day', to_timestamp_seconds(CAST(hr.date AS BIGINT))) AS day_utc,
       COUNT(hr."singleHR") AS cnt,
       CASE WHEN COUNT(hr."singleHR") > 0
           THEN APPROX_PERCENTILE_CONT(hr."singleHR", 0.2)
           ELSE NULL END AS daily_rhr
     FROM heartrate hr
-    WHERE to_timestamp_seconds(CAST(hr.timestamp AS BIGINT))
+    WHERE to_timestamp_seconds(CAST(hr.date AS BIGINT))
       BETWEEN to_timestamp('2025-09-23T07:00:00') AND to_timestamp('2025-09-01T06:59:59')
       AND hr."singleHR" BETWEEN 40 AND 120
-    GROUP BY DATE_TRUNC('day', to_timestamp_seconds(CAST(hr.timestamp AS BIGINT)))
+    GROUP BY DATE_TRUNC('day', to_timestamp_seconds(CAST(hr.date AS BIGINT)))
   ),
 
   baseline_rhr AS (
@@ -1409,9 +1409,9 @@ async fn test_vitality_queries() -> Result<(), Box<dyn std::error::Error>> {
   hrv_component AS (
       WITH hrv_data_availability AS (
           SELECT
-              COUNT(DISTINCT DATE_TRUNC('day', TO_TIMESTAMP(timestamp))) as days_available
+              COUNT(DISTINCT DATE_TRUNC('day', TO_TIMESTAMP(date))) as days_available
           FROM hrv_table
-          WHERE TO_TIMESTAMP(timestamp) >= (SELECT month_ago FROM date_params)
+          WHERE TO_TIMESTAMP(date) >= (SELECT month_ago FROM date_params)
               AND hrv BETWEEN 1 AND 200
       ),
 
@@ -1456,7 +1456,7 @@ async fn test_vitality_queries() -> Result<(), Box<dyn std::error::Error>> {
               STDDEV(h.hrv) as baseline_stddev
           FROM hrv_table h
           CROSS JOIN progressive_baseline pb
-          WHERE TO_TIMESTAMP(h.timestamp) >=
+          WHERE TO_TIMESTAMP(h.date) >=
                 (SELECT today_utc FROM date_params) - INTERVAL '30' day
               AND h.hrv BETWEEN 1 AND 200
           GROUP BY pb.baseline_days, pb.confidence_factor, pb.confidence_message
@@ -1468,7 +1468,7 @@ async fn test_vitality_queries() -> Result<(), Box<dyn std::error::Error>> {
               AVG(stress) as today_stress,
               COUNT(*) as readings
           FROM hrv_table
-          WHERE DATE_TRUNC('day', TO_TIMESTAMP(timestamp)) =
+          WHERE DATE_TRUNC('day', TO_TIMESTAMP(date)) =
                 (SELECT today_utc FROM date_params)
               AND hrv BETWEEN 1 AND 200
       )
@@ -1545,9 +1545,9 @@ async fn test_vitality_queries() -> Result<(), Box<dyn std::error::Error>> {
               SUM(CASE WHEN quality = 2 THEN 1 ELSE 0 END) as light_minutes,
               SUM(CASE WHEN quality = 1 THEN 1 ELSE 0 END) as awake_minutes
           FROM sleep_table
-          WHERE TO_TIMESTAMP(timestamp) >=
+          WHERE TO_TIMESTAMP(date) >=
                 (SELECT sleep_window_start FROM date_params)
-              AND TO_TIMESTAMP(timestamp) <
+              AND TO_TIMESTAMP(date) <
                 (SELECT sleep_window_end FROM date_params)
       ),
       
@@ -1666,15 +1666,15 @@ async fn test_vitality_queries() -> Result<(), Box<dyn std::error::Error>> {
   sleep_consistency_component AS (
       WITH previous_nights AS (
           SELECT
-              DATE_TRUNC('day', TO_TIMESTAMP(timestamp)) as sleep_date,
+              DATE_TRUNC('day', TO_TIMESTAMP(date)) as sleep_date,
               COUNT(*) as night_minutes,
               COUNT(DISTINCT start) as sessions
           FROM sleep_table
-          WHERE TO_TIMESTAMP(timestamp) >=
+          WHERE TO_TIMESTAMP(date) >=
                 (SELECT week_ago FROM date_params)
-              AND TO_TIMESTAMP(timestamp) <
+              AND TO_TIMESTAMP(date) <
                 (SELECT sleep_window_start FROM date_params)
-          GROUP BY DATE_TRUNC('day', TO_TIMESTAMP(timestamp))
+          GROUP BY DATE_TRUNC('day', TO_TIMESTAMP(date))
       ),
       
       consistency_stats AS (
@@ -1733,10 +1733,10 @@ async fn test_vitality_queries() -> Result<(), Box<dyn std::error::Error>> {
   rhr_component AS (
       WITH daily_hr_readings AS (
           SELECT
-              DATE_TRUNC('day', TO_TIMESTAMP(timestamp)) as hr_date,
+              DATE_TRUNC('day', TO_TIMESTAMP(date)) as hr_date,
               "singleHR"
           FROM heartrate
-          WHERE TO_TIMESTAMP(timestamp) >=
+          WHERE TO_TIMESTAMP(date) >=
                 (SELECT week_ago FROM date_params)
               AND "singleHR" BETWEEN 40 AND 120
       ),
@@ -1803,14 +1803,14 @@ async fn test_vitality_queries() -> Result<(), Box<dyn std::error::Error>> {
   safety_modifiers AS (
       WITH temp_analysis AS (
           SELECT
-              AVG(CASE WHEN DATE_TRUNC('day', TO_TIMESTAMP(timestamp)) =
+              AVG(CASE WHEN DATE_TRUNC('day', TO_TIMESTAMP(date)) =
                   (SELECT today_utc FROM date_params)
                   THEN temperature END) as today_temp,
-              AVG(CASE WHEN DATE_TRUNC('day', TO_TIMESTAMP(timestamp)) <
+              AVG(CASE WHEN DATE_TRUNC('day', TO_TIMESTAMP(date)) <
                   (SELECT today_utc FROM date_params)
                   THEN temperature END) as baseline_temp
           FROM temperature_readings
-          WHERE TO_TIMESTAMP(timestamp) >=
+          WHERE TO_TIMESTAMP(date) >=
                 (SELECT two_weeks_ago FROM date_params)
               AND temperature BETWEEN 30 AND 40
       ),
@@ -1851,7 +1851,7 @@ async fn test_vitality_queries() -> Result<(), Box<dyn std::error::Error>> {
               AVG("automaticSpo2Data") as overnight_avg,
               COUNT(CASE WHEN "automaticSpo2Data" < 90 THEN 1 END) as dips_below_90
           FROM spo2_readings
-          WHERE DATE_TRUNC('day', TO_TIMESTAMP(timestamp)) =
+          WHERE DATE_TRUNC('day', TO_TIMESTAMP(date)) =
                 (SELECT today_utc FROM date_params)
               AND "automaticSpo2Data" BETWEEN 70 AND 100
       ),
@@ -2098,7 +2098,7 @@ async fn ziva_app_queries() -> Result<(), Box<dyn std::error::Error>> {
         TO_CHAR(TO_TIMESTAMP(date)::TIMESTAMP AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles', '%Y.%m.%d') AS day,
         TO_CHAR(TO_TIMESTAMP(date)::TIMESTAMP AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles', '%H') AS hour
       FROM activitydetails 
-      WHERE timestamp BETWEEN '1758499200' AND '1758585599'
+      WHERE date BETWEEN '1758499200' AND '1758585599'
     )
     SELECT 
       day, 

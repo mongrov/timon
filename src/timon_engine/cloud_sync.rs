@@ -347,8 +347,8 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
     let s3_store = &self.s3_store;
     let file_path = PathBuf::from(file);
 
-    // Regex for partitioned format: date=YYYY-MM-DD
-    let partition_regx = Regex::new(r"date=(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})").expect("Invalid partition regex");
+    // Regex for partitioned format: partition_date=YYYY-MM-DD
+    let partition_regx = Regex::new(r"partition_date=(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})").expect("Invalid partition regex");
 
     // Extract date from parent directory path
     let parent_path = file_path.parent().and_then(|p| p.to_str()).unwrap_or("");

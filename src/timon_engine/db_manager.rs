@@ -406,8 +406,8 @@ impl DatabaseManager {
       let timestamp = new_record.get(datetime_field).and_then(|t| t.as_i64()).unwrap_or(0);
       let partition_value = rounded_timestamp(timestamp.try_into().unwrap(), self.bucket_interval);
 
-      // Use Hive-style partitioning: date=YYYY-MM-DD/data.parquet
-      let partition_dir = format!("{}/date={}", table_path, partition_value);
+      // Use Hive-style partitioning: partition_date=YYYY-MM-DD/data.parquet
+      let partition_dir = format!("{}/partition_date={}", table_path, partition_value);
       fs::create_dir_all(&partition_dir).ok(); // Create partition directory if it doesn't exist
       let target_file = format!("{}/data.parquet", partition_dir);
 
@@ -534,8 +534,8 @@ impl DatabaseManager {
             for entry in entries.flatten() {
               if entry.path().is_dir() {
                 if let Some(name) = entry.path().file_name().and_then(|n| n.to_str()) {
-                  if name.starts_with("date=") {
-                    let date_value = name.strip_prefix("date=").unwrap_or("");
+                  if name.starts_with("partition_date=") {
+                    let date_value = name.strip_prefix("partition_date=").unwrap_or("");
                     if !all_partitions.contains(&date_value.to_string()) {
                       all_partitions.push(date_value.to_string());
                     }
@@ -553,12 +553,12 @@ impl DatabaseManager {
       if !selected_dates.is_empty() {
         // Build IN clause for the selected dates
         let date_list = selected_dates.iter().map(|d| format!("'{}'", d)).collect::<Vec<_>>().join(", ");
-        // Inject date filter into the SQL query
+        // Inject partition_date filter into the SQL query
         let has_where = sql_query.to_uppercase().contains("WHERE");
         if has_where {
-          format!("{} AND date IN ({})", sql_query, date_list)
+          format!("{} AND partition_date IN ({})", sql_query, date_list)
         } else {
-          format!("{} WHERE date IN ({})", sql_query, date_list)
+          format!("{} WHERE partition_date IN ({})", sql_query, date_list)
         }
       } else {
         sql_query.to_string()
@@ -607,7 +607,7 @@ impl DatabaseManager {
     let listing_options = ListingOptions::new(Arc::new(file_format))
       .with_file_extension(".parquet")
       .with_table_partition_cols(vec![(
-        "date".to_string(),
+        "partition_date".to_string(),
         DataType::Utf8, // Partition values are stored as strings in directory names
       )]);
 
