@@ -588,13 +588,17 @@ impl DatabaseManager {
   /// This is extracted as a separate method to enable parallel table registration
   async fn register_single_table(&self, db_name: &str, table_name: &str, username: Option<&str>) -> DataFusionResult<()> {
     // Check if table already exists in session context
-    let needs_register = match self.session_context.table_exist(table_name) {
-      Ok(exists) => !exists,
-      Err(_) => true,
+    let table_exists = match self.session_context.table_exist(table_name) {
+      Ok(exists) => exists,
+      Err(_) => false,
     };
 
-    if !needs_register {
-      return Ok(());
+    // Always deregister the table first if it exists to ensure fresh schema is loaded
+    // This prevents stale schema issues when parquet files are modified after initial registration
+    if table_exists {
+      if let Err(e) = self.session_context.deregister_table(table_name) {
+        eprintln!("Warning: Failed to deregister table '{}' before re-registration: {}", table_name, e);
+      }
     }
 
     // Resolve table directory
