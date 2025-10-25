@@ -1,5 +1,6 @@
 use datafusion::error::DataFusionError;
-use sqlparser::{
+use datafusion::sql::sqlparser;
+use datafusion::sql::sqlparser::{
   ast::{Expr, Query, Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins},
   dialect::GenericDialect,
   parser::Parser,

@@ -24,7 +24,6 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use std::{fmt, fs};
 use tokio::io::Result as TokioResult;
-use tokio::sync::Semaphore;
 
 pub enum DataFusionOutput {
   Json(Value),
@@ -86,6 +85,8 @@ pub struct DatabaseManager {
   cached_metadata: Arc<RwLock<Option<Metadata>>>,
   cache_timestamp: Arc<RwLock<Option<Instant>>>,
   cache_ttl: Duration,
+  // Track which tables have been registered to avoid duplicate registrations
+  registered_tables: Arc<RwLock<HashSet<String>>>,
 }
 
 impl DatabaseManager {
@@ -134,6 +135,8 @@ impl DatabaseManager {
       cached_metadata: Arc::new(RwLock::new(None)),
       cache_timestamp: Arc::new(RwLock::new(None)),
       cache_ttl: Duration::MAX, // Infinite cache - only invalidated on metadata changes
+      // Initialize empty set of registered tables
+      registered_tables: Arc::new(RwLock::new(HashSet::new())),
     };
 
     // Update metadata with the provided storage_path
@@ -475,48 +478,8 @@ impl DatabaseManager {
         }
       }
 
-      // Register tables in parallel with a semaphore to limit concurrency
-      // Limit to 10 concurrent registrations to avoid resource exhaustion
-      let semaphore = Arc::new(Semaphore::new(10));
-      let mut registration_tasks = Vec::new();
-
       for table_name in &table_names {
-        let table_name = table_name.clone();
-        let db_name = db_name.to_string();
-        let username = username.map(|u| u.to_string());
-        let self_clone = self.clone();
-        let semaphore_clone = semaphore.clone();
-
-        // Spawn a task for each table registration
-        let task = async move {
-          // Acquire semaphore permit before registering
-          let _permit = semaphore_clone
-            .acquire()
-            .await
-            .map_err(|e| DataFusionError::Execution(format!("Failed to acquire semaphore: {}", e)))?;
-
-          // Register the table
-          self_clone.register_single_table(&db_name, &table_name, username.as_deref()).await
-        };
-
-        registration_tasks.push(task);
-      }
-
-      // Execute all registration tasks in parallel
-      let results = futures::future::join_all(registration_tasks).await;
-
-      // Check for any errors during registration
-      // We collect all errors but continue processing to register as many tables as possible
-      let errors: Vec<_> = results.into_iter().filter_map(|r| r.err()).collect();
-
-      if !errors.is_empty() {
-        // Return the first error, but log all of them
-        for (i, error) in errors.iter().enumerate() {
-          if i > 0 {
-            eprintln!("Additional table registration error: {}", error);
-          }
-        }
-        return Err(errors.into_iter().next().unwrap());
+        self.register_single_table(db_name, table_name, username).await?;
       }
     }
 
@@ -584,20 +547,24 @@ impl DatabaseManager {
     Ok(result)
   }
 
-  /// Register a single table in the DataFusion session context
-  /// This is extracted as a separate method to enable parallel table registration
   async fn register_single_table(&self, db_name: &str, table_name: &str, username: Option<&str>) -> DataFusionResult<()> {
-    // Check if table already exists in session context
-    let needs_register = match self.session_context.table_exist(table_name) {
-      Ok(exists) => !exists,
-      Err(_) => true,
-    };
+    // Check our registry first (fast read lock)
+    {
+      let registered = self.registered_tables.read().unwrap();
+      if registered.contains(table_name) {
+        return Ok(());
+      }
+    }
 
-    if !needs_register {
+    // Acquire write lock to register the table
+    // This ensures only one thread can register a table at a time
+    let mut registered = self.registered_tables.write().unwrap();
+
+    // Double-check after acquiring write lock (another thread might have registered it)
+    if registered.contains(table_name) {
       return Ok(());
     }
 
-    // Resolve table directory
     let table_dir = self
       .resolve_table_dir(db_name, table_name, username)
       .map_err(|e| DataFusionError::Execution(format!("Failed to resolve table directory for '{}': {}", table_name, e)))?;
@@ -624,6 +591,9 @@ impl DatabaseManager {
 
     // Register the table in the session context
     self.session_context.register_table(table_name, Arc::new(listing_table))?;
+
+    // Mark table as registered in our registry
+    registered.insert(table_name.to_string());
 
     Ok(())
   }
@@ -662,50 +632,18 @@ impl DatabaseManager {
       }
     }
 
-    // Register tables in parallel with a semaphore to limit concurrency
-    let semaphore = Arc::new(Semaphore::new(10));
-    let mut registration_tasks = Vec::new();
-
-    for table_name in &tables_to_register {
-      let table_name = table_name.clone();
-      let db_name = db_name.to_string();
-      let username = username.map(|u| u.to_string());
-      let self_clone = self.clone();
-      let semaphore_clone = semaphore.clone();
-
-      // Spawn a task for each table registration
-      let task = async move {
-        // Acquire semaphore permit before registering
-        let _permit = semaphore_clone
-          .acquire()
-          .await
-          .map_err(|e| DataFusionError::Execution(format!("Failed to acquire semaphore: {}", e)))?;
-
-        // Register the table
-        self_clone.register_single_table(&db_name, &table_name, username.as_deref()).await?;
-        Ok::<String, DataFusionError>(table_name)
-      };
-
-      registration_tasks.push(task);
-    }
-
-    // Execute all registration tasks in parallel
-    let results = futures::future::join_all(registration_tasks).await;
-
-    // Collect successfully registered tables
+    // Register tables sequentially to avoid race conditions
     let mut successfully_registered = Vec::new();
     let mut errors = Vec::new();
 
-    for result in results {
-      match result {
-        Ok(table_name) => successfully_registered.push(table_name),
-        Err(e) => errors.push(e),
+    for table_name in &tables_to_register {
+      match self.register_single_table(db_name, &table_name, username).await {
+        Ok(_) => successfully_registered.push(table_name.clone()),
+        Err(e) => {
+          eprintln!("Table registration error for '{}': {}", table_name, e);
+          errors.push(e);
+        }
       }
-    }
-
-    // Log errors but don't fail the entire operation
-    for error in &errors {
-      eprintln!("Table registration error: {}", error);
     }
 
     Ok(successfully_registered)
