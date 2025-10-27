@@ -569,6 +569,36 @@ impl DatabaseManager {
       .resolve_table_dir(db_name, table_name, username)
       .map_err(|e| DataFusionError::Execution(format!("Failed to resolve table directory for '{}': {}", table_name, e)))?;
 
+    // Check if table directory has any parquet files
+    let has_parquet_files = std::fs::read_dir(&table_dir)
+      .map(|entries| {
+        entries.filter_map(|e| e.ok()).any(|e| {
+          let path = e.path();
+          path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("parquet")
+            || (path.is_dir() && {
+              // Check subdirectories (partitions) for parquet files
+              std::fs::read_dir(&path)
+                .map(|sub_entries| {
+                  sub_entries
+                    .filter_map(|se| se.ok())
+                    .any(|se| se.path().extension().and_then(|s| s.to_str()) == Some("parquet"))
+                })
+                .unwrap_or(false)
+            })
+        })
+      })
+      .unwrap_or(false);
+
+    // If no parquet files exist yet, don't register the table
+    // This prevents registering with an incomplete schema (only partition columns)
+    if !has_parquet_files {
+      eprintln!(
+        "Warning: Skipping registration of table '{}' - no parquet files found yet. Table will be registered on first query after data is inserted.",
+        table_name
+      );
+      return Ok(());
+    }
+
     // Create ListingOptions with partition column for Hive-style partitioning
     let file_format = ParquetFormat::default();
     let listing_options = ListingOptions::new(Arc::new(file_format))
