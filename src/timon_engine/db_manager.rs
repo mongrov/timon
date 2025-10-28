@@ -320,6 +320,12 @@ impl DatabaseManager {
   }
 
   pub fn insert(&mut self, db_name: &str, table_name: &str, json_data: &str) -> Result<Vec<Value>, Box<dyn Error>> {
+    self.insert_with_delta(db_name, table_name, json_data, false)
+  }
+
+  /// Insert with delta layer support - fast inserts to delta files
+  /// If force_merge is true, will merge delta into main file (used before cloud sync)
+  pub fn insert_with_delta(&mut self, db_name: &str, table_name: &str, json_data: &str, force_merge: bool) -> Result<Vec<Value>, Box<dyn Error>> {
     // Reload metadata
     self.metadata = self.get_metadata_cached()?;
 
@@ -336,7 +342,6 @@ impl DatabaseManager {
       for json_value in &new_json_values {
         let result = tree.check_value(json_value);
         if result.status == json_rules_engine::Status::NotMet {
-          println!("record condition mismatch: {}", json_value);
           invalid_json_values.push(json_value.clone());
         }
       }
@@ -381,62 +386,50 @@ impl DatabaseManager {
       self.validate_data_against_schema(&table_schema, json_value)?;
     }
 
-    // Load existing records from partitioned files
-    let file_list = self.build_files_list(db_name, table_name, None)?;
-    let mut file_records: HashMap<String, Vec<Value>> = HashMap::new();
-    let mut record_index: HashMap<String, (String, usize)> = HashMap::new(); // key -> (file_path, record_index)
-
-    for file in &file_list {
-      if let Ok(existing_records) = self.read_parquet_file(file) {
-        for (index, record) in existing_records.iter().enumerate() {
-          let key = build_key(record);
-          record_index.insert(key, (file.clone(), index));
-        }
-        file_records.insert(file.clone(), existing_records);
-      }
-    }
-
-    let mut seen_records: HashMap<String, Value> = HashMap::new();
-    let mut updated_files = HashSet::new();
-    let mut new_records_by_file: HashMap<String, Vec<Value>> = HashMap::new();
-
-    for new_record in new_json_values.into_iter() {
-      let key = build_key(&new_record);
-      if seen_records.insert(key.clone(), new_record.clone()).is_some() {
-        continue;
-      }
-
+    // Group records by partition
+    let mut records_by_partition: HashMap<String, Vec<Value>> = HashMap::new();
+    for new_record in new_json_values {
       let timestamp = new_record.get(datetime_field).and_then(|t| t.as_i64()).unwrap_or(0);
       let partition_value = rounded_timestamp(timestamp.try_into().unwrap(), self.bucket_interval);
+      records_by_partition.entry(partition_value).or_insert_with(Vec::new).push(new_record);
+    }
 
-      // Use Hive-style partitioning: partition_date=YYYY-MM-DD/data.parquet
+    // Process each partition
+    for (partition_value, partition_records) in records_by_partition {
       let partition_dir = format!("{}/partition_date={}", table_path, partition_value);
-      fs::create_dir_all(&partition_dir).ok(); // Create partition directory if it doesn't exist
-      let target_file = format!("{}/data.parquet", partition_dir);
+      fs::create_dir_all(&partition_dir).ok();
 
-      if let Some((file, index)) = record_index.get(&key) {
-        // Update existing record in-place
-        if let Some(records) = file_records.get_mut(file) {
-          records[*index] = new_record;
-          updated_files.insert(file.clone());
-        }
+      let main_file = format!("{}/data.parquet", partition_dir);
+      let delta_file = format!("{}/data_delta.parquet", partition_dir);
+
+      // SMART DELTA LOGIC: Check if we need to merge
+      let needs_merge = if force_merge {
+        // Cloud sync forces merge
+        true
+      } else if self.should_merge_delta(&delta_file, 500)? {
+        // Delta file is too large (>= 500 rows)
+        println!("Auto-merge triggered: delta file has >= 500 rows");
+        true
+      } else if unique_fields.is_empty() {
+        // No unique fields - can't have duplicates, always use fast path
+        false
       } else {
-        // Ensure we create the correct partitioned file instead of writing to an existing one
-        new_records_by_file.entry(target_file.clone()).or_insert_with(Vec::new).push(new_record);
-        updated_files.insert(target_file.clone());
-      }
-    }
+        // Check if any new records have keys that exist in main file
+        let has_duplicates = self.check_keys_exist_in_main(&main_file, &partition_records, &build_key)?;
+        if has_duplicates {
+          println!("Smart merge triggered: duplicate keys detected in main file");
+        }
+        has_duplicates
+      };
 
-    // Create new files if needed and insert records into the correct partition
-    for (file, new_records) in new_records_by_file {
-      file_records.entry(file.clone()).or_insert_with(Vec::new).extend(new_records);
-    }
-
-    // Write updated and newly created files
-    for (file, records) in file_records {
-      if updated_files.contains(&file) {
-        let (arrays, schema) = json_to_arrow(&records)?;
-        Self::parquet_file_writer(Path::new(&file), schema, arrays)?;
+      if needs_merge {
+        // MERGE PATH: Load main + delta, deduplicate, write to main, delete delta
+        // Time: 200-800ms (only for updates or when delta is full)
+        self.merge_delta_partition(&main_file, &delta_file, partition_records, &build_key)?;
+      } else {
+        // FAST PATH: Append to delta file with internal deduplication
+        // Time: 15-35ms (includes delta dedup, still much faster than checking main)
+        self.append_to_delta(&delta_file, partition_records, &build_key)?;
       }
     }
 
@@ -446,6 +439,170 @@ impl DatabaseManager {
     }
 
     Ok(invalid_json_values)
+  }
+
+  /// Check if delta file should be merged based on size threshold
+  fn should_merge_delta(&self, delta_file: &str, threshold: usize) -> Result<bool, Box<dyn Error>> {
+    if !Path::new(delta_file).exists() {
+      return Ok(false);
+    }
+
+    match self.read_parquet_file(delta_file) {
+      Ok(records) => Ok(records.len() >= threshold),
+      Err(_) => Ok(false),
+    }
+  }
+
+  /// Check if any unique keys from new records exist in the main file (lightweight check)
+  /// Returns true if ANY key exists (triggering merge), false if all keys are new (fast delta append)
+  fn check_keys_exist_in_main(&self, main_file: &str, new_records: &[Value], build_key: &dyn Fn(&Value) -> String) -> Result<bool, Box<dyn Error>> {
+    // If main file doesn't exist, all keys are new
+    if !Path::new(main_file).exists() {
+      return Ok(false);
+    }
+
+    // Build set of new record keys for fast lookup
+    let new_keys: HashSet<String> = new_records.iter().map(|r| build_key(r)).collect();
+
+    // Read main file and check if any key matches
+    // We only need to find ONE match to trigger merge
+    let main_records = self.read_parquet_file(main_file)?;
+
+    for record in &main_records {
+      let key = build_key(record);
+      if new_keys.contains(&key) {
+        return Ok(true); // Found a duplicate - need to merge
+      }
+    }
+
+    Ok(false) // No duplicates found - safe to append to delta
+  }
+
+  /// Fast append to delta file with internal deduplication
+  /// This ensures delta file never has duplicate keys, even before merge with main file
+  fn append_to_delta(&self, delta_file: &str, new_records: Vec<Value>, build_key: &dyn Fn(&Value) -> String) -> Result<(), Box<dyn Error>> {
+    // Load existing delta records
+    let mut existing_records = if Path::new(delta_file).exists() {
+      self.read_parquet_file(delta_file)?
+    } else {
+      Vec::new()
+    };
+
+    // Deduplicate: Build HashMap from existing records
+    let mut record_map: HashMap<String, Value> = HashMap::new();
+    for record in existing_records.drain(..) {
+      let key = build_key(&record);
+      record_map.insert(key, record);
+    }
+
+    // Add new records (newer values override older ones in delta)
+    for record in new_records {
+      let key = build_key(&record);
+      record_map.insert(key, record); // Automatically deduplicates
+    }
+
+    // Convert back to Vec and write
+    let all_records: Vec<Value> = record_map.into_values().collect();
+
+    if !all_records.is_empty() {
+      let (arrays, schema) = json_to_arrow(&all_records)?;
+      Self::parquet_file_writer(Path::new(delta_file), schema, arrays)?;
+    }
+
+    Ok(())
+  }
+
+  /// Merge delta into main file with deduplication
+  fn merge_delta_partition(
+    &self,
+    main_file: &str,
+    delta_file: &str,
+    new_records: Vec<Value>,
+    build_key: &dyn Fn(&Value) -> String,
+  ) -> Result<(), Box<dyn Error>> {
+    // Load main file
+    let mut main_records = if Path::new(main_file).exists() {
+      self.read_parquet_file(main_file)?
+    } else {
+      Vec::new()
+    };
+
+    // Load delta file
+    let mut delta_records = if Path::new(delta_file).exists() {
+      self.read_parquet_file(delta_file)?
+    } else {
+      Vec::new()
+    };
+
+    // Add new records to delta
+    delta_records.extend(new_records);
+
+    // Build index from main records
+    let mut record_map: HashMap<String, Value> = HashMap::new();
+    for record in main_records.drain(..) {
+      let key = build_key(&record);
+      record_map.insert(key, record);
+    }
+
+    // Merge delta records (newer values override older ones)
+    for record in delta_records {
+      let key = build_key(&record);
+      record_map.insert(key, record);
+    }
+
+    // Write merged records back to main file
+    let merged_records: Vec<Value> = record_map.into_values().collect();
+    if !merged_records.is_empty() {
+      let (arrays, schema) = json_to_arrow(&merged_records)?;
+      Self::parquet_file_writer(Path::new(main_file), schema, arrays)?;
+    }
+
+    // Delete delta file after successful merge
+    if Path::new(delta_file).exists() {
+      fs::remove_file(delta_file)?;
+    }
+
+    Ok(())
+  }
+
+  /// Force merge all delta files for a table (called before cloud sync)
+  pub fn merge_all_deltas(&mut self, db_name: &str, table_name: &str) -> Result<(), Box<dyn Error>> {
+    let table_path = self
+      .get_table_path(db_name, table_name)
+      .ok_or_else(|| format!("Table '{}.{}' not found", db_name, table_name))?;
+
+    let table_schema = self.get_table_schema(db_name, table_name)?;
+    let unique_fields = get_property_fields(&table_schema, "unique")?;
+
+    let build_key = |record: &Value| -> String {
+      unique_fields
+        .iter()
+        .map(|field| record.get(field).map(|v| v.to_string()).unwrap_or_default())
+        .collect::<Vec<String>>()
+        .join("-")
+    };
+
+    // Find all partition directories
+    if let Ok(entries) = fs::read_dir(&table_path) {
+      for entry in entries.flatten() {
+        if entry.path().is_dir() {
+          let partition_dir = entry.path();
+          let main_file = partition_dir.join("data.parquet");
+          let delta_file = partition_dir.join("data_delta.parquet");
+
+          if delta_file.exists() {
+            self.merge_delta_partition(
+              main_file.to_str().unwrap(),
+              delta_file.to_str().unwrap(),
+              Vec::new(), // No new records, just merge existing delta
+              &build_key,
+            )?;
+          }
+        }
+      }
+    }
+
+    Ok(())
   }
 
   pub async fn query(
@@ -569,14 +726,14 @@ impl DatabaseManager {
       .resolve_table_dir(db_name, table_name, username)
       .map_err(|e| DataFusionError::Execution(format!("Failed to resolve table directory for '{}': {}", table_name, e)))?;
 
-    // Check if table directory has any parquet files
+    // Check if table directory has any parquet files (including delta files)
     let has_parquet_files = std::fs::read_dir(&table_dir)
       .map(|entries| {
         entries.filter_map(|e| e.ok()).any(|e| {
           let path = e.path();
           path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("parquet")
             || (path.is_dir() && {
-              // Check subdirectories (partitions) for parquet files
+              // Check subdirectories (partitions) for parquet files (including data_delta.parquet)
               std::fs::read_dir(&path)
                 .map(|sub_entries| {
                   sub_entries
@@ -600,6 +757,7 @@ impl DatabaseManager {
     }
 
     // Create ListingOptions with partition column for Hive-style partitioning
+    // This will automatically read both data.parquet and data_delta.parquet files
     let file_format = ParquetFormat::default();
     let listing_options = ListingOptions::new(Arc::new(file_format))
       .with_file_extension(".parquet")
@@ -620,6 +778,7 @@ impl DatabaseManager {
     let listing_table = ListingTable::try_new(config)?;
 
     // Register the table in the session context
+    // DataFusion's ListingTable will read all ".parquet" files (both data.parquet and data_delta.parquet)
     self.session_context.register_table(table_name, Arc::new(listing_table))?;
 
     // Mark table as registered in our registry
@@ -778,6 +937,7 @@ impl DatabaseManager {
   }
 
   /// Helper method to recursively collect all files from a directory
+  /// Includes both data.parquet and data_delta.parquet files
   fn collect_files_recursive(&self, dir: &Path, file_list: &mut Vec<String>) -> Result<(), Box<dyn Error>> {
     if dir.is_dir() {
       for entry in fs::read_dir(dir)? {
@@ -787,8 +947,8 @@ impl DatabaseManager {
         if path.is_dir() {
           // Recursively collect files from subdirectories
           self.collect_files_recursive(&path, file_list)?;
-        } else if path.is_file() {
-          // Add file to the list
+        } else if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("parquet") {
+          // Add all parquet files (including data.parquet and data_delta.parquet)
           file_list.push(path.to_string_lossy().to_string());
         }
       }

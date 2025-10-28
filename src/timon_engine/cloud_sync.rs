@@ -26,6 +26,7 @@ pub trait DatabaseManagerInterface: Send + Sync {
   fn get_table_schema(&self, db_name: &str, table_name: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>>;
   fn get_username(&self) -> &str;
   fn get_storage_path(&self) -> &str;
+  fn merge_all_deltas_sync(&self, db_name: &str, table_name: &str) -> Result<(), Box<dyn std::error::Error>>;
 }
 
 impl DatabaseManagerInterface for DatabaseManager {
@@ -43,6 +44,12 @@ impl DatabaseManagerInterface for DatabaseManager {
 
   fn get_storage_path(&self) -> &str {
     &self.storage_path
+  }
+
+  fn merge_all_deltas_sync(&self, db_name: &str, table_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // Clone self to get a mutable reference (DatabaseManager implements Clone)
+    let mut db_manager_mut = self.clone();
+    db_manager_mut.merge_all_deltas(db_name, table_name)
   }
 }
 
@@ -239,9 +246,25 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
   }
 
   pub async fn cloud_sink_parquet(&self, db_name: &str, table_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // **CRITICAL: Merge all delta files into main files before syncing to cloud**
+    self.db_manager.merge_all_deltas_sync(db_name, table_name)?;
+
     let files = self.db_manager.build_files_list(db_name, table_name, None)?;
     if files.is_empty() {
       return Err(format!("No data files found for Table '{}' in Database '{}'.", table_name, db_name).into());
+    }
+
+    // Filter out delta files - we only want to sync main data.parquet files
+    let main_files: Vec<String> = files.into_iter().filter(|f| !f.contains("data_delta.parquet")).collect();
+
+    if main_files.is_empty() {
+      return Err(
+        format!(
+          "No main data files found for Table '{}' in Database '{}' after delta merge.",
+          table_name, db_name
+        )
+        .into(),
+      );
     }
 
     let username = &self.db_manager.get_username();
@@ -251,7 +274,7 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
     let mut processed_files = Vec::new();
     let mut merge_target_paths = Vec::new();
 
-    for file in &files {
+    for file in &main_files {
       if let Some(target_path) = self
         .process_sink_parquet_file(file, username, db_name, table_name, &unique_fields, &mut batches, &mut processed_files)
         .await?
@@ -347,8 +370,14 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
     let s3_store = &self.s3_store;
     let file_path = PathBuf::from(file);
 
-    // Regex for partitioned format: partition_date=YYYY-MM-DD
-    let partition_regx = Regex::new(r"partition_date=(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})").expect("Invalid partition regex");
+    // Regex for partitioned format: supports multiple formats
+    // Monthly: partition_date=YYYY-MM
+    // Daily/Weekly: partition_date=YYYY-MM-DD
+    // Hourly: partition_date=YYYY-MM-DD_HH
+    // Minute: partition_date=YYYY-MM-DD_HH-MM
+    let partition_regx =
+      Regex::new(r"partition_date=(?P<year>\d{4})-(?P<month>\d{2})(?:-(?P<day>\d{2}))?(?:_(?P<hour>\d{2}))?(?:-(?P<minute>\d{2}))?")
+        .expect("Invalid partition regex");
 
     // Extract date from parent directory path
     let parent_path = file_path.parent().and_then(|p| p.to_str()).unwrap_or("");
@@ -356,7 +385,7 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
     if let Some(caps) = partition_regx.captures(parent_path) {
       let year = caps.name("year").map(|m| m.as_str()).unwrap_or("0000");
       let month = caps.name("month").map(|m| m.as_str()).unwrap_or("00");
-      let day = caps.name("day").map(|m| m.as_str()).unwrap_or("00");
+      let day = caps.name("day").map(|m| m.as_str()).unwrap_or("01"); // Default to day 01 for monthly partitions
 
       // Generate S3 filename that includes the date
       let s3_filename = format!("{}_{}-{}-{}.parquet", table_name, year, month, day);
@@ -401,6 +430,8 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
       } else {
         println!("Local file is older or identical to S3, '{}' skipping download", s3_filename);
       }
+    } else {
+      println!("No partition found in file path: {:?}", file_path);
     }
 
     Ok(None)
