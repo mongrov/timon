@@ -1345,7 +1345,17 @@ impl DatabaseManager {
       return Ok(()); // No limit specified
     }
 
-    // Load all records from the table
+    // Get unique fields for deduplication
+    let unique_fields = get_property_fields(&table_schema, "unique")?;
+    let build_key = |record: &Value| -> String {
+      unique_fields
+        .iter()
+        .map(|field| record.get(field).map(|v| v.to_string()).unwrap_or_default())
+        .collect::<Vec<String>>()
+        .join("-")
+    };
+
+    // Load all records from the table (both main and delta files)
     let file_list = self.build_files_list(db_name, table_name, None)?;
     let mut all_records = Vec::new();
 
@@ -1355,26 +1365,53 @@ impl DatabaseManager {
       }
     }
 
+    // CRITICAL FIX: Deduplicate records before counting/limiting
+    // This is necessary because we load both data.parquet and data_delta.parquet
+    let mut record_map: HashMap<String, Value> = HashMap::new();
+    for record in all_records {
+      if !unique_fields.is_empty() {
+        let key = build_key(&record);
+        // Keep the record with the latest timestamp if duplicate keys exist
+        let should_insert = if let Some(existing) = record_map.get(&key) {
+          let existing_ts = existing.get(datetime_field).and_then(|v| v.as_i64()).unwrap_or(0);
+          let new_ts = record.get(datetime_field).and_then(|v| v.as_i64()).unwrap_or(0);
+          new_ts > existing_ts // Only replace if newer
+        } else {
+          true
+        };
+        if should_insert {
+          record_map.insert(key, record);
+        }
+      } else {
+        // No unique fields, keep all records (append-only table)
+        let key = format!("record_{}", record_map.len());
+        record_map.insert(key, record);
+      }
+    }
+
+    // Convert back to Vec for processing
+    let mut deduplicated_records: Vec<Value> = record_map.into_values().collect();
+
     // If we're under the limit, no cleanup needed
-    if all_records.len() <= max_rows {
+    if deduplicated_records.len() <= max_rows {
       return Ok(());
     }
 
     // Sort records by timestamp (descending) and keep only the latest max_rows
-    all_records.sort_by(|a, b| {
+    deduplicated_records.sort_by(|a, b| {
       let a_ts = a.get(datetime_field).and_then(|v| v.as_i64()).unwrap_or(0);
       let b_ts = b.get(datetime_field).and_then(|v| v.as_i64()).unwrap_or(0);
       b_ts.cmp(&a_ts) // Descending order (latest first)
     });
 
-    let records_to_keep = all_records.into_iter().take(max_rows).collect::<Vec<_>>();
+    let records_to_keep = deduplicated_records.into_iter().take(max_rows).collect::<Vec<_>>();
 
     // Get table path for file operations
     let table_path = self
       .get_table_path(db_name, table_name)
       .ok_or_else(|| format!("Table '{}.{}' not found", db_name, table_name))?;
 
-    // Group records by partition and rewrite files
+    // Group records by partition and rewrite to MAIN files only
     let mut records_by_file: HashMap<String, Vec<Value>> = HashMap::new();
 
     for record in records_to_keep {
@@ -1387,7 +1424,7 @@ impl DatabaseManager {
       records_by_file.entry(target_file).or_insert_with(Vec::new).push(record);
     }
 
-    // Rewrite all files with the limited records
+    // Rewrite main files with the limited records
     for (file_path, records) in records_by_file {
       if !records.is_empty() {
         let (arrays, schema) = json_to_arrow(&records)?;
@@ -1395,11 +1432,26 @@ impl DatabaseManager {
       }
     }
 
-    // Remove empty files
+    // CRITICAL: Delete ALL delta files after enforcement (they're now merged into main)
     for file in &file_list {
-      if let Ok(records) = self.read_parquet_file(file) {
-        if records.is_empty() {
-          let _ = fs::remove_file(file);
+      if file.contains("data_delta.parquet") {
+        if let Err(e) = fs::remove_file(file) {
+          eprintln!("Warning: Failed to delete delta file {}: {}", file, e);
+        }
+      }
+    }
+
+    // Remove empty partition directories
+    if let Ok(entries) = fs::read_dir(&table_path) {
+      for entry in entries.flatten() {
+        if entry.path().is_dir() {
+          let partition_dir = entry.path();
+          let main_file = partition_dir.join("data.parquet");
+
+          // If partition has no main file or it's empty, remove the partition directory
+          if !main_file.exists() {
+            let _ = fs::remove_dir_all(&partition_dir);
+          }
         }
       }
     }
