@@ -406,9 +406,9 @@ impl DatabaseManager {
       let needs_merge = if force_merge {
         // Cloud sync forces merge
         true
-      } else if self.should_merge_delta(&delta_file, 500)? {
-        // Delta file is too large (>= 500 rows)
-        println!("Auto-merge triggered: delta file has >= 500 rows");
+      } else if self.should_merge_delta(&delta_file, 1000)? {
+        // Delta file is too large (>= 1000 rows)
+        println!("Auto-merge triggered: delta file has >= 1000 rows");
         true
       } else if unique_fields.is_empty() {
         // No unique fields - can't have duplicates, always use fast path

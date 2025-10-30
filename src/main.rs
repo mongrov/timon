@@ -185,7 +185,7 @@ async fn test_s3_sync() {
   const USERNAME: &str = "ahmed_test";
   const DATABASE_NAME: &str = "zivaring";
   const TABLE_NAME: &str = "activitydetails";
-  init_timon("tmp/timon", 5, USERNAME).unwrap();
+  init_timon("tmp", 43200, USERNAME).unwrap();
 
   let bucket_endpoint = "https://s3.us-west-2.amazonaws.com";
   let bucket_name = "zivaoneapp";
@@ -1404,16 +1404,16 @@ async fn test_vitality_queries() -> Result<(), Box<dyn std::error::Error>> {
 
   let vitality_sql_query = r#"
   WITH date_params AS (
-      SELECT 
-          CURRENT_TIMESTAMP AT TIME ZONE 'UTC' as now_utc,
-          DATE_TRUNC('day', CURRENT_TIMESTAMP AT TIME ZONE 'UTC') as today_utc,
-          DATE_TRUNC('day', CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - INTERVAL '1 day' as yesterday_utc,
-          DATE_TRUNC('day', CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - INTERVAL '7 days' as week_ago,
-          DATE_TRUNC('day', CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - INTERVAL '14 days' as two_weeks_ago,
-          DATE_TRUNC('day', CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - INTERVAL '30 days' as month_ago,
+      SELECT
+          to_timestamp('2025-09-22T00:00:00') AT TIME ZONE 'UTC' as now_utc,
+          DATE_TRUNC('day', to_timestamp('2025-09-22T00:00:00') AT TIME ZONE 'UTC') as today_utc,
+          DATE_TRUNC('day', to_timestamp('2025-09-22T00:00:00') AT TIME ZONE 'UTC') - INTERVAL '1 day' as yesterday_utc,
+          DATE_TRUNC('day', to_timestamp('2025-09-22T00:00:00') AT TIME ZONE 'UTC') - INTERVAL '7 days' as week_ago,
+          DATE_TRUNC('day', to_timestamp('2025-09-22T00:00:00') AT TIME ZONE 'UTC') - INTERVAL '14 days' as two_weeks_ago,
+          DATE_TRUNC('day', to_timestamp('2025-09-22T00:00:00') AT TIME ZONE 'UTC') - INTERVAL '30 days' as month_ago,
           -- Sleep window: yesterday 6pm to today 6pm
-          (DATE_TRUNC('day', CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - INTERVAL '1 day') + INTERVAL '18 hours' as sleep_window_start,
-          DATE_TRUNC('day', CURRENT_TIMESTAMP AT TIME ZONE 'UTC') + INTERVAL '18 hours' as sleep_window_end,
+          (DATE_TRUNC('day', to_timestamp('2025-09-22T00:00:00') AT TIME ZONE 'UTC') - INTERVAL '1 day') + INTERVAL '18 hours' as sleep_window_start,
+          DATE_TRUNC('day', to_timestamp('2025-09-22T00:00:00') AT TIME ZONE 'UTC') + INTERVAL '18 hours' as sleep_window_end,
           65 as user_age
   ),
 

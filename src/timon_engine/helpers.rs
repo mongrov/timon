@@ -49,7 +49,27 @@ pub fn record_batches_to_json(batches: &[RecordBatch]) -> Result<Value, serde_js
       }
       DataType::Boolean => json!(array.as_any().downcast_ref::<BooleanArray>().unwrap().value(row_index)),
       DataType::Timestamp(TimeUnit::Millisecond, None) => json!(array.as_any().downcast_ref::<TimestampMillisecondArray>().unwrap().value(row_index)),
+      DataType::Timestamp(TimeUnit::Millisecond, Some(_)) => {
+        let timestamp_ms = array.as_any().downcast_ref::<TimestampMillisecondArray>().unwrap().value(row_index);
+        let naive_datetime = DateTime::from_timestamp(
+          timestamp_ms / 1_000,                      // Seconds
+          (timestamp_ms % 1_000 * 1_000_000) as u32, // Nanoseconds
+        )
+        .unwrap();
+        let local_time = naive_datetime.with_timezone(&Local);
+        json!(local_time.format("%Y-%m-%d %H:%M:%S").to_string())
+      }
       DataType::Timestamp(TimeUnit::Nanosecond, None) => {
+        let timestamp_ns = array.as_any().downcast_ref::<TimestampNanosecondArray>().unwrap().value(row_index);
+        let naive_datetime = DateTime::from_timestamp(
+          timestamp_ns / 1_000_000_000,          // Seconds
+          (timestamp_ns % 1_000_000_000) as u32, // Nanoseconds
+        )
+        .unwrap();
+        let local_time = naive_datetime.with_timezone(&Local);
+        json!(local_time.format("%Y-%m-%d %H:%M:%S").to_string())
+      }
+      DataType::Timestamp(TimeUnit::Nanosecond, Some(_)) => {
         let timestamp_ns = array.as_any().downcast_ref::<TimestampNanosecondArray>().unwrap().value(row_index);
         let naive_datetime = DateTime::from_timestamp(
           timestamp_ns / 1_000_000_000,          // Seconds
