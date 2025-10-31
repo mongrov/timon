@@ -2,7 +2,7 @@ use base64::{engine::general_purpose, Engine as _};
 use chrono::{DateTime, Datelike, Days, Local, NaiveDate, TimeZone, Timelike, Utc};
 use datafusion::arrow::array::{
   new_null_array, Array, ArrayRef, BooleanArray, BooleanBuilder, Date32Array, Float64Array, Float64Builder, Int32Array, Int64Array, Int64Builder,
-  ListArray, ListBuilder, StringArray, StringBuilder, StringViewArray, TimestampMillisecondArray, TimestampNanosecondArray,
+  ListArray, ListBuilder, StringArray, StringBuilder, StringViewArray, StructArray, TimestampMillisecondArray, TimestampNanosecondArray,
 };
 use datafusion::arrow::buffer::OffsetBuffer;
 use datafusion::arrow::datatypes::{DataType, Field, Field as ArrowField, Schema, TimeUnit};
@@ -120,6 +120,23 @@ pub fn record_batches_to_json(batches: &[RecordBatch]) -> Result<Value, serde_js
 
         let values = extract_list_values(values_array.as_ref(), start_idx, end_idx);
         json!(values)
+      }
+      DataType::Struct(fields) => {
+        let struct_array = array.as_any().downcast_ref::<StructArray>().unwrap();
+
+        // Check if the struct value is null
+        if struct_array.is_null(row_index) {
+          return json!(null);
+        }
+
+        // Build a JSON object from the struct fields
+        let mut obj = serde_json::Map::new();
+        for (i, field) in fields.iter().enumerate() {
+          let column = struct_array.column(i);
+          let field_value = array_value_to_json(column, row_index);
+          obj.insert(field.name().clone(), field_value);
+        }
+        json!(obj)
       }
       datatype => {
         println!("Warning: unsupported Datatype {}", datatype);
