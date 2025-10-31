@@ -26,7 +26,6 @@ pub trait DatabaseManagerInterface: Send + Sync {
   fn get_table_schema(&self, db_name: &str, table_name: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>>;
   fn get_username(&self) -> &str;
   fn get_storage_path(&self) -> &str;
-  fn merge_all_deltas_sync(&self, db_name: &str, table_name: &str) -> Result<(), Box<dyn std::error::Error>>;
 }
 
 impl DatabaseManagerInterface for DatabaseManager {
@@ -44,12 +43,6 @@ impl DatabaseManagerInterface for DatabaseManager {
 
   fn get_storage_path(&self) -> &str {
     &self.storage_path
-  }
-
-  fn merge_all_deltas_sync(&self, db_name: &str, table_name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    // Clone self to get a mutable reference (DatabaseManager implements Clone)
-    let mut db_manager_mut = self.clone();
-    db_manager_mut.merge_all_deltas(db_name, table_name)
   }
 }
 
@@ -246,25 +239,9 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
   }
 
   pub async fn cloud_sink_parquet(&self, db_name: &str, table_name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    // **CRITICAL: Merge all delta files into main files before syncing to cloud**
-    self.db_manager.merge_all_deltas_sync(db_name, table_name)?;
-
     let files = self.db_manager.build_files_list(db_name, table_name, None)?;
     if files.is_empty() {
       return Err(format!("No data files found for Table '{}' in Database '{}'.", table_name, db_name).into());
-    }
-
-    // Filter out delta files - we only want to sync main data.parquet files
-    let main_files: Vec<String> = files.into_iter().filter(|f| !f.contains("data_delta.parquet")).collect();
-
-    if main_files.is_empty() {
-      return Err(
-        format!(
-          "No main data files found for Table '{}' in Database '{}' after delta merge.",
-          table_name, db_name
-        )
-        .into(),
-      );
     }
 
     let username = &self.db_manager.get_username();
@@ -274,7 +251,7 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
     let mut processed_files = Vec::new();
     let mut merge_target_paths = Vec::new();
 
-    for file in &main_files {
+    for file in &files {
       if let Some(target_path) = self
         .process_sink_parquet_file(file, username, db_name, table_name, &unique_fields, &mut batches, &mut processed_files)
         .await?
