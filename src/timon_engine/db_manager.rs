@@ -414,12 +414,15 @@ impl DatabaseManager {
         // No unique fields - can't have duplicates, always use fast path
         false
       } else {
-        // Check if any new records have keys that exist in main file
-        let has_duplicates = self.check_keys_exist_in_main(&main_file, &partition_records, &build_key)?;
-        if has_duplicates {
-          println!("Smart merge triggered: duplicate keys detected in main file");
+        // Datetime-based duplicate detection: Check if any new records have datetime <= max datetime in main
+        // This is MORE efficient than key checking because:
+        // - Only needs to find MAX datetime (not scan all records)
+        // - Works perfectly for time-series data where later timestamps = newer data
+        let has_datetime_overlap = self.check_datetime_overlap(&main_file, &partition_records, datetime_field)?;
+        if has_datetime_overlap {
+          println!("Smart merge triggered: datetime overlap detected (potential duplicates/updates)");
         }
-        has_duplicates
+        has_datetime_overlap
       };
 
       if needs_merge {
@@ -453,29 +456,50 @@ impl DatabaseManager {
     }
   }
 
-  /// Check if any unique keys from new records exist in the main file (lightweight check)
-  /// Returns true if ANY key exists (triggering merge), false if all keys are new (fast delta append)
-  fn check_keys_exist_in_main(&self, main_file: &str, new_records: &[Value], build_key: &dyn Fn(&Value) -> String) -> Result<bool, Box<dyn Error>> {
-    // If main file doesn't exist, all keys are new
+  /// Check if new records might contain duplicates based on datetime comparison
+  /// Returns true if ANY new record has datetime <= max datetime in main file (triggering merge)
+  /// Returns false if ALL new records have datetime > max datetime in main (safe to append to delta)
+  ///
+  /// This is MORE efficient than checking keys because:
+  /// - Only needs to find MAX datetime (not scan all records for key matching)
+  /// - One comparison per new record vs HashSet operations
+  /// - Works perfectly for time-series data where updates have later timestamps
+  fn check_datetime_overlap(&self, main_file: &str, new_records: &[Value], datetime_field: &str) -> Result<bool, Box<dyn Error>> {
+    // If main file doesn't exist, all records are new (no overlap possible)
     if !Path::new(main_file).exists() {
       return Ok(false);
     }
 
-    // Build set of new record keys for fast lookup
-    let new_keys: HashSet<String> = new_records.iter().map(|r| build_key(r)).collect();
-
-    // Read main file and check if any key matches
-    // We only need to find ONE match to trigger merge
+    // Find the maximum datetime in the main file
     let main_records = self.read_parquet_file(main_file)?;
 
-    for record in &main_records {
-      let key = build_key(record);
-      if new_keys.contains(&key) {
-        return Ok(true); // Found a duplicate - need to merge
+    if main_records.is_empty() {
+      return Ok(false); // Empty main file, safe to append
+    }
+
+    let max_main_datetime = main_records
+      .iter()
+      .filter_map(|r| r.get(datetime_field).and_then(|v| v.as_i64()))
+      .max()
+      .unwrap_or(0);
+
+    // Check if ANY new record has datetime <= max_main_datetime
+    // If so, potential for duplicates/updates → need merge
+    for record in new_records {
+      if let Some(new_datetime) = record.get(datetime_field).and_then(|v| v.as_i64()) {
+        if new_datetime <= max_main_datetime {
+          println!(
+            "Datetime overlap detected: new record datetime {} <= max main datetime {}",
+            new_datetime, max_main_datetime
+          );
+          return Ok(true); // Overlap detected - need to merge
+        }
       }
     }
 
-    Ok(false) // No duplicates found - safe to append to delta
+    // All new records have datetime > max_main_datetime
+    // Safe to append to delta without duplicates
+    Ok(false)
   }
 
   /// Fast append to delta file with internal deduplication
