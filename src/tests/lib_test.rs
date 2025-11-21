@@ -111,15 +111,15 @@ mod lib_test {
   #[tokio::test]
   async fn test_android_native_query() {
     // Test successful query
-    let result = query("test_db", "SELECT * FROM test_table", Some("testuser")).await;
+    let result = query("test_db", "SELECT * FROM test_table", Some("testuser"), None).await;
     assert!(result.is_ok() || result.is_err());
 
     // Test with invalid SQL
-    let result = query("test_db", "INVALID SQL", Some("testuser")).await;
+    let result = query("test_db", "INVALID SQL", Some("testuser"), None).await;
     assert!(result.is_ok() || result.is_err());
 
     // Test with empty query
-    let result = query("test_db", "", Some("testuser")).await;
+    let result = query("test_db", "", Some("testuser"), None).await;
     assert!(result.is_ok() || result.is_err());
   }
 

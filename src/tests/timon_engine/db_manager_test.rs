@@ -81,17 +81,22 @@ fn test_insert_and_query_data() {
 
   // Query data
   let rt = Runtime::new().unwrap();
-  let result = rt.block_on(db_manager.query("test_db", "SELECT * FROM test_table", None, true)).unwrap();
+  let result = rt
+    .block_on(db_manager.query("test_db", "SELECT * FROM test_table", None, true, None))
+    .unwrap();
 
   match result {
     DataFusionOutput::Json(json_result) => {
-      assert_eq!(
-        json_result,
-        json!([
-          {"date": 1740046500, "id": 1, "name": "Alice"},
-          {"date": 1740046800, "id": 2, "name": "Bob"}
-        ])
-      );
+      // Note: partition_date field is added by the query engine
+      assert_eq!(json_result.as_array().unwrap().len(), 2);
+      let first = &json_result[0];
+      assert_eq!(first["date"], 1740046500);
+      assert_eq!(first["id"], 1);
+      assert_eq!(first["name"], "Alice");
+      let second = &json_result[1];
+      assert_eq!(second["date"], 1740046800);
+      assert_eq!(second["id"], 2);
+      assert_eq!(second["name"], "Bob");
     }
     _ => panic!("Expected JSON output"),
   }
@@ -197,6 +202,7 @@ fn test_simple_join_query_without_alias() {
       "SELECT table1.id, table1.value, table2.desc FROM table1 JOIN table2 ON table1.id = table2.id",
       None,
       true,
+      None,
     ))
     .unwrap();
 
@@ -257,6 +263,7 @@ fn test_join_query_with_alias_and_group_by() {
          FROM t1 a JOIN t2 b ON a.id = b.id GROUP BY a.cat",
       None,
       true,
+      None,
     ))
     .unwrap();
 
@@ -306,6 +313,7 @@ fn test_date_range_query_hourly_bucket() {
       "SELECT COUNT(*) AS total FROM activitydetails WHERE date BETWEEN 1746608400 AND 1746702000",
       None,
       true,
+      None,
     ))
     .unwrap();
 
@@ -336,6 +344,7 @@ fn test_date_range_query_daily_bucket() {
       "SELECT COUNT(*) AS total FROM activitydetails WHERE date BETWEEN 1746566400 AND 1746652799",
       None,
       true,
+      None,
     ))
     .unwrap();
 
@@ -366,6 +375,7 @@ fn test_date_range_query_weekly_bucket() {
       "SELECT COUNT(*) AS total FROM activitydetails WHERE date BETWEEN 1746566400 AND 1747171199",
       None,
       true,
+      None,
     ))
     .unwrap();
 
@@ -396,6 +406,7 @@ fn test_date_range_query_monthly_bucket() {
       "SELECT COUNT(*) AS total FROM activitydetails WHERE date BETWEEN 1746038400 AND 1748716799",
       None,
       true,
+      None,
     ))
     .unwrap();
 
@@ -573,15 +584,15 @@ async fn test_query_error_scenarios() {
   let db_manager = DatabaseManager::new(&db_root, 30, "test_user");
 
   // Test query with non-existent database
-  let result = db_manager.query("nonexistent_db", "SELECT * FROM table", None, true).await;
+  let result = db_manager.query("nonexistent_db", "SELECT * FROM table", None, true, None).await;
   assert!(result.is_err());
 
   // Test query with invalid SQL
-  let result = db_manager.query("test_db", "INVALID SQL QUERY", None, true).await;
+  let result = db_manager.query("test_db", "INVALID SQL QUERY", None, true, None).await;
   assert!(result.is_err());
 
   // Test query with empty SQL
-  let result = db_manager.query("test_db", "", None, true).await;
+  let result = db_manager.query("test_db", "", None, true, None).await;
   assert!(result.is_err());
 }
 
@@ -657,7 +668,7 @@ fn test_file_system_error_scenarios() {
 fn test_lock_acquisition_scenarios() {
   let temp_dir = TempDir::new().unwrap();
   let db_root = temp_dir.path().to_str().unwrap().to_string();
-  let mut db_manager = DatabaseManager::new(&db_root, 30, "test_user");
+  let _db_manager = DatabaseManager::new(&db_root, 30, "test_user");
 
   // Test concurrent metadata updates
   let handles: Vec<_> = (0..5)
@@ -712,13 +723,13 @@ async fn test_complex_query_scenarios() {
 
   // Test join query with non-existent tables
   let result = db_manager
-    .query("test_db", "SELECT * FROM table1 JOIN table2 ON table1.id = table2.id", None, true)
+    .query("test_db", "SELECT * FROM table1 JOIN table2 ON table1.id = table2.id", None, true, None)
     .await;
   assert!(result.is_err());
 
   // Test complex SQL with subqueries
   let result = db_manager
-    .query("test_db", "SELECT * FROM (SELECT * FROM table1) AS subquery", None, true)
+    .query("test_db", "SELECT * FROM (SELECT * FROM table1) AS subquery", None, true, None)
     .await;
   assert!(result.is_err());
 }
@@ -1040,7 +1051,7 @@ async fn test_complex_query_scenarios_advanced() {
   ];
 
   for sql_query in complex_queries {
-    let result = db_manager.query("complex_db", sql_query, None, true).await;
+    let result = db_manager.query("complex_db", sql_query, None, true, None).await;
     assert!(result.is_ok() || result.is_err());
   }
 }
@@ -1060,7 +1071,7 @@ async fn test_join_query_error_scenarios() {
   ];
 
   for sql_query in invalid_join_queries {
-    let result = db_manager.query("test_db", sql_query, None, true).await;
+    let result = db_manager.query("test_db", sql_query, None, true, None).await;
     assert!(result.is_err());
   }
 }
@@ -1088,7 +1099,7 @@ async fn test_query_with_time_range_filtering() {
   ];
 
   for sql_query in time_range_queries {
-    let result = db_manager.query("time_db", sql_query, None, true).await;
+    let result = db_manager.query("time_db", sql_query, None, true, None).await;
     assert!(result.is_ok() || result.is_err());
   }
 }
@@ -1107,7 +1118,7 @@ async fn test_query_with_empty_results() {
   ];
 
   for sql_query in empty_result_queries {
-    let result = db_manager.query("test_db", sql_query, None, true).await;
+    let result = db_manager.query("test_db", sql_query, None, true, None).await;
     assert!(result.is_err());
   }
 }
@@ -1127,7 +1138,7 @@ async fn test_dataframe_output_scenarios() {
   let _ = db_manager.insert("df_db", "df_table", data);
 
   // Test DataFrame output (is_json_format = false)
-  let result = db_manager.query("df_db", "SELECT * FROM df_table", None, false).await;
+  let result = db_manager.query("df_db", "SELECT * FROM df_table", None, false, None).await;
   assert!(result.is_ok() || result.is_err());
 }
 
@@ -1147,7 +1158,9 @@ async fn test_query_with_username_filtering() {
   let _ = db_manager.insert("user_db", "user_data", data);
 
   // Test queries with username filtering
-  let result = db_manager.query("user_db", "SELECT * FROM user_data", Some("test_user"), true).await;
+  let result = db_manager
+    .query("user_db", "SELECT * FROM user_data", Some("test_user"), true, None)
+    .await;
   assert!(result.is_ok() || result.is_err());
 }
 
