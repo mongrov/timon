@@ -205,12 +205,15 @@ mod lib_test {
     let counter = Arc::new(AtomicUsize::new(0));
     let mut handles = vec![];
 
-    for _ in 0..5 {
+    for i in 0..5 {
       let counter = Arc::clone(&counter);
       let handle = thread::spawn(move || {
-        // Simulate concurrent access
-        let _result = init_timon("/tmp/test_concurrent", 3600, "testuser");
-        counter.fetch_add(1, Ordering::SeqCst);
+        // Use unique directories for each thread to avoid race conditions
+        let dir = format!("/tmp/test_concurrent_{}", i);
+        let result = init_timon(&dir, 3600, "testuser");
+        if result.is_ok() {
+          counter.fetch_add(1, Ordering::SeqCst);
+        }
       });
       handles.push(handle);
     }
