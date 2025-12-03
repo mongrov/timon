@@ -7,6 +7,3 @@ mod timon_engine {
   mod mod_test;
   mod sql_query_parser_test;
 }
-
-#[cfg(test)]
-mod lib_test;

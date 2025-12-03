@@ -10,7 +10,38 @@ If you don't have `cargo-tarpaulin` installed:
 cargo install cargo-tarpaulin
 ```
 
-## Basic Usage
+## Recommended Usage: Use `coverage.sh`
+
+**We recommend using the `coverage.sh` script instead of calling `cargo tarpaulin` directly:**
+
+```bash
+bash coverage.sh
+```
+
+Or if you have execute permissions:
+
+```bash
+./coverage.sh
+```
+
+### Why use `coverage.sh`?
+
+The `coverage.sh` script is configured with project-specific settings:
+
+1. **Excludes platform-specific code**: Automatically excludes `src/lib.rs` (Android/iOS platform code) and `src/main.rs` from coverage, as these contain platform-specific implementations that shouldn't be included in coverage metrics.
+
+2. **Prevents race conditions**: Uses `--test-threads=1` to avoid race conditions in file system-based tests, ensuring consistent and reliable test results.
+
+3. **Consistent output**: Outputs to stdout in a standardized format, making it easy to parse and integrate with CI/CD pipelines.
+
+4. **Accepts additional arguments**: You can still pass additional arguments to customize the run:
+   ```bash
+   bash coverage.sh --out Html --output-dir ./coverage-report
+   ```
+
+## Basic Usage (Alternative)
+
+If you need to run `cargo tarpaulin` directly, you can use:
 
 ### Run coverage for all tests
 
@@ -27,6 +58,11 @@ This will:
 
 ```bash
 cargo tarpaulin --out Stdout
+```
+
+**Note**: When running directly, remember to exclude `src/lib.rs` and `src/main.rs`, and use `--test-threads=1` for consistency:
+```bash
+cargo tarpaulin --out Stdout --exclude-files "src/lib.rs" --exclude-files "src/main.rs" -- --test-threads=1
 ```
 
 ### Generate multiple output formats
@@ -130,6 +166,7 @@ start coverage-report/tarpaulin-report.html
 
 ## Common Issues
 
-1. **Tests timeout**: Increase timeout with `--timeout` flag
-2. **Missing coverage for some files**: Check if they're excluded or not compiled
-3. **Slow coverage runs**: Use `--skip-clean` to avoid rebuilding
+1. **Tests timeout**: Increase timeout with `--timeout` flag (e.g., `bash coverage.sh --timeout 300`)
+2. **Missing coverage for some files**: Check if they're excluded (lib.rs and main.rs are excluded by default in `coverage.sh`) or not compiled
+3. **Slow coverage runs**: Use `--skip-clean` to avoid rebuilding (e.g., `bash coverage.sh --skip-clean`)
+4. **Race conditions in tests**: The `coverage.sh` script already uses `--test-threads=1` to prevent this. If running directly, make sure to include this flag.

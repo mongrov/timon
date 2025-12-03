@@ -102,10 +102,26 @@ fn test_error_conversions() {
   let timon_error: TimonError = io_error.into();
   assert_eq!(timon_error.kind, TimonErrorKind::FileNotFound);
 
-  // Test conversion from serde_json::Error
+  // Test conversion from serde_json::Error - syntax error (line 225)
   let json_error = serde_json::from_str::<serde_json::Value>("invalid json").unwrap_err();
   let timon_error: TimonError = json_error.into();
   assert_eq!(timon_error.kind, TimonErrorKind::InvalidDataFormat);
+
+  // Test conversion from serde_json::Error - data error (line 223)
+  {
+    let json_data = r#"{"value": "not_a_number"}"#;
+    #[derive(serde::Deserialize, Debug)]
+    struct TestStruct {
+      value: i32,
+    }
+    let json_error = serde_json::from_str::<TestStruct>(json_data).unwrap_err();
+    let timon_error: TimonError = json_error.into();
+    assert_eq!(timon_error.kind, TimonErrorKind::DataValidationFailed);
+  }
+
+  // Note: Line 227 (else branch) is hard to trigger because serde_json::Error
+  // is typically either syntax or data error. The else branch would require
+  // a serde_json error that's neither, which is unlikely in practice.
 }
 
 #[test]
