@@ -1,7 +1,6 @@
 use crate::timon_engine::cloud_sync::{DatabaseManagerInterface, MockS3Store, S3StoreInterface};
 use crate::timon_engine::{cloud_sync::CloudStorageManager, db_manager::DatabaseManager};
 use chrono::Utc;
-use object_store::path::Path as StorePath;
 use serde_json::json;
 use std::collections::HashMap;
 use std::io::Write;

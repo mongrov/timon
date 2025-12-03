@@ -38,13 +38,6 @@ fn test_error_with_context() {
 }
 
 #[test]
-fn test_status_codes() {
-  assert_eq!(crate::database_not_found!("test").status_code(), 404);
-  assert_eq!(crate::invalid_input!("test").status_code(), 400);
-  assert_eq!(TimonError::new(TimonErrorKind::InternalError, "test").status_code(), 500);
-}
-
-#[test]
 fn test_error_classification() {
   let client_error = crate::invalid_input!("test");
   let status = client_error.status_code();

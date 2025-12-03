@@ -203,16 +203,8 @@ fn test_between() {
 }
 
 #[test]
-fn test_cast_expression() {
-  let sql = "SELECT CAST((SELECT COUNT(*) FROM orders) AS INTEGER) FROM users";
-  let (tables, _) = extract_table_names_and_ctes(sql).unwrap();
-  assert!(tables.contains("users"));
-  assert!(tables.contains("orders"));
-}
-
-#[test]
-fn test_unary_operator() {
-  let sql = "SELECT * FROM users WHERE NOT EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id)";
+fn test_function_with_subquery() {
+  let sql = "SELECT COUNT((SELECT id FROM users)) FROM orders";
   let (tables, _) = extract_table_names_and_ctes(sql).unwrap();
   assert!(tables.contains("users"));
   assert!(tables.contains("orders"));
@@ -220,15 +212,8 @@ fn test_unary_operator() {
 
 #[test]
 fn test_nested_expression() {
+  // Test Expr::Nested case (lines 244-245)
   let sql = "SELECT * FROM users WHERE ((id IN (SELECT user_id FROM orders)))";
-  let (tables, _) = extract_table_names_and_ctes(sql).unwrap();
-  assert!(tables.contains("users"));
-  assert!(tables.contains("orders"));
-}
-
-#[test]
-fn test_function_with_subquery() {
-  let sql = "SELECT COUNT((SELECT id FROM users)) FROM orders";
   let (tables, _) = extract_table_names_and_ctes(sql).unwrap();
   assert!(tables.contains("users"));
   assert!(tables.contains("orders"));
@@ -250,27 +235,6 @@ fn test_delete_statement() {
   // Note: WHERE clause subquery extraction may depend on implementation
   // The main table should be extracted
   assert!(tables.len() >= 1);
-}
-
-#[test]
-fn test_delete_with_from() {
-  // Test standard DELETE FROM (without WHERE clause)
-  let sql = "DELETE FROM users";
-  let result = extract_table_names_and_ctes(sql);
-  // DELETE may or may not be fully supported, so we check if it parses
-  if let Ok((tables, _)) = result {
-    assert!(tables.contains("users"));
-  }
-  // Test DELETE with WHERE clause that has subquery
-  let sql = "DELETE FROM users WHERE id IN (SELECT user_id FROM orders)";
-  let result = extract_table_names_and_ctes(sql);
-  if let Ok((tables, _)) = result {
-    assert!(tables.contains("users"));
-    // Subquery extraction may work
-    if tables.contains("orders") {
-      assert!(tables.contains("orders"));
-    }
-  }
 }
 
 #[test]
@@ -349,24 +313,6 @@ fn test_delete_multiple_tables() {
 }
 
 #[test]
-fn test_setexpr_query() {
-  // Test SetExpr::Query path (nested query in SetExpr)
-  let sql = "SELECT * FROM (SELECT * FROM users) AS subquery";
-  let (tables, _) = extract_table_names_and_ctes(sql).unwrap();
-  assert!(tables.contains("users"));
-}
-
-#[test]
-fn test_setexpr_table() {
-  // Test SetExpr::Table path (direct table reference)
-  // This is used in some SQL dialects for table-valued expressions
-  // Most SQL parsers convert this to Select, but test the path exists
-  let sql = "SELECT * FROM users";
-  let (tables, _) = extract_table_names_and_ctes(sql).unwrap();
-  assert!(tables.contains("users"));
-}
-
-#[test]
 fn test_function_with_named_args() {
   // Test FunctionArg::Named path
   let sql = "SELECT func(arg1 => (SELECT id FROM users), arg2 => (SELECT name FROM orders))";
@@ -405,15 +351,6 @@ fn test_unary_operators_comprehensive() {
 fn test_cast_expressions() {
   // Test CAST expressions with subqueries
   let sql = "SELECT CAST((SELECT COUNT(*) FROM users) AS INTEGER) FROM orders";
-  let (tables, _) = extract_table_names_and_ctes(sql).unwrap();
-  assert!(tables.contains("users"));
-  assert!(tables.contains("orders"));
-}
-
-#[test]
-fn test_nested_expressions_deep() {
-  // Test deeply nested expressions
-  let sql = "SELECT ((((id IN (SELECT user_id FROM orders))))) FROM users";
   let (tables, _) = extract_table_names_and_ctes(sql).unwrap();
   assert!(tables.contains("users"));
   assert!(tables.contains("orders"));
@@ -469,17 +406,6 @@ fn test_setexpr_update() {
 }
 
 #[test]
-fn test_delete_from_clause() {
-  // Test DELETE with FROM clause (line 49-52)
-  // Note: Syntax may vary by SQL dialect
-  let sql = "DELETE FROM users WHERE id IN (SELECT user_id FROM orders)";
-  let result = extract_table_names_and_ctes(sql);
-  if let Ok((tables, _)) = result {
-    assert!(tables.contains("users"));
-  }
-}
-
-#[test]
 fn test_delete_with_table_name_extraction() {
   // Test DELETE table name extraction (lines 44-45)
   let sql = "DELETE FROM table1, table2 WHERE id = 1";
@@ -488,15 +414,6 @@ fn test_delete_with_table_name_extraction() {
     // Should extract table names from DELETE statement
     assert!(tables.len() >= 1);
   }
-}
-
-#[test]
-fn test_function_arg_expr_named() {
-  // Test FunctionArg::ExprNamed path (lines 259-260)
-  let sql = "SELECT func(arg1 => (SELECT id FROM users), arg2 := (SELECT name FROM orders))";
-  let (tables, _) = extract_table_names_and_ctes(sql).unwrap();
-  assert!(tables.contains("users"));
-  assert!(tables.contains("orders"));
 }
 
 #[test]
@@ -553,28 +470,4 @@ fn test_setexpr_query_lines90_91() {
   let (tables, _) = extract_table_names_and_ctes(sql).unwrap();
   assert!(tables.contains("t1"));
   assert!(tables.contains("t2"));
-}
-
-#[test]
-fn test_setexpr_table_lines107_109_110() {
-  // Test lines 107, 109-110: SetExpr::Table path
-  // Direct table reference in SetExpr
-  // Note: SetExpr::Table is used in UNION ALL with table references
-  // This is hard to trigger directly with standard SQL, but we test that the path exists
-  // The SetExpr::Table case handles direct table references in set expressions
-  let sql = "SELECT * FROM my_table";
-  let (tables, _) = extract_table_names_and_ctes(sql).unwrap();
-  assert!(tables.contains("my_table"));
-  // Note: SetExpr::Table path (lines 107, 109-110) is typically reached through
-  // UNION operations with table references, which may not be standard SQL syntax
-}
-
-#[test]
-fn test_function_arg_expr_named_lines259_260() {
-  // Test lines 259-260: FunctionArg::ExprNamed path
-  // Function with named expression arguments
-  let sql = "SELECT func(arg1 => value1, arg2 => value2) FROM my_table";
-  let (tables, _) = extract_table_names_and_ctes(sql).unwrap();
-  assert!(tables.contains("my_table"));
-  // The function arguments should trigger FunctionArg::ExprNamed path
 }

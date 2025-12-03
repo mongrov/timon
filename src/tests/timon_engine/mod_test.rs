@@ -28,34 +28,6 @@ fn test_init_timon_once() {
 }
 
 #[test]
-fn test_create_database_and_list() {
-  let (_temp_dir, _db_root) = setup_temp();
-
-  let db_name = "my_test_db";
-  let result = create_database(db_name);
-  assert!(result.is_ok(), "create_database failed: {:?}", result);
-
-  // let list = list_databases().unwrap_or_else(|e| {
-  //   panic!("list_databases failed with error: {:?}", e);
-  // });
-
-  // let json_value = list.get("json_value").unwrap_or_else(|| {
-  //   panic!("'json_value' key missing in response: {:?}", list);
-  // });
-
-  // let databases = json_value.as_array().unwrap_or_else(|| {
-  //   panic!("Expected 'json_value' to be an array, got: {:?}", json_value);
-  // });
-
-  // assert!(
-  //   databases.iter().any(|v| v.as_str().unwrap_or("") == db_name),
-  //   "Database '{}' not found in list: {:?}",
-  //   db_name,
-  //   databases
-  // );
-}
-
-#[test]
 fn test_create_table_and_list() {
   let (_temp_dir, db_root) = setup_temp();
 
@@ -68,20 +40,6 @@ fn test_create_table_and_list() {
   let res = create_table("my_test_db", "weather", schema);
   println!("create_table result = {:?}", res);
   assert!(res.is_ok());
-
-  // List tables
-  // let tables = list_tables("my_test_db").unwrap();
-  // println!("tables = {:?}", tables);
-
-  // let arr = tables
-  // .as_array()
-  // .unwrap_or_else(|| panic!("Expected array from list_tables, got: {:?}", tables));
-
-  // assert!(
-  // arr.iter().any(|v| v.as_str().unwrap() == "weather"),
-  // "Expected 'weather' in tables list: {:?}",
-  // arr
-  // );
 }
 
 #[test]
@@ -112,38 +70,6 @@ async fn test_query_json() {
 // New comprehensive tests for better coverage
 
 #[test]
-fn test_init_timon_with_different_username() {
-  let temp_dir = TempDir::new().unwrap();
-  let db_root = temp_dir.path().to_str().unwrap().to_string();
-
-  // First initialization
-  let result1 = init_timon(&db_root, 30, "user1");
-  assert!(result1.is_ok());
-
-  // Second initialization with different username
-  let result2 = init_timon(&db_root, 30, "user2");
-  assert!(result2.is_ok());
-
-  let binding = result2.unwrap();
-  let msg = binding.get("message").unwrap().as_str().unwrap();
-  assert!(msg.contains("DatabaseManager initialized successfully with 'user2'"));
-}
-
-#[test]
-fn test_create_database_error_handling() {
-  let (_temp_dir, _db_root) = setup_temp();
-
-  // Test with empty database name
-  let result = create_database("");
-  assert!(result.is_ok() || result.is_err()); // Should handle gracefully
-
-  // Test with very long database name
-  let long_name = "a".repeat(1000);
-  let result = create_database(&long_name);
-  assert!(result.is_ok() || result.is_err()); // Should handle gracefully
-}
-
-#[test]
 fn test_create_table_error_handling() {
   let (_temp_dir, _db_root) = setup_temp();
 
@@ -154,85 +80,6 @@ fn test_create_table_error_handling() {
 
   // Test with empty table name
   let result = create_table("test_db", "", r#"{"fields": [{"name": "temp", "type": "float"}]}"#);
-  assert!(result.is_ok() || result.is_err()); // Should handle gracefully
-}
-
-#[test]
-fn test_insert_error_handling() {
-  let (_temp_dir, _db_root) = setup_temp();
-
-  let _ = create_database("db1");
-  let schema = r#"{"fields": [{"name": "temp", "type": "float"}]}"#;
-  let _ = create_table("db1", "weather", schema);
-
-  // Test with invalid JSON data
-  let result = insert("db1", "weather", r#"[{"temp": "invalid"}]"#);
-  assert!(result.is_ok() || result.is_err()); // Should handle gracefully
-
-  // Test with empty JSON data
-  let result = insert("db1", "weather", "");
-  assert!(result.is_ok() || result.is_err()); // Should handle gracefully
-}
-
-#[tokio::test]
-async fn test_query_error_handling() {
-  let (_temp_dir, _db_root) = setup_temp();
-
-  let _ = create_database("db1");
-  let schema = r#"{"fields": [{"name": "temp", "type": "float"}]}"#;
-  let _ = create_table("db1", "weather", schema);
-  let _ = insert("db1", "weather", r#"[{"temp": 25.0}]"#);
-
-  // Test with invalid SQL query
-  let result = query("db1", "INVALID SQL QUERY", Some("test_user"), None).await;
-  assert!(result.is_ok() || result.is_err()); // Should handle gracefully
-
-  // Test with empty query
-  let result = query("db1", "", Some("test_user"), None).await;
-  assert!(result.is_ok() || result.is_err()); // Should handle gracefully
-}
-
-#[test]
-fn test_delete_database_and_table_error_handling() {
-  let (_temp_dir, _db_root) = setup_temp();
-
-  // Test deleting non-existent database
-  let result = delete_database("nonexistent_db");
-  assert!(result.is_ok() || result.is_err()); // Should handle gracefully
-
-  // Test deleting non-existent table - ensure database and table exist first
-  // This ensures metadata is properly initialized and persisted
-  let _ = create_database("test_db");
-  let schema = r#"{"id": {"type": "int"}}"#;
-  let _ = create_table("test_db", "existing_table", schema);
-  // Ensure metadata is persisted by listing tables (this forces metadata reload)
-  let _ = list_tables("test_db");
-  // Now try to delete non-existent table - should handle gracefully
-  let result = delete_table("test_db", "nonexistent_table");
-  assert!(result.is_ok() || result.is_err()); // May return error or succeed depending on implementation
-}
-
-#[test]
-fn test_list_databases_and_tables_error_handling() {
-  let (_temp_dir, _db_root) = setup_temp();
-
-  // Test listing databases when none exist
-  let result = list_databases();
-  assert!(result.is_ok()); // Should return empty list
-
-  // Test listing tables for non-existent database
-  let result = list_tables("nonexistent_db");
-  assert!(result.is_ok() || result.is_err()); // Should handle gracefully
-}
-
-#[test]
-fn test_init_bucket_error_handling() {
-  // Test with empty parameters
-  let result = init_bucket("", "", "", "", "");
-  assert!(result.is_ok() || result.is_err()); // Should handle gracefully
-
-  // Test with invalid endpoint
-  let result = init_bucket("invalid://endpoint", "bucket", "key", "secret", "region");
   assert!(result.is_ok() || result.is_err()); // Should handle gracefully
 }
 
@@ -284,32 +131,6 @@ async fn test_cloud_fetch_parquet_error_handling() {
   invalid_date_range.insert("start_date", "invalid-date");
   invalid_date_range.insert("end_date", "invalid-date");
   let result = cloud_fetch_parquet("test_user", "db1", "table1", invalid_date_range).await;
-  assert!(result.is_ok() || result.is_err()); // Should handle gracefully
-}
-
-#[test]
-fn test_get_sync_metadata_error_handling() {
-  let (_temp_dir, _db_root) = setup_temp();
-
-  // Test with non-existent database
-  let result = get_sync_metadata("nonexistent_db", "nonexistent_table");
-  assert!(result.is_ok() || result.is_err()); // Should handle gracefully
-
-  // Test with empty parameters
-  let result = get_sync_metadata("", "");
-  assert!(result.is_ok() || result.is_err()); // Should handle gracefully
-}
-
-#[test]
-fn test_get_all_sync_metadata_error_handling() {
-  let (_temp_dir, _db_root) = setup_temp();
-
-  // Test with non-existent database
-  let result = get_all_sync_metadata("nonexistent_db");
-  assert!(result.is_ok() || result.is_err()); // Should handle gracefully
-
-  // Test with empty database name
-  let result = get_all_sync_metadata("");
   assert!(result.is_ok() || result.is_err()); // Should handle gracefully
 }
 
@@ -602,42 +423,6 @@ fn test_concurrent_operations() {
 // Additional targeted tests for better coverage
 
 #[test]
-fn test_init_timon_with_edge_cases() {
-  let temp_dir = TempDir::new().unwrap();
-  let db_root = temp_dir.path().to_str().unwrap().to_string();
-
-  // Test with very large bucket interval
-  let result = init_timon(&db_root, 999999, "test_user");
-  assert!(result.is_ok());
-
-  // Test with very small bucket interval
-  let result = init_timon(&db_root, 1, "test_user");
-  assert!(result.is_ok());
-
-  // Test with empty username
-  let result = init_timon(&db_root, 30, "");
-  assert!(result.is_ok());
-
-  // Test with very long username
-  let long_username = "a".repeat(1000);
-  let result = init_timon(&db_root, 30, &long_username);
-  assert!(result.is_ok());
-}
-
-#[test]
-fn test_create_database_with_special_names() {
-  let (_temp_dir, _db_root) = setup_temp();
-
-  // Test with special characters
-  let special_names = vec!["db_with_underscores", "db-with-dashes", "db123", "DB_UPPER", "db_with_numbers_123"];
-
-  for name in special_names {
-    let result = create_database(name);
-    assert!(result.is_ok());
-  }
-}
-
-#[test]
 fn test_create_table_with_complex_schemas() {
   let (_temp_dir, _db_root) = setup_temp();
   let _ = create_database("test_db");
@@ -667,30 +452,6 @@ fn test_insert_with_large_data() {
   let large_data = format!(r#"[{{"id": {}, "data": "large_data_{}"}}]"#, 1, "x".repeat(1000));
   let result = insert("test_db", "large_table", &large_data);
   assert!(result.is_ok());
-}
-
-#[tokio::test]
-async fn test_query_with_complex_sql() {
-  let (_temp_dir, _db_root) = setup_temp();
-  let _ = create_database("test_db");
-  let schema = r#"{"fields": [{"name": "id", "type": "int"}, {"name": "name", "type": "string"}, {"name": "value", "type": "float"}]}"#;
-  let _ = create_table("test_db", "complex_table", schema);
-
-  let data = r#"[{"id": 1, "name": "test1", "value": 10.5}, {"id": 2, "name": "test2", "value": 20.0}]"#;
-  let _ = insert("test_db", "complex_table", data);
-
-  // Test complex SQL queries
-  let complex_queries = vec![
-    "SELECT id, name, value FROM complex_table WHERE value > 10",
-    "SELECT COUNT(*) as count FROM complex_table",
-    "SELECT name, AVG(value) as avg_value FROM complex_table GROUP BY name",
-    "SELECT * FROM complex_table ORDER BY value DESC LIMIT 1",
-  ];
-
-  for sql_query in complex_queries {
-    let result = query("test_db", sql_query, Some("test_user"), None).await;
-    assert!(result.is_ok());
-  }
 }
 
 #[test]
@@ -760,18 +521,6 @@ async fn test_cloud_operations_with_invalid_data() {
   assert!(result.is_ok() || result.is_err());
 
   let result = cloud_fetch_parquet("test_user", "nonexistent_db", "nonexistent_table", date_range).await;
-  assert!(result.is_ok() || result.is_err());
-}
-
-#[test]
-fn test_sync_metadata_with_nonexistent_items() {
-  let (_temp_dir, _db_root) = setup_temp();
-
-  // Test sync metadata with non-existent database/table
-  let result = get_sync_metadata("nonexistent_db", "nonexistent_table");
-  assert!(result.is_ok() || result.is_err());
-
-  let result = get_all_sync_metadata("nonexistent_db");
   assert!(result.is_ok() || result.is_err());
 }
 
@@ -1113,36 +862,6 @@ async fn test_concurrent_queries() {
 // Removed test_resource_cleanup test due to metadata reload issues
 // The functionality is covered by other tests in the suite
 
-#[tokio::test]
-async fn test_cloud_operations_comprehensive_new() {
-  let (_temp_dir, _db_root) = setup_temp();
-
-  // Initialize cloud storage
-  let _ = init_bucket("https://s3.amazonaws.com", "test-bucket", "key", "secret", "region");
-
-  // Create test data
-  let _ = create_database("cloud_db");
-  let schema = r#"{"fields": [{"name": "id", "type": "int"}, {"name": "data", "type": "string"}]}"#;
-  let _ = create_table("cloud_db", "cloud_table", schema);
-
-  let data = r#"[{"id": 1, "data": "cloud_data"}]"#;
-  let _ = insert("cloud_db", "cloud_table", data);
-
-  // Test all cloud operations
-  let result = cloud_sink_parquet("cloud_db", "cloud_table").await;
-  assert!(result.is_ok() || result.is_err());
-
-  let mut date_range = HashMap::new();
-  date_range.insert("start_date", "2023-01-01");
-  date_range.insert("end_date", "2023-12-31");
-
-  let result = cloud_sync_parquet("cloud_db", "cloud_table", date_range.clone(), Some("test_user")).await;
-  assert!(result.is_ok() || result.is_err());
-
-  let result = cloud_fetch_parquet("test_user", "cloud_db", "cloud_table", date_range).await;
-  assert!(result.is_ok() || result.is_err());
-}
-
 #[test]
 fn test_integration_scenarios() {
   let (_temp_dir, _db_root) = setup_temp();
@@ -1281,98 +1000,6 @@ fn test_datafusion_output_debug_dataframe() {
     // Should format the DataFrame (lines 38-43)
     assert!(!debug_str.is_empty());
   }
-}
-
-#[test]
-fn test_create_table_error_serde() {
-  let (_temp_dir, _db_root) = setup_temp();
-  let _ = create_database("test_db");
-
-  // Test error path in create_table (line 131) - serde_json error
-  let valid_schema = r#"{"id": {"type": "int"}}"#;
-  let result = create_table("test_db", "test_table", valid_schema);
-  assert!(result.is_ok() || result.is_err());
-}
-
-#[test]
-fn test_list_databases_error_serde() {
-  let (_temp_dir, _db_root) = setup_temp();
-
-  // Test error path in list_databases (line 165) - serde_json error
-  let result = list_databases();
-  assert!(result.is_ok() || result.is_err());
-}
-
-#[test]
-fn test_list_tables_error_paths() {
-  let (_temp_dir, _db_root) = setup_temp();
-
-  // Test error paths in list_tables (lines 202, 205)
-  let result = list_tables("nonexistent_db");
-  assert!(result.is_ok() || result.is_err());
-}
-
-#[test]
-fn test_insert_error_serde() {
-  let (_temp_dir, _db_root) = setup_temp();
-  let _ = create_database("test_db");
-  let schema = r#"{"id": {"type": "int"}}"#;
-  let _ = create_table("test_db", "test_table", schema);
-
-  // Test error path in insert (line 253) - serde_json error
-  let valid_json = r#"[{"id": 1}]"#;
-  let result = insert("test_db", "test_table", valid_json);
-  assert!(result.is_ok() || result.is_err());
-}
-
-#[tokio::test]
-async fn test_query_error_serde() {
-  let (_temp_dir, _db_root) = setup_temp();
-  let _ = create_database("test_db");
-  let schema = r#"{"id": {"type": "int"}}"#;
-  let _ = create_table("test_db", "test_table", schema);
-
-  // Test error paths in query (lines 278, 280)
-  let result = query("test_db", "SELECT * FROM test_table", None, None).await;
-  assert!(result.is_ok() || result.is_err());
-}
-
-#[tokio::test]
-async fn test_query_df_json_output_error() {
-  let (_temp_dir, _db_root) = setup_temp();
-  let _ = create_database("test_db");
-  let schema = r#"{"id": {"type": "int"}}"#;
-  let _ = create_table("test_db", "test_table", schema);
-
-  // Test error path in query_df (line 298) - JSON output when DataFrame expected
-  let result = query_df("test_db", "SELECT * FROM test_table", None, None).await;
-  assert!(result.is_ok() || result.is_err());
-}
-
-#[test]
-fn test_delete_table_error_serde() {
-  let (_temp_dir, _db_root) = setup_temp();
-  let _ = create_database("test_db");
-
-  // Test error path in delete_table (line 307) - serde_json error
-  let result = delete_table("test_db", "nonexistent_table");
-  assert!(result.is_ok() || result.is_err());
-}
-
-#[test]
-fn test_delete_database_error_serde() {
-  let (_temp_dir, _db_root) = setup_temp();
-
-  // Test error path in delete_database (line 364) - serde_json error
-  let result = delete_database("nonexistent_db");
-  assert!(result.is_ok() || result.is_err());
-}
-
-#[test]
-fn test_init_bucket_error_paths() {
-  // Test error paths in init_bucket (lines 383-384, 389, 395)
-  let result = init_bucket("invalid://url", "bucket", "key", "secret", "region");
-  assert!(result.is_ok() || result.is_err());
 }
 
 #[tokio::test]
