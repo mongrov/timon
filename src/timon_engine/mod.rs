@@ -333,6 +333,7 @@ pub async fn preload_tables(db_name: &str, table_names: Vec<String>, username: O
 * @ cloud_sync_parquet(db_name, table_name, date_range, username?)
 * @ cloud_sink_parquet(db_name, table_name, date_range)
 * @ cloud_fetch_parquet(username, db_name, table_name, date_range)
+* @ cloud_fetch_parquet_batch(usernames, db_names, table_names, date_range)
 * @ get_sync_metadata(db_name, table_name)
 * @ get_all_sync_metadata(db_name)
  */
@@ -480,6 +481,91 @@ pub async fn cloud_fetch_parquet(username: &str, db_name: &str, table_name: &str
       serde_json::to_value(&result).map_err(|e| e.to_string())
     }
   }
+}
+
+#[allow(dead_code)]
+pub async fn cloud_fetch_parquet_batch(
+  usernames: &[&str],
+  db_names: &[&str],
+  table_names: &[&str],
+  date_range: HashMap<&str, &str>,
+) -> Result<Value, String> {
+  use futures::future;
+  use std::time::Instant;
+
+  let start_time = Instant::now();
+  let cloud_storage_manager = get_cloud_storage_manager().map_err(|e| e.to_string())?;
+
+  // Create futures for all fetch operations (all combinations)
+  let fetch_futures: Vec<_> = usernames
+    .iter()
+    .flat_map(|username| {
+      let cloud_storage_manager = Arc::clone(&cloud_storage_manager);
+      let date_range = date_range.clone();
+      db_names.iter().flat_map(move |db_name| {
+        let cloud_storage_manager = Arc::clone(&cloud_storage_manager);
+        let date_range = date_range.clone();
+        table_names.iter().map(move |table_name| {
+          let manager = Arc::clone(&cloud_storage_manager);
+          let username = username.to_string();
+          let db_name = db_name.to_string();
+          let table_name = table_name.to_string();
+          let date_range = date_range.clone();
+          async move {
+            let result = manager.cloud_fetch_parquet(&username, &db_name, &table_name, &date_range).await;
+            (username, db_name, table_name, result)
+          }
+        })
+      })
+    })
+    .collect();
+
+  // Execute all fetches in parallel
+  let results = future::join_all(fetch_futures).await;
+
+  // Process results and collect statistics
+  let mut success_count = 0;
+  let mut error_count = 0;
+  let mut errors = Vec::new();
+
+  for (username, db_name, table_name, result) in results {
+    match result {
+      Ok(_) => {
+        success_count += 1;
+        // Update sync metadata on successful fetch
+        let mut database_manager = get_database_manager().map_err(|e| e.to_string())?;
+        if let Err(e) = database_manager.update_sync_metadata(&db_name, &table_name, "fetch") {
+          eprintln!("Warning: Failed to update sync metadata for {}.{}: {}", db_name, table_name, e);
+        }
+      }
+      Err(e) => {
+        error_count += 1;
+        errors.push(format!("{}/{}/{}: {}", username, db_name, table_name, e));
+      }
+    }
+  }
+
+  let duration = start_time.elapsed();
+  let total_tasks = success_count + error_count;
+
+  let result = TimonResult {
+    status: if error_count == 0 { 200 } else { 207 }, // 207 = Multi-Status
+    message: format!(
+      "Batch fetch completed: {} successful, {} failed out of {} total tasks in {:.2}s",
+      success_count,
+      error_count,
+      total_tasks,
+      duration.as_secs_f64()
+    ),
+    json_value: Some(json!({
+      "success_count": success_count,
+      "error_count": error_count,
+      "total_tasks": total_tasks,
+      "duration_seconds": duration.as_secs_f64(),
+      "errors": errors
+    })),
+  };
+  serde_json::to_value(&result).map_err(|e| e.to_string())
 }
 
 #[allow(dead_code)]

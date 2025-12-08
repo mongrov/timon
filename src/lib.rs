@@ -5,8 +5,8 @@ pub mod timon_engine;
 #[cfg(target_os = "android")]
 pub mod android {
   use crate::timon_engine::{
-    cloud_fetch_parquet, cloud_sink_parquet, cloud_sync_parquet, create_database, create_table, delete_database, delete_table, get_all_sync_metadata,
-    get_sync_metadata, init_bucket, init_timon, insert, list_databases, list_tables, preload_tables, query,
+    cloud_fetch_parquet, cloud_fetch_parquet_batch, cloud_sink_parquet, cloud_sync_parquet, create_database, create_table, delete_database,
+    delete_table, get_all_sync_metadata, get_sync_metadata, init_bucket, init_timon, insert, list_databases, list_tables, preload_tables, query,
   };
   use jni::objects::{JClass, JObject, JString, JValue};
   use jni::sys::{jint, jstring};
@@ -435,6 +435,87 @@ pub mod android {
   }
 
   #[no_mangle]
+  pub unsafe extern "C" fn nativeCloudFetchParquetBatch(
+    mut env: JNIEnv,
+    _class: JClass,
+    usernames: JObject,
+    db_names: JObject,
+    table_names: JObject,
+    date_range: JObject,
+  ) -> jstring {
+    // Convert Java String[] arrays to Rust Vec<String>
+    let mut rust_usernames: Vec<String> = Vec::new();
+    let mut rust_db_names: Vec<String> = Vec::new();
+    let mut rust_table_names: Vec<String> = Vec::new();
+
+    // Convert usernames array
+    let usernames_array: jni::objects::JObjectArray = usernames.into();
+    let usernames_length = env.get_array_length(&usernames_array).expect("Failed to get usernames array length");
+    for i in 0..usernames_length {
+      let element = env
+        .get_object_array_element(&usernames_array, i)
+        .expect("Failed to get usernames array element");
+      let j_string: JString = element.into();
+      let rust_string: String = env.get_string(&j_string).expect("Failed to convert Java String to Rust String").into();
+      rust_usernames.push(rust_string);
+    }
+
+    // Convert db_names array
+    let db_names_array: jni::objects::JObjectArray = db_names.into();
+    let db_names_length = env.get_array_length(&db_names_array).expect("Failed to get db_names array length");
+    for i in 0..db_names_length {
+      let element = env
+        .get_object_array_element(&db_names_array, i)
+        .expect("Failed to get db_names array element");
+      let j_string: JString = element.into();
+      let rust_string: String = env.get_string(&j_string).expect("Failed to convert Java String to Rust String").into();
+      rust_db_names.push(rust_string);
+    }
+
+    // Convert table_names array
+    let table_names_array: jni::objects::JObjectArray = table_names.into();
+    let table_names_length = env.get_array_length(&table_names_array).expect("Failed to get table_names array length");
+    for i in 0..table_names_length {
+      let element = env
+        .get_object_array_element(&table_names_array, i)
+        .expect("Failed to get table_names array element");
+      let j_string: JString = element.into();
+      let rust_string: String = env.get_string(&j_string).expect("Failed to convert Java String to Rust String").into();
+      rust_table_names.push(rust_string);
+    }
+
+    // Convert date_range
+    let mut rust_date_range: HashMap<&str, &str> = HashMap::new();
+    let rust_start = get_date_range_value(&mut env, &date_range, "start");
+    let rust_end = get_date_range_value(&mut env, &date_range, "end");
+    rust_date_range.insert("start_date", &rust_start);
+    rust_date_range.insert("end_date", &rust_end);
+
+    // Convert Vec<String> to &[&str] for the batch function
+    let usernames_refs: Vec<&str> = rust_usernames.iter().map(|s| s.as_str()).collect();
+    let db_names_refs: Vec<&str> = rust_db_names.iter().map(|s| s.as_str()).collect();
+    let table_names_refs: Vec<&str> = rust_table_names.iter().map(|s| s.as_str()).collect();
+
+    match Runtime::new().unwrap().block_on(cloud_fetch_parquet_batch(
+      &usernames_refs,
+      &db_names_refs,
+      &table_names_refs,
+      rust_date_range,
+    )) {
+      Ok(result) => {
+        let json_string = result.to_string();
+        let output = env.new_string(json_string).expect("Couldn't create success string!");
+        output.into_raw()
+      }
+      Err(err) => {
+        let err_message = format!("Failed to batch fetch s3 parquet files: {:?}", err);
+        let output = env.new_string(err_message).expect("Couldn't create error string!");
+        output.into_raw()
+      }
+    }
+  }
+
+  #[no_mangle]
   pub unsafe extern "C" fn nativeGetAllSyncMetadata(mut env: JNIEnv, _class: JClass, db_name: JString) -> jstring {
     let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
 
@@ -570,6 +651,11 @@ pub mod android {
         fn_ptr: nativeCloudFetchParquet as *mut c_void,
       },
       NativeMethod {
+        name: "nativeCloudFetchParquetBatch".into(),
+        sig: "([Ljava/lang/String;[Ljava/lang/String;[Ljava/lang/String;Ljava/util/Map;)Ljava/lang/String;".into(),
+        fn_ptr: nativeCloudFetchParquetBatch as *mut c_void,
+      },
+      NativeMethod {
         name: "nativeGetAllSyncMetadata".into(),
         sig: "(Ljava/lang/String;)Ljava/lang/String;".into(),
         fn_ptr: nativeGetAllSyncMetadata as *mut c_void,
@@ -594,8 +680,8 @@ pub mod android {
 #[cfg(target_os = "ios")]
 pub mod ios {
   use crate::timon_engine::{
-    cloud_fetch_parquet, cloud_sink_parquet, cloud_sync_parquet, create_database, create_table, delete_database, delete_table, get_all_sync_metadata,
-    get_sync_metadata, init_bucket, init_timon, insert, list_databases, list_tables, preload_tables, query,
+    cloud_fetch_parquet, cloud_fetch_parquet_batch, cloud_sink_parquet, cloud_sync_parquet, create_database, create_table, delete_database,
+    delete_table, get_all_sync_metadata, get_sync_metadata, init_bucket, init_timon, insert, list_databases, list_tables, preload_tables, query,
   };
   use libc::c_char;
   use std::collections::HashMap;
@@ -1057,6 +1143,113 @@ pub mod ios {
         _ => {
           let err_message = serde_json::json!({
             "error": "Invalid arguments to nativeCloudFetchParquet function. Ensure all parameters are valid strings."
+          })
+          .to_string();
+          string_to_c_str(err_message)
+        }
+      }
+    }
+  }
+
+  #[no_mangle]
+  pub extern "C" fn nativeCloudFetchParquetBatch(
+    usernames_json: *const c_char,
+    db_names_json: *const c_char,
+    table_names_json: *const c_char,
+    date_range_json: *const c_char,
+  ) -> *mut c_char {
+    unsafe {
+      match (
+        c_str_to_string(usernames_json),
+        c_str_to_string(db_names_json),
+        c_str_to_string(table_names_json),
+        c_str_to_string(date_range_json),
+      ) {
+        (Ok(rust_usernames_json), Ok(rust_db_names_json), Ok(rust_table_names_json), Ok(rust_date_range_json)) => {
+          // Parse JSON arrays
+          let rust_usernames: Vec<String> = match serde_json::from_str(&rust_usernames_json) {
+            Ok(vec) => vec,
+            Err(e) => {
+              let err_message = serde_json::json!({
+                "error": format!("Failed to parse usernames_json: {}. Input was: '{}'", e, rust_usernames_json)
+              })
+              .to_string();
+              return string_to_c_str(err_message);
+            }
+          };
+
+          let rust_db_names: Vec<String> = match serde_json::from_str(&rust_db_names_json) {
+            Ok(vec) => vec,
+            Err(e) => {
+              let err_message = serde_json::json!({
+                "error": format!("Failed to parse db_names_json: {}. Input was: '{}'", e, rust_db_names_json)
+              })
+              .to_string();
+              return string_to_c_str(err_message);
+            }
+          };
+
+          let rust_table_names: Vec<String> = match serde_json::from_str(&rust_table_names_json) {
+            Ok(vec) => vec,
+            Err(e) => {
+              let err_message = serde_json::json!({
+                "error": format!("Failed to parse table_names_json: {}. Input was: '{}'", e, rust_table_names_json)
+              })
+              .to_string();
+              return string_to_c_str(err_message);
+            }
+          };
+
+          // Parse date_range_json into HashMap
+          let rust_date_range: HashMap<String, String> = match serde_json::from_str(&rust_date_range_json) {
+            Ok(map) => map,
+            Err(e) => {
+              let err_message = serde_json::json!({
+                "error": format!("Failed to parse date_range_json: {}. Input was: '{}'", e, rust_date_range_json)
+              })
+              .to_string();
+              return string_to_c_str(err_message);
+            }
+          };
+
+          let start_date = rust_date_range.get("start").cloned().unwrap_or_else(|| {
+            println!("Warning: 'start' key not found in date_range_json, using default");
+            "1970-01-01".to_string()
+          });
+
+          let end_date = rust_date_range.get("end").cloned().unwrap_or_else(|| {
+            println!("Warning: 'end' key not found in date_range_json, using default");
+            "1970-01-02".to_string()
+          });
+
+          let mut date_range_map = HashMap::new();
+          date_range_map.insert("start_date", start_date.as_str());
+          date_range_map.insert("end_date", end_date.as_str());
+
+          // Convert Vec<String> to &[&str] for the batch function
+          let usernames_refs: Vec<&str> = rust_usernames.iter().map(|s| s.as_str()).collect();
+          let db_names_refs: Vec<&str> = rust_db_names.iter().map(|s| s.as_str()).collect();
+          let table_names_refs: Vec<&str> = rust_table_names.iter().map(|s| s.as_str()).collect();
+
+          match Runtime::new().unwrap().block_on(cloud_fetch_parquet_batch(
+            &usernames_refs,
+            &db_names_refs,
+            &table_names_refs,
+            date_range_map,
+          )) {
+            Ok(result) => {
+              let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
+              string_to_c_str(json_string)
+            }
+            Err(err) => {
+              let err_message = serde_json::json!({ "error": format!("Failed to batch fetch s3 Parquet files: {}", err) }).to_string();
+              string_to_c_str(err_message)
+            }
+          }
+        }
+        _ => {
+          let err_message = serde_json::json!({
+            "error": "Invalid arguments to nativeCloudFetchParquetBatch function. Ensure all parameters are valid strings."
           })
           .to_string();
           string_to_c_str(err_message)

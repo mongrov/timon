@@ -3,8 +3,8 @@ use chrono::{DateTime, Duration, Local, Utc};
 use serde_json::json;
 use std::time::Instant;
 pub use timon_engine::{
-  cloud_fetch_parquet, cloud_sink_parquet, cloud_sync_parquet, create_database, create_table, delete_database, delete_table, init_bucket, init_timon,
-  insert, list_databases, list_tables, query, query_df,
+  cloud_fetch_parquet, cloud_fetch_parquet_batch, cloud_sink_parquet, cloud_sync_parquet, create_database, create_table, delete_database,
+  delete_table, init_bucket, init_timon, insert, list_databases, list_tables, query, query_df,
 };
 #[cfg(feature = "dev_cli")]
 mod cli;
@@ -224,6 +224,7 @@ fn main() {
     // let _ = test_rhr_queries().await;
     // let _ = test_vitality_queries().await;
     // let _ = ziva_app_queries().await;
+    // let _ = check_ziva_fecth_time().await;
   });
 }
 
@@ -2125,6 +2126,86 @@ async fn ziva_app_queries() -> Result<(), Box<dyn std::error::Error>> {
 
   let result_x = query("zivaring", &query_x, None, None).await?;
   println!("result_x: {} status: {}", result_x["json_value"], result_x["status"]);
+
+  Ok(())
+}
+
+#[allow(dead_code)]
+async fn check_ziva_fecth_time() -> Result<(), Box<dyn std::error::Error>> {
+  println!("\n=== CHECK ZIVA FETCH TIME COMPONENT ===");
+
+  const STORAGE_PATH: &str = "tmp";
+  const USERNAME: &str = "ahmed_test";
+  let _ = init_timon(STORAGE_PATH, 43200, USERNAME).unwrap();
+  init_bucket("https://s3.us-west-2.amazonaws.com", "zivaoneapp", "xxx", "xxx", "us-west-2").unwrap();
+
+  let start_time = Instant::now();
+
+  // Prepare batch fetch parameters
+  let usernames = ["rADQkoFBr4Pks9Y2H_sriram", "7TQBn6aSe49wfnuox_roshann"];
+  let db_names = ["zivaring"];
+  let table_names = [
+    "activitydetails",
+    "battery_table",
+    "blood_glucose_table",
+    "heartrate",
+    "hrv_table",
+    "sleep",
+    "spo2",
+    "temperature_table",
+  ];
+  let fetch_range = std::collections::HashMap::from([("start_date", "2025-01-01"), ("end_date", "2025-12-30")]);
+
+  // Use batch fetch for parallel execution
+  let result = cloud_fetch_parquet_batch(&usernames, &db_names, &table_names, fetch_range).await;
+
+  let end_time = Instant::now();
+  let duration = end_time.duration_since(start_time);
+
+  match result {
+    Ok(value) => {
+      let json_value: serde_json::Value = serde_json::from_str(&value.to_string()).unwrap_or(json!({}));
+      let default_json = json!({});
+      let json_data = json_value.get("json_value").unwrap_or(&default_json);
+      let success_count = json_data.get("success_count").and_then(|v| v.as_u64()).unwrap_or(0);
+      let error_count = json_data.get("error_count").and_then(|v| v.as_u64()).unwrap_or(0);
+      let total_tasks = json_data.get("total_tasks").and_then(|v| v.as_u64()).unwrap_or(0);
+
+      // Count files per user (approximate - each table typically has multiple parquet files)
+      let files_per_user = table_names.len();
+
+      let status_msg: String = if error_count == 0 {
+        "No synchronization needed (all local files current)".to_string()
+      } else {
+        format!("{} successful, {} failed", success_count, error_count)
+      };
+
+      println!(
+        "Cloud fetch performance:\nScope: {} users, {} tables, {} parquet files\nDistribution: {} ({} files), {} ({} files)\nExecution time: around {:.2} seconds\nStatus: {}",
+        usernames.len(),
+        table_names.len(),
+        total_tasks,
+        usernames[0],
+        files_per_user,
+        usernames[1],
+        files_per_user,
+        duration.as_secs_f64(),
+        status_msg
+      );
+      if let Some(errors) = json_data.get("errors") {
+        if errors.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
+          println!("Errors: {:?}", errors);
+        }
+      }
+    }
+    Err(e) => {
+      eprintln!("Error in cloud_fetch_parquet_batch: {}", e);
+      return Err(Box::new(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        format!("cloud_fetch_parquet_batch failed: {}", e),
+      )));
+    }
+  }
 
   Ok(())
 }
