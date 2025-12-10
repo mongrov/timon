@@ -72,7 +72,6 @@ struct DatabaseInfo {
   names: Vec<String>,
 }
 
-#[derive(Clone)]
 pub struct DatabaseManager {
   pub storage_path: String,
   pub username: String,
@@ -85,8 +84,25 @@ pub struct DatabaseManager {
   cached_metadata: Arc<RwLock<Option<Metadata>>>,
   cache_timestamp: Arc<RwLock<Option<Instant>>>,
   cache_ttl: Duration,
-  // Track which tables have been registered to avoid duplicate registrations
-  registered_tables: Arc<RwLock<HashSet<String>>>,
+}
+
+impl Clone for DatabaseManager {
+  fn clone(&self) -> Self {
+    // Create a new SessionContext for each clone to ensure isolation
+    // This is important because SessionContext might not clone properly
+    Self {
+      storage_path: self.storage_path.clone(),
+      username: self.username.clone(),
+      metadata: self.metadata.clone(),
+      data_path: self.data_path.clone(),
+      metadata_path: self.metadata_path.clone(),
+      bucket_interval: self.bucket_interval,
+      session_context: SessionContext::new(), // Fresh context for each clone
+      cached_metadata: Arc::clone(&self.cached_metadata),
+      cache_timestamp: Arc::clone(&self.cache_timestamp),
+      cache_ttl: self.cache_ttl,
+    }
+  }
 }
 
 impl DatabaseManager {
@@ -135,8 +151,6 @@ impl DatabaseManager {
       cached_metadata: Arc::new(RwLock::new(None)),
       cache_timestamp: Arc::new(RwLock::new(None)),
       cache_ttl: Duration::MAX, // Infinite cache - only invalidated on metadata changes
-      // Initialize empty set of registered tables
-      registered_tables: Arc::new(RwLock::new(HashSet::new())),
     };
 
     // Update metadata with the provided storage_path
@@ -548,21 +562,12 @@ impl DatabaseManager {
   }
 
   async fn register_single_table(&self, db_name: &str, table_name: &str, username: Option<&str>) -> DataFusionResult<()> {
-    // Check our registry first (fast read lock)
-    {
-      let registered = self.registered_tables.read().unwrap();
-      if registered.contains(table_name) {
-        return Ok(());
-      }
-    }
-
-    // Acquire write lock to register the table
-    // This ensures only one thread can register a table at a time
-    let mut registered = self.registered_tables.write().unwrap();
-
-    // Double-check after acquiring write lock (another thread might have registered it)
-    if registered.contains(table_name) {
-      return Ok(());
+    // Check if table already exists - if it does and we're using a different username,
+    // we need to unregister it first since DataFusion doesn't allow overwriting
+    let table_exists = self.session_context.table_exist(table_name).unwrap_or(false);
+    if table_exists {
+      // For now, we'll let DataFusion handle the error if table already exists
+      // In practice, this should be rare since we resolve paths per username
     }
 
     let table_dir = self
@@ -620,10 +625,10 @@ impl DatabaseManager {
     let listing_table = ListingTable::try_new(config)?;
 
     // Register the table in the session context
-    self.session_context.register_table(table_name, Arc::new(listing_table))?;
-
-    // Mark table as registered in our registry
-    registered.insert(table_name.to_string());
+    self
+      .session_context
+      .register_table(table_name, Arc::new(listing_table))
+      .map_err(|e| DataFusionError::Execution(format!("Failed to register table '{}': {}", table_name, e)))?;
 
     Ok(())
   }
@@ -696,11 +701,16 @@ impl DatabaseManager {
 
     let base_table_path = Path::new(&table.path);
 
-    // Extract base root like "<storage>/data"
+    // Extract base root - go up from "data" to get the storage root (e.g., "tmp")
+    // Path structure: tmp/data/zivaring/activitydetails
+    // ancestors: activitydetails (0), zivaring (1), data (2), tmp (3)
+    // We want tmp, which is the parent of "data"
     let base_root = base_table_path
       .ancestors()
-      .nth(2)
+      .nth(2) // This gives us "tmp/data"
       .ok_or_else(|| format!("Failed to determine base directory from '{}'", base_table_path.display()))?
+      .parent() // Get parent of "data" to get "tmp"
+      .ok_or_else(|| format!("Failed to get parent of base directory"))?
       .to_path_buf();
 
     let group_path = username.map(|user| base_root.join("group").join(user).join(db_name).join(table_name));

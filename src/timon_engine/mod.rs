@@ -32,20 +32,54 @@ pub struct TimonResult {
   pub json_value: Option<Value>,
 }
 
-static DATABASE_MANAGER: LazyLock<Arc<Mutex<Option<DatabaseManager>>>> = LazyLock::new(|| Arc::new(Mutex::new(None)));
+// Store separate DatabaseManager instances per username
+// This allows each username to have its own isolated SessionContext
+static DATABASE_MANAGERS: LazyLock<Arc<Mutex<HashMap<String, DatabaseManager>>>> = LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
+// Store initialization parameters to auto-create managers for new usernames
+static INIT_PARAMS: LazyLock<Arc<Mutex<Option<(String, u32)>>>> = LazyLock::new(|| Arc::new(Mutex::new(None)));
 static CLOUD_STORAGE_MANAGER: LazyLock<Arc<Mutex<Option<Arc<CloudStorageManager<AmazonS3>>>>>> = LazyLock::new(|| Arc::new(Mutex::new(None)));
 
-fn get_database_manager() -> ErrorResult<DatabaseManager> {
-  let manager_guard = DATABASE_MANAGER.lock().map_err(|e| {
+fn get_database_manager(username: Option<&str>) -> ErrorResult<DatabaseManager> {
+  let mut managers_guard = DATABASE_MANAGERS.lock().map_err(|e| {
     TimonError::new(
       TimonErrorKind::LockAcquisitionFailed,
-      format!("Failed to acquire database manager lock: {}", e),
+      format!("Failed to acquire database managers lock: {}", e),
     )
   })?;
-  manager_guard
-    .as_ref()
-    .cloned()
-    .ok_or_else(|| TimonError::database_manager_not_initialized())
+
+  // Use the provided username, or get the first available manager, or use "default"
+  let key = username.unwrap_or("default");
+
+  // If manager exists for this username, return a clone
+  if let Some(manager) = managers_guard.get(key) {
+    return Ok(manager.clone());
+  }
+
+  // If no username provided and we have any manager, return the first one
+  if username.is_none() && !managers_guard.is_empty() {
+    if let Some((_, manager)) = managers_guard.iter().next() {
+      return Ok(manager.clone());
+    }
+  }
+
+  // Manager doesn't exist - try to auto-create it using stored init params
+  if let Some(username_str) = username {
+    let init_params_guard = INIT_PARAMS.lock().map_err(|e| {
+      TimonError::new(
+        TimonErrorKind::LockAcquisitionFailed,
+        format!("Failed to acquire init params lock: {}", e),
+      )
+    })?;
+
+    if let Some((storage_path, bucket_interval)) = init_params_guard.as_ref() {
+      // Auto-create manager for this username
+      let new_manager = DatabaseManager::new(storage_path, *bucket_interval, username_str);
+      managers_guard.insert(username_str.to_string(), new_manager.clone());
+      return Ok(new_manager);
+    }
+  }
+
+  Err(TimonError::database_manager_not_initialized())
 }
 
 fn get_cloud_storage_manager() -> ErrorResult<Arc<CloudStorageManager<AmazonS3>>> {
@@ -62,33 +96,25 @@ fn get_cloud_storage_manager() -> ErrorResult<Arc<CloudStorageManager<AmazonS3>>
 pub fn init_timon(storage_path: &str, bucket_interval: u32, username: &str) -> Result<Value, String> {
   let db_manager = DatabaseManager::new(storage_path, bucket_interval, username);
 
-  // Check if we already have a database manager with a different username
-  let mut db_manager_guard = DATABASE_MANAGER
-    .lock()
-    .map_err(|e| format!("Failed to acquire database manager lock: {}", e))?;
-
-  if let Some(existing_manager) = db_manager_guard.as_ref() {
-    if existing_manager.username != username {
-      // Username changed, we need to clear the cloud storage manager to force reinitialization
-      let mut cloud_manager_guard = CLOUD_STORAGE_MANAGER
-        .lock()
-        .map_err(|e| format!("Failed to acquire cloud storage manager lock: {}", e))?;
-      if cloud_manager_guard.is_some() {
-        *cloud_manager_guard = None;
-        println!(
-          "Cleared cloud storage manager due to username change from '{}' to '{}'",
-          existing_manager.username, username
-        );
-      }
-    }
+  // Store initialization parameters so we can auto-create managers for other usernames
+  {
+    let mut init_params_guard = INIT_PARAMS.lock().map_err(|e| format!("Failed to acquire init params lock: {}", e))?;
+    *init_params_guard = Some((storage_path.to_string(), bucket_interval));
   }
 
-  // Update the database manager
-  *db_manager_guard = Some(db_manager);
+  let mut managers_guard = DATABASE_MANAGERS
+    .lock()
+    .map_err(|e| format!("Failed to acquire database managers lock: {}", e))?;
+
+  // Store manager for this username (or create new entry)
+  managers_guard.insert(username.to_string(), db_manager);
 
   let result = TimonResult {
     status: 200,
-    message: format!("DatabaseManager initialized successfully with '{}'", username),
+    message: format!(
+      "DatabaseManager initialized successfully for username '{}'. Managers will be auto-created for other usernames when needed.",
+      username
+    ),
     json_value: None,
   };
   serde_json::to_value(&result).map_err(|e| e.to_string())
@@ -96,7 +122,7 @@ pub fn init_timon(storage_path: &str, bucket_interval: u32, username: &str) -> R
 
 #[allow(dead_code)]
 pub fn create_database(db_name: &str) -> Result<Value, String> {
-  let mut database_manager = get_database_manager().map_err(|e| e.to_string())?;
+  let mut database_manager = get_database_manager(None).map_err(|e| e.to_string())?;
   match database_manager.create_database(db_name) {
     Ok(_) => {
       let result = TimonResult {
@@ -120,7 +146,7 @@ pub fn create_database(db_name: &str) -> Result<Value, String> {
 
 #[allow(dead_code)]
 pub fn create_table(db_name: &str, table_name: &str, schema: &str) -> Result<Value, String> {
-  let mut database_manager = get_database_manager().map_err(|e| e.to_string())?;
+  let mut database_manager = get_database_manager(None).map_err(|e| e.to_string())?;
   match database_manager.create_table(db_name, table_name, schema) {
     Ok(_) => {
       let result = TimonResult {
@@ -144,7 +170,7 @@ pub fn create_table(db_name: &str, table_name: &str, schema: &str) -> Result<Val
 
 #[allow(dead_code)]
 pub fn list_databases() -> Result<Value, String> {
-  let mut database_manager = get_database_manager().map_err(|e| e.to_string())?;
+  let mut database_manager = get_database_manager(None).map_err(|e| e.to_string())?;
   match database_manager.list_databases() {
     Ok(databases_list) => {
       let json_value = serde_json::to_value(databases_list).map_err(|e| e.to_string())?;
@@ -169,7 +195,7 @@ pub fn list_databases() -> Result<Value, String> {
 
 #[allow(dead_code)]
 pub fn list_tables(db_name: &str) -> Result<Value, String> {
-  let mut database_manager = get_database_manager().map_err(|e| e.to_string())?;
+  let mut database_manager = get_database_manager(None).map_err(|e| e.to_string())?;
   match database_manager.list_tables(db_name) {
     Ok(tables_list) => {
       let json_value = serde_json::to_value(&tables_list).map_err(|e| e.to_string())?;
@@ -194,7 +220,7 @@ pub fn list_tables(db_name: &str) -> Result<Value, String> {
 
 #[allow(dead_code)]
 pub fn delete_database(db_name: &str) -> Result<Value, String> {
-  let mut database_manager = get_database_manager().map_err(|e| e.to_string())?;
+  let mut database_manager = get_database_manager(None).map_err(|e| e.to_string())?;
   match database_manager.delete_database(db_name) {
     Ok(_) => {
       let result = TimonResult {
@@ -218,7 +244,7 @@ pub fn delete_database(db_name: &str) -> Result<Value, String> {
 
 #[allow(dead_code)]
 pub fn delete_table(db_name: &str, table_name: &str) -> Result<Value, String> {
-  let mut database_manager = get_database_manager().map_err(|e| e.to_string())?;
+  let mut database_manager = get_database_manager(None).map_err(|e| e.to_string())?;
   match database_manager.delete_table(db_name, table_name) {
     Ok(_) => {
       let result = TimonResult {
@@ -242,7 +268,7 @@ pub fn delete_table(db_name: &str, table_name: &str) -> Result<Value, String> {
 
 #[allow(dead_code)]
 pub fn insert(db_name: &str, table_name: &str, json_data: &str) -> Result<Value, String> {
-  let mut database_manager = get_database_manager().map_err(|e| e.to_string())?;
+  let mut database_manager = get_database_manager(None).map_err(|e| e.to_string())?;
   match database_manager.insert(db_name, table_name, json_data) {
     Ok(value) => {
       let result = TimonResult {
@@ -266,7 +292,7 @@ pub fn insert(db_name: &str, table_name: &str, json_data: &str) -> Result<Value,
 
 #[allow(dead_code)]
 pub async fn query(db_name: &str, sql_query: &str, username: Option<&str>, limit_partitions: Option<usize>) -> Result<Value, String> {
-  let database_manager = get_database_manager().map_err(|e| e.to_string())?;
+  let database_manager = get_database_manager(username).map_err(|e| e.to_string())?;
   match database_manager.query(db_name, sql_query, username, true, limit_partitions).await {
     Ok(db_manager::DataFusionOutput::Json(data)) => {
       let json_value = serde_json::to_value(&data).map_err(|e| e.to_string())?;
@@ -292,7 +318,7 @@ pub async fn query(db_name: &str, sql_query: &str, username: Option<&str>, limit
 
 #[allow(dead_code)]
 pub async fn query_df(db_name: &str, sql_query: &str, username: Option<&str>, limit_partitions: Option<usize>) -> Result<DataFrame, String> {
-  let database_manager = get_database_manager().map_err(|e| e.to_string())?;
+  let database_manager = get_database_manager(username).map_err(|e| e.to_string())?;
   match database_manager.query(db_name, sql_query, username, false, limit_partitions).await {
     Ok(db_manager::DataFusionOutput::DataFrame(df)) => Ok(df),
     Ok(db_manager::DataFusionOutput::Json(_)) => Err("Expected DataFrame output, but got JSON".to_string()),
@@ -305,7 +331,7 @@ pub async fn query_df(db_name: &str, sql_query: &str, username: Option<&str>, li
 
 #[allow(dead_code)]
 pub async fn preload_tables(db_name: &str, table_names: Vec<String>, username: Option<&str>) -> Result<Value, String> {
-  let database_manager = get_database_manager().map_err(|e| e.to_string())?;
+  let database_manager = get_database_manager(username).map_err(|e| e.to_string())?;
   match database_manager.preload_tables(db_name, table_names, username).await {
     Ok(loaded_tables) => {
       let json_value = serde_json::to_value(&loaded_tables).map_err(|e| e.to_string())?;
@@ -346,7 +372,7 @@ pub fn init_bucket(
   secret_access_key: &str,
   bucket_region: &str,
 ) -> Result<Value, String> {
-  let database_manager = get_database_manager().map_err(|e| e.to_string())?;
+  let database_manager = get_database_manager(None).map_err(|e| e.to_string())?;
   let username = database_manager.username.clone();
 
   // Create a new cloud storage manager with the current database manager's username
@@ -376,7 +402,7 @@ pub fn init_bucket(
 #[allow(dead_code)]
 pub async fn cloud_sync_parquet(db_name: &str, table_name: &str, date_range: HashMap<&str, &str>, username: Option<&str>) -> Result<Value, String> {
   let cloud_storage_manager = get_cloud_storage_manager().map_err(|e| e.to_string())?;
-  let mut database_manager = get_database_manager().map_err(|e| e.to_string())?;
+  let mut database_manager = get_database_manager(None).map_err(|e| e.to_string())?;
 
   match cloud_storage_manager.cloud_sync_parquet(db_name, table_name, &date_range, username).await {
     Ok(_) => {
@@ -409,7 +435,7 @@ pub async fn cloud_sync_parquet(db_name: &str, table_name: &str, date_range: Has
 #[allow(dead_code)]
 pub async fn cloud_sink_parquet(db_name: &str, table_name: &str) -> Result<Value, String> {
   // Check username consistency before performing cloud operations
-  let db_manager = get_database_manager().map_err(|e| e.to_string())?;
+  let db_manager = get_database_manager(None).map_err(|e| e.to_string())?;
   let cloud_storage_manager = get_cloud_storage_manager().map_err(|e| e.to_string())?;
 
   if db_manager.username != cloud_storage_manager.username {
@@ -422,7 +448,7 @@ pub async fn cloud_sink_parquet(db_name: &str, table_name: &str) -> Result<Value
   match cloud_storage_manager.cloud_sink_parquet(db_name, table_name).await {
     Ok(_) => {
       // Update sync metadata on successful sink
-      let mut database_manager = get_database_manager().map_err(|e| e.to_string())?;
+      let mut database_manager = get_database_manager(None).map_err(|e| e.to_string())?;
       if let Err(e) = database_manager.update_sync_metadata(db_name, table_name, "sink") {
         eprintln!("Warning: Failed to update sync metadata: {}", e);
       }
@@ -457,7 +483,7 @@ pub async fn cloud_fetch_parquet(username: &str, db_name: &str, table_name: &str
   {
     Ok(_) => {
       // Update sync metadata on successful fetch
-      let mut database_manager = get_database_manager().map_err(|e| e.to_string())?;
+      let mut database_manager = get_database_manager(None).map_err(|e| e.to_string())?;
       if let Err(e) = database_manager.update_sync_metadata(db_name, table_name, "fetch") {
         eprintln!("Warning: Failed to update sync metadata: {}", e);
       }
@@ -533,7 +559,7 @@ pub async fn cloud_fetch_parquet_batch(
       Ok(_) => {
         success_count += 1;
         // Update sync metadata on successful fetch
-        let mut database_manager = get_database_manager().map_err(|e| e.to_string())?;
+        let mut database_manager = get_database_manager(None).map_err(|e| e.to_string())?;
         if let Err(e) = database_manager.update_sync_metadata(&db_name, &table_name, "fetch") {
           eprintln!("Warning: Failed to update sync metadata for {}.{}: {}", db_name, table_name, e);
         }
@@ -570,7 +596,7 @@ pub async fn cloud_fetch_parquet_batch(
 
 #[allow(dead_code)]
 pub fn get_sync_metadata(db_name: &str, table_name: &str) -> Result<Value, String> {
-  let database_manager = get_database_manager().map_err(|e| e.to_string())?;
+  let database_manager = get_database_manager(None).map_err(|e| e.to_string())?;
   match database_manager.get_sync_metadata(db_name, table_name) {
     Ok(sync_info) => {
       let result = TimonResult {
@@ -594,7 +620,7 @@ pub fn get_sync_metadata(db_name: &str, table_name: &str) -> Result<Value, Strin
 
 #[allow(dead_code)]
 pub fn get_all_sync_metadata(db_name: &str) -> Result<Value, String> {
-  let database_manager = get_database_manager().map_err(|e| e.to_string())?;
+  let database_manager = get_database_manager(None).map_err(|e| e.to_string())?;
   match database_manager.get_all_sync_metadata(db_name) {
     Ok(sync_info) => {
       let result = TimonResult {
