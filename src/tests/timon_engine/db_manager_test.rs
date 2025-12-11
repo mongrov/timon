@@ -1620,7 +1620,7 @@ fn test_delete_database_remove_dir_error() {
 
 #[test]
 fn test_delete_table_metadata_reload_error() {
-  // Lines 294-295: Error reloading metadata in delete_table
+  // Lines 304-315: Error reloading metadata in delete_table
   let temp_dir = create_temp_dir();
   let storage_path = temp_dir.to_str().unwrap();
   let mut db_manager = DatabaseManager::new(storage_path, 30, "test_user");
@@ -1632,10 +1632,12 @@ fn test_delete_table_metadata_reload_error() {
   let metadata_path = format!("{}/metadata.json", storage_path);
   fs::write(&metadata_path, "invalid json").unwrap();
 
-  // This will panic due to unwrap() on line 295, which is expected
-  let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| db_manager.delete_table("test_db", "test_table")));
-  // Should panic, which is the code path we're testing
+  // Should return an error when metadata is corrupted (not missing)
+  let result = db_manager.delete_table("test_db", "test_table");
   assert!(result.is_err());
+  // Verify the error message mentions metadata
+  let error_msg = result.unwrap_err().to_string();
+  assert!(error_msg.contains("metadata") || error_msg.contains("Failed to reload"));
 
   cleanup_temp_dir(temp_dir);
 }

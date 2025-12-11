@@ -1,10 +1,11 @@
-use super::helpers::{build_rules_tree, get_property_fields, json_to_arrow, record_batches_to_json, rounded_timestamp, row_to_json};
+use super::helpers::{
+  build_rules_tree, get_property_fields, infer_schema_with_coercion, json_to_arrow, record_batches_to_json, rounded_timestamp, row_to_json,
+};
 use super::sql_query_parser::extract_table_names_and_ctes;
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use datafusion::arrow::array::Array;
 use datafusion::arrow::datatypes::{DataType, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::dataframe::DataFrame;
 use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl};
 use datafusion::datasource::MemTable;
@@ -303,10 +304,25 @@ impl DatabaseManager {
 
   pub fn delete_table(&mut self, db_name: &str, table_name: &str) -> Result<(), DataFusionError> {
     // Reload the metadata to ensure it's up to date
-    self.metadata = self
-      .get_metadata_cached()
-      .map_err(|e| DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))
-      .unwrap();
+    // If metadata file doesn't exist (file not found), that's OK - table might not exist either
+    // But if metadata file exists but is corrupted, that's an error
+    match self.get_metadata_cached() {
+      Ok(metadata) => {
+        self.metadata = metadata;
+      }
+      Err(e) => {
+        // Check if it's a "file not found" error - that's OK, we can proceed
+        // But if it's a JSON parse error (corrupted file), we should return the error
+        let error_msg = e.to_string();
+        if error_msg.contains("No such file") || error_msg.contains("not found") {
+          // Metadata file doesn't exist, which is fine - table might not exist either
+          // We'll proceed with the deletion attempt
+        } else {
+          // Metadata file exists but is corrupted - return error
+          return Err(DataFusionError::Execution(format!("Failed to reload metadata: {}", e)));
+        }
+      }
+    }
 
     // Check if the database exists
     if let Some(db) = self.metadata.databases.get_mut(db_name) {
@@ -562,12 +578,11 @@ impl DatabaseManager {
   }
 
   async fn register_single_table(&self, db_name: &str, table_name: &str, username: Option<&str>) -> DataFusionResult<()> {
-    // Check if table already exists - if it does and we're using a different username,
-    // we need to unregister it first since DataFusion doesn't allow overwriting
+    // Check if table already exists - if it does, return early to avoid re-registration error
     let table_exists = self.session_context.table_exist(table_name).unwrap_or(false);
     if table_exists {
-      // For now, we'll let DataFusion handle the error if table already exists
-      // In practice, this should be rare since we resolve paths per username
+      // Table is already registered, no need to register again
+      return Ok(());
     }
 
     let table_dir = self
@@ -616,11 +631,36 @@ impl DatabaseManager {
     // Create the listing table URL
     let table_url = ListingTableUrl::parse(&table_dir).map_err(|e| DataFusionError::Execution(format!("Failed to parse table URL: {}", e)))?;
 
-    // Configure the listing table and infer schema from parquet files
-    let config = ListingTableConfig::new(table_url)
-      .with_listing_options(listing_options)
-      .infer_schema(&self.session_context.state())
-      .await?;
+    // Infer schema with type coercion to handle schema mismatches (e.g., Int64 vs Float64)
+    let merged_schema = match infer_schema_with_coercion(&table_dir).await {
+      Ok(schema) => {
+        eprintln!(
+          "Successfully merged schema for table '{}' with {} fields",
+          table_name,
+          schema.fields().len()
+        );
+        Some(schema)
+      }
+      Err(e) => {
+        eprintln!(
+          "Warning: Failed to infer schema with coercion for table '{}': {}. Falling back to DataFusion's default inference.",
+          table_name, e
+        );
+        None
+      }
+    };
+
+    // Configure the listing table with merged schema or fallback to default inference
+    let config = if let Some(schema) = merged_schema {
+      ListingTableConfig::new(table_url)
+        .with_listing_options(listing_options)
+        .with_schema(schema)
+    } else {
+      ListingTableConfig::new(table_url)
+        .with_listing_options(listing_options)
+        .infer_schema(&self.session_context.state())
+        .await?
+    };
 
     let listing_table = ListingTable::try_new(config)?;
 

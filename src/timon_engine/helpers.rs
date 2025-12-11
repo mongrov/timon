@@ -7,7 +7,7 @@ use datafusion::arrow::array::{
 use datafusion::arrow::buffer::OffsetBuffer;
 use datafusion::arrow::datatypes::{DataType, Field, Field as ArrowField, Schema, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReader;
+use datafusion::parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use datafusion::parquet::data_type::{AsBytes, Decimal};
 use datafusion::parquet::record::{Field as ParquetField, Row};
 use datafusion::scalar::ScalarValue;
@@ -703,4 +703,129 @@ pub fn build_rules_tree(table_schema: Value) -> Vec<Condition> {
   }
 
   conditions
+}
+
+/// Merge two data types, promoting compatible types (e.g., Int64 -> Float64)
+fn merge_data_types(dt1: &DataType, dt2: &DataType) -> DataType {
+  use DataType::*;
+  match (dt1, dt2) {
+    // If types are the same, return as-is
+    (a, b) if a == b => a.clone(),
+    // Promote Int64 to Float64 when mixing with Float64
+    (Int64, Float64) | (Float64, Int64) => Float64,
+    // Promote Int32 to Int64 when mixing with Int64
+    (Int32, Int64) | (Int64, Int32) => Int64,
+    // Promote Int32 to Float64 when mixing with Float64
+    (Int32, Float64) | (Float64, Int32) => Float64,
+    // Promote smaller integers to larger ones
+    (Int8, Int16) | (Int16, Int8) => Int16,
+    (Int8, Int32) | (Int32, Int8) => Int32,
+    (Int16, Int32) | (Int32, Int16) => Int32,
+    (Int16, Int64) | (Int64, Int16) => Int64,
+    // Promote unsigned to signed when mixing
+    (UInt8, Int16) | (Int16, UInt8) => Int16,
+    (UInt16, Int32) | (Int32, UInt16) => Int32,
+    (UInt32, Int64) | (Int64, UInt32) => Int64,
+    // For other cases, prefer the more general type or return the first
+    _ => {
+      eprintln!("Warning: Cannot merge incompatible types {:?} and {:?}, using {:?}", dt1, dt2, dt1);
+      dt1.clone()
+    }
+  }
+}
+
+/// Collect all parquet file paths recursively from a directory
+fn collect_parquet_files(dir: &Path) -> Vec<std::path::PathBuf> {
+  let mut files = Vec::new();
+  if let Ok(entries) = std::fs::read_dir(dir) {
+    for entry in entries.flatten() {
+      let path = entry.path();
+      if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("parquet") {
+        files.push(path);
+      } else if path.is_dir() {
+        // Recursively collect from subdirectories (partitions)
+        files.extend(collect_parquet_files(&path));
+      }
+    }
+  }
+  files
+}
+
+fn read_parquet_schema(file_path: &Path) -> Result<Arc<Schema>, Box<dyn Error>> {
+  let file = fs::File::open(file_path)?;
+  let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+  Ok(builder.schema().clone())
+}
+
+/// Merge multiple schemas, handling type coercion for compatible types
+fn merge_schemas(schemas: Vec<Arc<Schema>>) -> Result<Arc<Schema>, Box<dyn Error>> {
+  if schemas.is_empty() {
+    return Err("No schemas to merge".into());
+  }
+
+  if schemas.len() == 1 {
+    return Ok(schemas[0].clone());
+  }
+
+  // Start with the first schema
+  let mut merged_fields: Vec<Arc<datafusion::arrow::datatypes::Field>> = schemas[0].fields().to_vec();
+
+  // Merge each subsequent schema
+  for schema in schemas.iter().skip(1) {
+    let mut updated_fields = Vec::new();
+    let schema_fields = schema.fields();
+
+    // For each field in the merged schema, try to find and merge with fields from the new schema
+    for merged_field in &merged_fields {
+      if let Some(new_field) = schema_fields.iter().find(|f| f.name() == merged_field.name()) {
+        // Field exists in both schemas, merge the data types
+        let merged_type = merge_data_types(merged_field.data_type(), new_field.data_type());
+        let merged_field = merged_field.clone().as_ref().clone().with_data_type(merged_type);
+        updated_fields.push(Arc::new(merged_field));
+      } else {
+        // Field only exists in merged schema, keep it
+        updated_fields.push(merged_field.clone());
+      }
+    }
+
+    // Add fields that only exist in the new schema
+    for new_field in schema_fields {
+      if !merged_fields.iter().any(|f| f.name() == new_field.name()) {
+        updated_fields.push(new_field.clone());
+      }
+    }
+
+    merged_fields = updated_fields;
+  }
+
+  Ok(Arc::new(Schema::new(merged_fields)))
+}
+
+/// Infer schema from parquet files with type coercion support
+pub async fn infer_schema_with_coercion(table_dir: &str) -> Result<Arc<Schema>, Box<dyn Error>> {
+  let dir_path = Path::new(table_dir);
+  let parquet_files = collect_parquet_files(dir_path);
+
+  if parquet_files.is_empty() {
+    return Err("No parquet files found".into());
+  }
+
+  // Read schemas from all parquet files
+  let mut schemas = Vec::new();
+  for file_path in &parquet_files {
+    match read_parquet_schema(file_path) {
+      Ok(schema) => schemas.push(schema),
+      Err(e) => {
+        eprintln!("Warning: Failed to read schema from {:?}: {}", file_path, e);
+        // Continue with other files
+      }
+    }
+  }
+
+  if schemas.is_empty() {
+    return Err("No valid schemas found in parquet files".into());
+  }
+
+  // Merge all schemas with type coercion
+  merge_schemas(schemas)
 }

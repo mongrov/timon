@@ -25,7 +25,10 @@ fn test_init_timon_once() {
   assert!(result2.is_ok());
   let binding = result2.unwrap();
   let msg = binding.get("message").unwrap().as_str().unwrap();
-  assert_eq!(msg, "DatabaseManager initialized successfully with 'test_user'");
+  assert_eq!(
+    msg,
+    "DatabaseManager initialized successfully for username 'test_user'. Managers will be auto-created for other usernames when needed."
+  );
 }
 
 #[test]

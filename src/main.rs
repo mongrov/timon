@@ -2259,7 +2259,7 @@ async fn check_ziva_fecth_time() -> Result<(), Box<dyn std::error::Error>> {
   let start_time = Instant::now();
 
   // Prepare batch fetch parameters
-  let usernames = ["rADQkoFBr4Pks9Y2H_sriram", "7TQBn6aSe49wfnuox_roshann"];
+  let usernames = ["rADQkoFBr4Pks9Y2H_sriram", "7TQBn6aSe49wfnuox_roshann", "MtvcHGtLWZ23hS3KT_spalaniswamy"];
   let db_names = ["zivaring"];
   let table_names = [
     "activitydetails",
