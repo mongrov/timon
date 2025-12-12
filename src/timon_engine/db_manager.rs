@@ -498,13 +498,18 @@ impl DatabaseManager {
       .map_err(|e| DataFusionError::Execution(format!("Failed to read metadata: {}", e)))?;
 
     // Validate that all tables exist before attempting registration
+    // For group users, we allow tables that don't exist in metadata (they might exist in group paths)
+    // For default user (None), tables must exist in metadata
     if let Some(database) = metadata.databases.get(db_name) {
       for table_name in &table_names {
         if !database.tables.contains_key(table_name) {
-          return Err(DataFusionError::Plan(format!(
-            "Table '{}' referenced in query does not exist in database '{}'",
-            table_name, db_name
-          )));
+          // For group users, allow tables not in metadata (they might exist in group paths)
+          if username.is_none() {
+            return Err(DataFusionError::Plan(format!(
+              "Table '{}' referenced in query does not exist in database '{}'",
+              table_name, db_name
+            )));
+          }
         }
       }
 
@@ -578,16 +583,27 @@ impl DatabaseManager {
   }
 
   async fn register_single_table(&self, db_name: &str, table_name: &str, username: Option<&str>) -> DataFusionResult<()> {
-    // Check if table already exists - if it does, return early to avoid re-registration error
-    let table_exists = self.session_context.table_exist(table_name).unwrap_or(false);
-    if table_exists {
-      // Table is already registered, no need to register again
-      return Ok(());
-    }
+    // ALWAYS deregister the table FIRST, before resolving the path
+    // This is critical: even if the table doesn't exist, try to deregister it
+    // This ensures we don't use a stale registration from a previous query with a different username
+    // The deregister will fail silently if the table doesn't exist, which is fine
+    let _ = self.session_context.deregister_table(table_name);
 
-    let table_dir = self
-      .resolve_table_dir(db_name, table_name, username)
-      .map_err(|e| DataFusionError::Execution(format!("Failed to resolve table directory for '{}': {}", table_name, e)))?;
+    // Resolve the table directory to get the correct path for this username
+    // For group users, if the table doesn't exist in their path, resolve_table_dir will return an error
+    // In that case, we skip registration (return Ok) so the query can proceed but will return 0 rows
+    let table_dir = match self.resolve_table_dir(db_name, table_name, username) {
+      Ok(dir) => dir,
+      Err(e) => {
+        // For group users, if table doesn't exist in their path, skip registration
+        // This allows the query to proceed but will return 0 rows (correct behavior)
+        eprintln!(
+          "Table '{}' does not exist for username '{:?}': {}. Skipping registration - query will return 0 rows.",
+          table_name, username, e
+        );
+        return Ok(());
+      }
+    };
 
     // Check if table directory has any parquet files
     let has_parquet_files = std::fs::read_dir(&table_dir)
@@ -734,12 +750,27 @@ impl DatabaseManager {
       .get(db_name)
       .ok_or_else(|| format!("Database '{}' does not exist.", db_name))?;
 
-    let table = database
-      .tables
-      .get(table_name)
-      .ok_or_else(|| format!("Table '{}' does not exist in database '{}'.", table_name, db_name))?;
-
-    let base_table_path = Path::new(&table.path);
+    // For group users, we need to be more flexible - they might have tables that don't exist in metadata
+    // (e.g., `spo2` in group paths vs `spo2_readings` in default path)
+    // So we'll try to resolve the path even if the table isn't in metadata
+    let base_table_path = if let Some(table) = database.tables.get(table_name) {
+      Path::new(&table.path)
+    } else {
+      // Table doesn't exist in metadata - this is OK for group users
+      // We'll construct a path based on the default structure
+      // For None user, this will fail later when we try to use the path
+      // For group users, we'll check their group path
+      if username.is_none() {
+        return Err(format!("Table '{}' does not exist in database '{}'.", table_name, db_name).into());
+      }
+      // For group users, we'll construct a synthetic path to get the base root
+      // We need to find any table in the database to get the base structure
+      if let Some((_, any_table)) = database.tables.iter().next() {
+        Path::new(&any_table.path)
+      } else {
+        return Err(format!("Database '{}' has no tables to determine base path structure.", db_name).into());
+      }
+    };
 
     // Extract base root - go up from "data" to get the storage root (e.g., "tmp")
     // Path structure: tmp/data/zivaring/activitydetails
@@ -753,14 +784,25 @@ impl DatabaseManager {
       .ok_or_else(|| format!("Failed to get parent of base directory"))?
       .to_path_buf();
 
-    let group_path = username.map(|user| base_root.join("group").join(user).join(db_name).join(table_name));
+    // For group users, ONLY check for exact table name match
+    if let Some(user) = username {
+      let group_base = base_root.join("group").join(user).join(db_name);
+      let group_path = group_base.join(table_name);
 
-    if let Some(group_dir) = group_path {
-      if group_dir.exists() {
-        return Ok(group_dir.to_string_lossy().to_string());
+      if group_path.exists() {
+        return Ok(group_path.to_string_lossy().to_string());
       }
+
+      return Err(
+        format!(
+          "Table '{}' does not exist in group path for user '{}'. Group users should only access tables that exist in their path.",
+          table_name, user
+        )
+        .into(),
+      );
     }
 
+    // For default user (None), return the default path
     Ok(base_table_path.to_string_lossy().to_string())
   }
 

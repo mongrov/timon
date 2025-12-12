@@ -2131,25 +2131,6 @@ async fn ziva_app_queries() -> Result<(), Box<dyn std::error::Error>> {
   Ok(())
 }
 
-// Helper function to count parquet files recursively
-fn count_parquet_files(path: &str) -> usize {
-  use std::fs;
-  let mut count = 0;
-  if let Ok(entries) = fs::read_dir(path) {
-    for entry in entries {
-      if let Ok(entry) = entry {
-        let p = entry.path();
-        if p.is_file() && p.extension().map(|e| e == "parquet").unwrap_or(false) {
-          count += 1;
-        } else if p.is_dir() {
-          count += count_parquet_files(p.to_str().unwrap_or(""));
-        }
-      }
-    }
-  }
-  count
-}
-
 #[allow(dead_code)]
 async fn ziva_username_query_matching() -> Result<(), Box<dyn std::error::Error>> {
   println!("\n=== ZIVA USERNAME QUERY MATCHING COMPONENT ===");
@@ -2157,89 +2138,47 @@ async fn ziva_username_query_matching() -> Result<(), Box<dyn std::error::Error>
   const USERNAME: &str = "ahmed_test";
   let _ = init_timon(STORAGE_PATH, 43200, USERNAME).unwrap();
 
-  let query_x = r#"
-  SELECT COUNT(*) as full_counter FROM heartrate;
-  "#;
+  let query_x = "SELECT COUNT(*) as full_counter FROM spo2_readings;";
 
   const USERNAME1: &str = "rADQkoFBr4Pks9Y2H_sriram";
   const USERNAME2: &str = "7TQBn6aSe49wfnuox_roshann";
 
-  // Check expected paths and file counts
-  let path_none = "tmp/data/zivaring/heartrate";
-  let path_user1 = format!("tmp/group/{}/zivaring/heartrate", USERNAME1);
-  let path_user2 = format!("tmp/group/{}/zivaring/heartrate", USERNAME2);
-
-  println!("\n--- Expected Paths and File Counts ---");
-  println!("  None (default): {} -> {} files", path_none, count_parquet_files(path_none));
-  println!("  User1: {} -> {} files", path_user1, count_parquet_files(&path_user1));
-  println!("  User2: {} -> {} files", path_user2, count_parquet_files(&path_user2));
-
-  // Query with None
   println!("\n--- Query with None (default path) ---");
-  let start = Instant::now();
   let result_x = query("zivaring", &query_x, None, None).await?;
-  let time_none = start.elapsed();
   let count_none = result_x["json_value"]
     .as_array()
     .and_then(|arr| arr.get(0))
     .and_then(|obj| obj.get("full_counter"))
     .and_then(|v| v.as_u64())
     .unwrap_or(0);
-  println!(
-    "  Result: {} rows, Time: {:.3}s, Message: {}",
-    count_none,
-    time_none.as_secs_f64(),
-    result_x["message"]
-  );
 
-  // Query with User1
   println!("\n--- Query with User1 ({}) ---", USERNAME1);
-  let start = Instant::now();
   let result_x1 = query("zivaring", &query_x, Some(USERNAME1), None).await?;
-  let time_user1 = start.elapsed();
   let count_user1 = result_x1["json_value"]
     .as_array()
     .and_then(|arr| arr.get(0))
     .and_then(|obj| obj.get("full_counter"))
     .and_then(|v| v.as_u64())
     .unwrap_or(0);
-  println!(
-    "  Result: {} rows, Time: {:.3}s, Message: {}",
-    count_user1,
-    time_user1.as_secs_f64(),
-    result_x1["message"]
-  );
 
-  // Query with User2
   println!("\n--- Query with User2 ({}) ---", USERNAME2);
-  let start = Instant::now();
   let result_x2 = query("zivaring", &query_x, Some(USERNAME2), None).await?;
-  let time_user2 = start.elapsed();
   let count_user2 = result_x2["json_value"]
     .as_array()
     .and_then(|arr| arr.get(0))
     .and_then(|obj| obj.get("full_counter"))
     .and_then(|v| v.as_u64())
     .unwrap_or(0);
-  println!(
-    "  Result: {} rows, Time: {:.3}s, Message: {}",
-    count_user2,
-    time_user2.as_secs_f64(),
-    result_x2["message"]
-  );
 
   // Summary
   println!("\n--- Summary ---");
-  println!("  None: {} rows (expected {} files)", count_none, count_parquet_files(path_none));
-  println!("  User1: {} rows (expected {} files)", count_user1, count_parquet_files(&path_user1));
-  println!("  User2: {} rows (expected {} files)", count_user2, count_parquet_files(&path_user2));
+  println!("  None: {} rows", count_none);
+  println!("  User1: {} rows", count_user1);
+  println!("  User2: {} rows", count_user2);
 
   if count_none == count_user1 && count_user1 == count_user2 {
     println!("\n  ⚠️  WARNING: All queries returned the same count ({})!", count_none);
     println!("  ⚠️  This suggests they're all querying the SAME path (likely the default path).");
-    println!("  ⚠️  Root cause: Table registration cache doesn't account for different usernames.");
-    println!("  ⚠️  Once 'activitydetails' is registered from default path, subsequent queries");
-    println!("  ⚠️  with different usernames reuse the cached registration.");
   } else {
     println!("\n  ✅ Different counts detected - queries are using different paths correctly.");
   }
