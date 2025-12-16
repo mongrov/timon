@@ -807,15 +807,87 @@ impl DatabaseManager {
   }
 
   fn parquet_file_writer(path: &Path, schema: Schema, array: Vec<Arc<dyn Array>>) -> Result<String, Box<dyn Error>> {
-    // Create a Parquet writer
-    let file = fs::File::create(&path)?;
+    // Use a simple atomic write strategy to prevent race conditions:
+    // 1. Write complete file to .tmp (invisible to DataFusion)
+    // 2. Atomically rename .tmp to .parquet (overwrites old file if exists)
+    //
+    // Key points:
+    // - DataFusion only scans .parquet files, so .tmp is invisible
+    // - The file is COMPLETE before it becomes visible (no partial writes)
+    // - Rename is atomic on Linux/Unix, so the file never disappears
+    // - Old file handles remain valid (safe), new opens get the new file
+    // - This prevents both "corrupt footer" and "file not found" errors
+
+    let temp_path = {
+      let path_str = path.to_string_lossy();
+      Path::new(&format!("{}.tmp", path_str)).to_path_buf()
+    };
+
+    // Clean up any existing temp files from previous failed writes
+    fs::remove_file(&temp_path).ok();
+
+    // Step 1: Write to .tmp file first
+    let file = fs::File::create(&temp_path)?;
     let props = WriterProperties::builder().build();
-    let mut writer = ArrowWriter::try_new(file, Arc::new(schema.clone()), Some(props))?;
-    // Write the combined record batch to the Parquet file
-    let combined_batch = RecordBatch::try_new(Arc::new(schema), array)?;
-    writer.write(&combined_batch)?;
-    // Close the writer to ensure data is written to the file
-    writer.close()?;
+    let mut writer = match ArrowWriter::try_new(file, Arc::new(schema.clone()), Some(props)) {
+      Ok(w) => w,
+      Err(e) => {
+        fs::remove_file(&temp_path).ok();
+        return Err(Box::new(e));
+      }
+    };
+
+    let combined_batch = match RecordBatch::try_new(Arc::new(schema), array) {
+      Ok(batch) => batch,
+      Err(e) => {
+        fs::remove_file(&temp_path).ok();
+        return Err(Box::new(e));
+      }
+    };
+
+    if let Err(e) = writer.write(&combined_batch) {
+      fs::remove_file(&temp_path).ok();
+      return Err(Box::new(e));
+    }
+
+    // Close the writer - this flushes all data and writes the footer
+    if let Err(e) = writer.close() {
+      fs::remove_file(&temp_path).ok();
+      return Err(Box::new(e));
+    }
+
+    // CRITICAL: Re-open and sync the file to ensure all data is written to disk
+    // This must happen before we rename, to ensure the file is complete
+    // We re-open because ArrowWriter took ownership of the original file handle
+    if let Ok(file) = fs::OpenOptions::new().write(true).open(&temp_path) {
+      if let Err(_) = file.sync_all() {
+        fs::remove_file(&temp_path).ok();
+        return Err("Failed to sync temp file to disk".into());
+      }
+    }
+
+    // Step 2: Atomically rename .tmp to .parquet (overwriting the old file if it exists)
+    // On Linux/Unix, rename() is atomic even when overwriting:
+    // - The old file is atomically replaced with the new one
+    // - Processes that already have the old file open continue reading from their handle (safe)
+    // - New file opens get the new complete file immediately
+    // - The file never disappears, preventing "file not found" errors
+    match fs::rename(&temp_path, path) {
+      Ok(_) => {
+        // Final sync of directory to ensure rename is visible to all processes
+        if let Some(parent) = path.parent() {
+          if let Ok(dir) = fs::File::open(parent) {
+            dir.sync_all().ok();
+          }
+        }
+      }
+      Err(e) => {
+        // Clean up on error
+        fs::remove_file(&temp_path).ok();
+        return Err(Box::new(e));
+      }
+    }
+
     Ok(format!("Data was successfully written to '{}'", path.to_string_lossy()))
   }
 
