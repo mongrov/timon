@@ -635,14 +635,20 @@ impl DatabaseManager {
       return Ok(());
     }
 
-    // Create ListingOptions with partition column for Hive-style partitioning
+    // - Local users Use Hive-style partitioning, Group users use no partitioning.
     let file_format = ParquetFormat::default();
-    let listing_options = ListingOptions::new(Arc::new(file_format))
-      .with_file_extension(".parquet")
-      .with_table_partition_cols(vec![(
-        "partition_date".to_string(),
-        DataType::Utf8, // Partition values are stored as strings in directory names
-      )]);
+    let listing_options = if username.is_none() {
+      // Local users: Use partition_date=YYYY-MM-DD/data.parquet structure
+      ListingOptions::new(Arc::new(file_format))
+        .with_file_extension(".parquet")
+        .with_table_partition_cols(vec![(
+          "partition_date".to_string(),
+          DataType::Utf8, // Partition values are stored as strings in directory names
+        )])
+    } else {
+      // Group users: Files are directly in the table directory (e.g., hrv_table_2025-07-28.parquet)
+      ListingOptions::new(Arc::new(file_format)).with_file_extension(".parquet")
+    };
 
     // Create the listing table URL
     let table_url = ListingTableUrl::parse(&table_dir).map_err(|e| DataFusionError::Execution(format!("Failed to parse table URL: {}", e)))?;
