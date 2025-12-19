@@ -1739,26 +1739,6 @@ async fn test_register_table_already_registered() {
   cleanup_temp_dir(temp_dir);
 }
 
-#[tokio::test]
-async fn test_preload_tables() {
-  // Line 633: preload_tables function
-  let temp_dir = create_temp_dir();
-  let storage_path = temp_dir.to_str().unwrap();
-  let mut db_manager = DatabaseManager::new(storage_path, 30, "test_user");
-
-  db_manager.create_database("test_db").unwrap();
-  let schema = r#"{"id": {"type": "int"}, "date": {"type": "int", "datetime": true, "required": true}}"#;
-  db_manager.create_table("test_db", "test_table", schema).unwrap();
-
-  let data = r#"[{"id": 1, "date": "2023.01.01 12:00:00"}]"#;
-  db_manager.insert("test_db", "test_table", data).unwrap();
-
-  let result = db_manager.preload_tables("test_db", vec!["test_table".to_string()], None).await;
-  assert!(result.is_ok());
-
-  cleanup_temp_dir(temp_dir);
-}
-
 #[test]
 fn test_resolve_table_dir_errors() {
   // Lines 690, 695, 703: Error paths in resolve_table_dir
@@ -2051,58 +2031,6 @@ async fn test_register_table_double_check() {
   for handle in handles {
     let _ = handle.join();
   }
-
-  cleanup_temp_dir(temp_dir);
-}
-
-#[tokio::test]
-async fn test_preload_tables_metadata_error() {
-  // Line 637: Error in preload_tables when get_metadata_cached fails
-  let temp_dir = create_temp_dir();
-  let storage_path = temp_dir.to_str().unwrap();
-  let db_manager = DatabaseManager::new(storage_path, 30, "test_user");
-
-  // Corrupt metadata
-  let metadata_path = format!("{}/metadata.json", storage_path);
-  fs::write(&metadata_path, "invalid json").unwrap();
-
-  let result = db_manager.preload_tables("test_db", vec!["test_table".to_string()], None).await;
-  assert!(result.is_err());
-
-  cleanup_temp_dir(temp_dir);
-}
-
-#[tokio::test]
-async fn test_preload_tables_nonexistent_table() {
-  // Lines 650, 657: Table doesn't exist and table_exist error
-  let temp_dir = create_temp_dir();
-  let storage_path = temp_dir.to_str().unwrap();
-  let mut db_manager = DatabaseManager::new(storage_path, 30, "test_user");
-  db_manager.create_database("test_db").unwrap();
-  let schema = r#"{"id": {"type": "int"}}"#;
-  db_manager.create_table("test_db", "test_table", schema).unwrap();
-
-  // Try to preload non-existent table
-  let result = db_manager.preload_tables("test_db", vec!["nonexistent_table".to_string()], None).await;
-  assert!(result.is_ok()); // Should return empty vec, not error
-
-  cleanup_temp_dir(temp_dir);
-}
-
-#[tokio::test]
-async fn test_preload_tables_registration_error() {
-  // Lines 672-674: Error handling in preload_tables registration
-  let temp_dir = create_temp_dir();
-  let storage_path = temp_dir.to_str().unwrap();
-  let mut db_manager = DatabaseManager::new(storage_path, 30, "test_user");
-  db_manager.create_database("test_db").unwrap();
-  // Create table without datetime to make registration fail
-  let schema = r#"{"id": {"type": "int"}}"#;
-  db_manager.create_table("test_db", "test_table", schema).unwrap();
-
-  // Try to preload - will fail registration but should handle gracefully
-  let result = db_manager.preload_tables("test_db", vec!["test_table".to_string()], None).await;
-  let _ = result;
 
   cleanup_temp_dir(temp_dir);
 }

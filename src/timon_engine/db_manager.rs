@@ -695,57 +695,6 @@ impl DatabaseManager {
     Ok(())
   }
 
-  /// Pre-load specific tables into the DataFusion session context
-  /// This method allows pre-warming tables at app startup to eliminate first-query latency
-  pub async fn preload_tables(&self, db_name: &str, table_names: Vec<String>, username: Option<&str>) -> DataFusionResult<Vec<String>> {
-    // Load metadata to validate tables exist
-    let metadata = self
-      .get_metadata_cached()
-      .map_err(|e| DataFusionError::Execution(format!("Failed to read metadata: {}", e)))?;
-
-    // Validate that the database exists
-    let database = metadata
-      .databases
-      .get(db_name)
-      .ok_or_else(|| DataFusionError::Plan(format!("Database '{}' does not exist", db_name)))?;
-
-    // Filter tables that exist and are not already registered
-    let mut tables_to_register = Vec::new();
-    for table_name in &table_names {
-      // Check if table exists in metadata
-      if !database.tables.contains_key(table_name) {
-        eprintln!("Warning: Table '{}' does not exist in database '{}', skipping", table_name, db_name);
-        continue;
-      }
-
-      // Check if table is already registered
-      let already_registered = match self.session_context.table_exist(table_name) {
-        Ok(exists) => exists,
-        Err(_) => false,
-      };
-
-      if !already_registered {
-        tables_to_register.push(table_name.clone());
-      }
-    }
-
-    // Register tables sequentially to avoid race conditions
-    let mut successfully_registered = Vec::new();
-    let mut errors = Vec::new();
-
-    for table_name in &tables_to_register {
-      match self.register_single_table(db_name, &table_name, username).await {
-        Ok(_) => successfully_registered.push(table_name.clone()),
-        Err(e) => {
-          eprintln!("Table registration error for '{}': {}", table_name, e);
-          errors.push(e);
-        }
-      }
-    }
-
-    Ok(successfully_registered)
-  }
-
   // Resolve the effective directory path for a logical table, preferring group/user path when provided
   fn resolve_table_dir(&self, db_name: &str, table_name: &str, username: Option<&str>) -> Result<String, Box<dyn Error>> {
     // Reload metadata to ensure it's up-to-date

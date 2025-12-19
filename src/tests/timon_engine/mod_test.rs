@@ -1,6 +1,6 @@
 use crate::timon_engine::{
   cloud_fetch_parquet, cloud_fetch_parquet_batch, cloud_sink_parquet, cloud_sync_parquet, create_database, create_table, delete_database,
-  delete_table, init_bucket, init_timon, insert, list_databases, list_tables, preload_tables, query, query_df,
+  delete_table, init_bucket, init_timon, insert, list_databases, list_tables, query, query_df,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -1334,47 +1334,6 @@ async fn test_cloud_fetch_parquet_success_path_lines459_472() {
 }
 
 // Additional tests to cover specific uncovered lines
-
-#[tokio::test]
-async fn test_preload_tables_line307() {
-  // Test line 307: preload_tables function
-  let (_temp_dir, _db_root) = setup_temp();
-
-  let _ = create_database("preload_db");
-  let schema = r#"{"fields": [{"name": "id", "type": "int"}]}"#;
-  let _ = create_table("preload_db", "table1", schema);
-  let _ = create_table("preload_db", "table2", schema);
-
-  // Insert some data
-  let _ = insert("preload_db", "table1", r#"[{"id": 1}]"#);
-  let _ = insert("preload_db", "table2", r#"[{"id": 2}]"#);
-
-  tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-  // Test preload_tables - line 307
-  let result = preload_tables("preload_db", vec!["table1".to_string(), "table2".to_string()], Some("test_user")).await;
-  assert!(result.is_ok() || result.is_err()); // May succeed or fail depending on table state
-}
-
-#[tokio::test]
-async fn test_preload_tables_error_path_lines319_326() {
-  // Test lines 319-320, 322-323, 326: Error path in preload_tables
-  let (_temp_dir, _db_root) = setup_temp();
-
-  // Test with non-existent database to trigger error path
-  let result = preload_tables("nonexistent_db", vec!["table1".to_string()], Some("test_user")).await;
-  // Should return an error, hitting lines 319-320, 322-323, 326
-  if result.is_err() {
-    // Error path was hit
-    let _ = result.unwrap_err();
-  } else {
-    // If it doesn't fail, try with non-existent table
-    let _ = create_database("preload_error_db");
-    let result2 = preload_tables("preload_error_db", vec!["nonexistent_table".to_string()], Some("test_user")).await;
-    // May still succeed or fail, but we tried to trigger the error
-    let _ = result2;
-  }
-}
 
 #[test]
 fn test_list_databases_error_path_lines158_165() {
