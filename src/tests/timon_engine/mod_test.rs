@@ -1,7 +1,6 @@
 use crate::timon_engine::{
   cloud_fetch_parquet, cloud_fetch_parquet_batch, cloud_sink_parquet, cloud_sync_parquet, create_database, create_table, delete_database,
-  delete_table, get_all_sync_metadata, get_sync_metadata, init_bucket, init_timon, insert, list_databases, list_tables, preload_tables, query,
-  query_df,
+  delete_table, init_bucket, init_timon, insert, list_databases, list_tables, preload_tables, query, query_df,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -352,13 +351,6 @@ fn test_sync_metadata_comprehensive() {
   let _ = create_database("test_db");
   let schema = r#"{"fields": [{"name": "id", "type": "int"}]}"#;
   let _ = create_table("test_db", "test_table", schema);
-
-  // Test sync metadata operations
-  let result = get_sync_metadata("test_db", "test_table");
-  assert!(result.is_ok() || result.is_err());
-
-  let result = get_all_sync_metadata("test_db");
-  assert!(result.is_ok() || result.is_err());
 }
 
 #[tokio::test]
@@ -689,25 +681,6 @@ fn test_serde_serialization_errors() {
   assert!(result.is_ok() || result.is_err());
 }
 
-#[tokio::test]
-async fn test_sync_metadata_error_scenarios() {
-  let (_temp_dir, _db_root) = setup_temp();
-
-  // Test sync metadata with non-existent database/table
-  let result = get_sync_metadata("nonexistent_db", "nonexistent_table");
-  assert!(result.is_ok() || result.is_err());
-
-  let result = get_all_sync_metadata("nonexistent_db");
-  assert!(result.is_ok() || result.is_err());
-
-  // Test with empty parameters
-  let result = get_sync_metadata("", "");
-  assert!(result.is_ok() || result.is_err());
-
-  let result = get_all_sync_metadata("");
-  assert!(result.is_ok() || result.is_err());
-}
-
 #[test]
 fn test_lock_failure_scenarios() {
   // These tests simulate potential lock contention scenarios
@@ -964,10 +937,6 @@ async fn test_final_comprehensive_coverage() {
   // cloud_fetch_parquet may fail due to invalid URL or missing S3 configuration
   let _ = cloud_fetch_parquet("test_user", "final_db", "final_table", date_range).await;
 
-  // Test sync metadata
-  let _ = get_sync_metadata("final_db", "final_table");
-  let _ = get_all_sync_metadata("final_db");
-
   // Skip cleanup to avoid metadata reload issues
   // let _ = delete_table("final_db", "final_table");
   // let _ = delete_database("final_db");
@@ -1070,24 +1039,6 @@ async fn test_cloud_fetch_parquet_missing_dates() {
 }
 
 #[test]
-fn test_get_sync_metadata_error_paths() {
-  let (_temp_dir, _db_root) = setup_temp();
-
-  // Test error paths in get_sync_metadata (lines 492-493, 495)
-  let result = get_sync_metadata("nonexistent_db", "nonexistent_table");
-  assert!(result.is_ok() || result.is_err());
-}
-
-#[test]
-fn test_get_all_sync_metadata_error_paths() {
-  let (_temp_dir, _db_root) = setup_temp();
-
-  // Test error paths in get_all_sync_metadata
-  let result = get_all_sync_metadata("nonexistent_db");
-  assert!(result.is_ok() || result.is_err());
-}
-
-#[test]
 fn test_lock_acquisition_errors() {
   // Test lock acquisition error paths (lines 40-42, 53-55, 68, 75)
   // These are hard to test directly, but we can verify the error types exist
@@ -1140,7 +1091,6 @@ fn test_delete_database_success_path() {
 // Lines 247, 250-251, 253: Success path in insert (status 200, return data)
 // Lines 271-272, 275-276, 278, 280: Success path in query (return data)
 // Lines 297-298: Success path in query_df
-// Lines 489, 492-493, 495: Success path in get_sync_metadata
 
 #[tokio::test]
 async fn test_insert_success_path_lines247_253() {
@@ -1243,77 +1193,6 @@ async fn test_query_df_success_path_lines297_298() {
     // May still fail, but we test that the code path exists
     let _ = result2;
   }
-}
-
-#[tokio::test]
-async fn test_get_sync_metadata_success_path_lines489_495() {
-  // Test lines 489, 492-493, 495: Success path in get_sync_metadata
-  // Use a unique database name to avoid conflicts with other tests
-  use std::time::{SystemTime, UNIX_EPOCH};
-  let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-  let db_name = format!("sync_meta_db_{}", timestamp);
-
-  let (_temp_dir, db_root) = setup_temp();
-
-  // Re-initialize to ensure we're using the correct database manager for this test's storage path
-  // This is important when running the full test suite where managers might be shared
-  // Also initialize with "default" so get_database_manager(None) will find it
-  let init_result = init_timon(&db_root, 30, "test_user");
-  assert!(init_result.is_ok(), "init_timon failed: {:?}", init_result);
-  // Also store as "default" so get_database_manager(None) finds the correct manager
-  let init_default_result = init_timon(&db_root, 30, "default");
-  assert!(init_default_result.is_ok(), "init_timon for default failed: {:?}", init_default_result);
-
-  // Ensure database creation succeeds
-  let db_result = create_database(&db_name);
-  assert!(db_result.is_ok(), "create_database failed: {:?}", db_result);
-
-  let schema = r#"{"datetime": {"type": "string", "datetime": true}, "value": {"type": "int"}}"#;
-  let table_result = create_table(&db_name, "test_table", schema);
-  assert!(table_result.is_ok(), "create_table failed: {:?}", table_result);
-
-  // Insert some data to create sync metadata
-  let insert_result = insert(&db_name, "test_table", r#"[{"datetime": "2023-01-01 10:00:00", "value": 1}]"#);
-  assert!(insert_result.is_ok(), "insert failed: {:?}", insert_result);
-
-  // Wait for insert to complete and metadata to be written to disk
-  // When running full test suite, operations may take longer due to shared state
-  tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
-
-  // Retry logic to handle potential timing issues with metadata file writes
-  // The issue is that get_database_manager(None) might return a manager from a different test
-  // when running the full test suite. We re-initialize before each retry to ensure we use
-  // the correct manager for this test's storage path
-  let mut result = get_sync_metadata(&db_name, "test_table");
-  let mut retries = 0;
-  const MAX_RETRIES: u32 = 25;
-  while retries < MAX_RETRIES {
-    match &result {
-      Ok(value) => {
-        if let Some(status) = value.get("status").and_then(|s| s.as_u64()) {
-          if status == 200 {
-            break;
-          }
-        }
-      }
-      Err(_) => {}
-    }
-    // Re-initialize before retrying to ensure we're using the correct manager
-    // This is critical when running the full test suite where managers might be shared
-    // Store both as "test_user" and "default" so get_database_manager(None) finds it
-    let _ = init_timon(&db_root, 30, "test_user");
-    let _ = init_timon(&db_root, 30, "default");
-    tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
-    result = get_sync_metadata(&db_name, "test_table");
-    retries += 1;
-  }
-
-  assert!(result.is_ok(), "get_sync_metadata failed after {} retries: {:?}", retries, result);
-
-  let value = result.unwrap();
-  let status = value.get("status").unwrap().as_u64().unwrap();
-  assert_eq!(status, 200, "Expected status 200, got {}. Value: {:?}", status, value);
-  assert!(value.get("json_value").is_some());
 }
 
 // Additional tests for remaining uncovered lines in mod.rs

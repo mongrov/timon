@@ -743,27 +743,6 @@ async fn test_complex_query_scenarios() {
 }
 
 #[test]
-fn test_sync_metadata_error_scenarios() {
-  let temp_dir = TempDir::new().unwrap();
-  let db_root = temp_dir.path().to_str().unwrap().to_string();
-  let mut db_manager = DatabaseManager::new(&db_root, 30, "test_user");
-
-  // Test sync metadata with non-existent database
-  let result = db_manager.get_sync_metadata("nonexistent_db", "test_table");
-  assert!(result.is_err());
-
-  let result = db_manager.get_all_sync_metadata("nonexistent_db");
-  assert!(result.is_err());
-
-  // Test update sync metadata with non-existent database/table
-  let result = db_manager.update_sync_metadata("nonexistent_db", "test_table", "sync");
-  assert!(result.is_err());
-
-  let result = db_manager.update_sync_metadata("test_db", "nonexistent_table", "sync");
-  assert!(result.is_err());
-}
-
-#[test]
 fn test_parquet_file_operations_error_scenarios() {
   let temp_dir = TempDir::new().unwrap();
   let db_root = temp_dir.path().to_str().unwrap().to_string();
@@ -1277,17 +1256,6 @@ fn test_metadata_operations_comprehensive() {
   let _ = db_manager.create_database("metadata_db");
   let schema = r#"{"fields": [{"name": "id", "type": "int"}, {"name": "data", "type": "string"}]}"#;
   let _ = db_manager.create_table("metadata_db", "metadata_table", schema);
-
-  // Test metadata operations
-  let _ = db_manager.update_sync_metadata("metadata_db", "metadata_table", "sync");
-  let _ = db_manager.update_sync_metadata("metadata_db", "metadata_table", "sink");
-  let _ = db_manager.update_sync_metadata("metadata_db", "metadata_table", "fetch");
-
-  let sync_metadata = db_manager.get_sync_metadata("metadata_db", "metadata_table");
-  assert!(sync_metadata.is_ok() || sync_metadata.is_err());
-
-  let all_sync_metadata = db_manager.get_all_sync_metadata("metadata_db");
-  assert!(all_sync_metadata.is_ok() || all_sync_metadata.is_err());
 }
 
 #[test]
@@ -1949,64 +1917,6 @@ fn test_update_metadata_lock_retry() {
   // This should handle lock retry
   let result = db_manager.update_metadata(storage_path);
   let _ = result;
-
-  cleanup_temp_dir(temp_dir);
-}
-
-#[test]
-fn test_update_sync_metadata_paths() {
-  // Lines 1088-1089, 1092-1093, 1097-1099, 1102-1103, 1108-1109: update_sync_metadata
-  let temp_dir = create_temp_dir();
-  let storage_path = temp_dir.to_str().unwrap();
-  let mut db_manager = DatabaseManager::new(storage_path, 30, "test_user");
-
-  db_manager.create_database("test_db").unwrap();
-  let schema = r#"{"id": {"type": "int"}}"#;
-  db_manager.create_table("test_db", "test_table", schema).unwrap();
-
-  // Test different sync types
-  db_manager.update_sync_metadata("test_db", "test_table", "sync").unwrap();
-  db_manager.update_sync_metadata("test_db", "test_table", "sink").unwrap();
-  db_manager.update_sync_metadata("test_db", "test_table", "fetch").unwrap();
-  db_manager.update_sync_metadata("test_db", "test_table", "other").unwrap();
-
-  cleanup_temp_dir(temp_dir);
-}
-
-#[test]
-fn test_get_sync_metadata() {
-  // Lines 1125, 1134: get_sync_metadata paths
-  let temp_dir = create_temp_dir();
-  let storage_path = temp_dir.to_str().unwrap();
-  let mut db_manager = DatabaseManager::new(storage_path, 30, "test_user");
-
-  db_manager.create_database("test_db").unwrap();
-  let schema = r#"{"id": {"type": "int"}}"#;
-  db_manager.create_table("test_db", "test_table", schema).unwrap();
-
-  let result = db_manager.get_sync_metadata("test_db", "test_table");
-  assert!(result.is_ok());
-
-  let result = db_manager.get_sync_metadata("nonexistent_db", "test_table");
-  assert!(result.is_err());
-
-  cleanup_temp_dir(temp_dir);
-}
-
-#[test]
-fn test_get_all_sync_metadata() {
-  // Line 1152: get_all_sync_metadata iteration
-  let temp_dir = create_temp_dir();
-  let storage_path = temp_dir.to_str().unwrap();
-  let mut db_manager = DatabaseManager::new(storage_path, 30, "test_user");
-
-  db_manager.create_database("test_db").unwrap();
-  let schema = r#"{"id": {"type": "int"}}"#;
-  db_manager.create_table("test_db", "test_table1", schema).unwrap();
-  db_manager.create_table("test_db", "test_table2", schema).unwrap();
-
-  let result = db_manager.get_all_sync_metadata("test_db");
-  assert!(result.is_ok());
 
   cleanup_temp_dir(temp_dir);
 }

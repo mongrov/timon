@@ -360,8 +360,6 @@ pub async fn preload_tables(db_name: &str, table_names: Vec<String>, username: O
 * @ cloud_sink_parquet(db_name, table_name, date_range)
 * @ cloud_fetch_parquet(username, db_name, table_name, date_range)
 * @ cloud_fetch_parquet_batch(usernames, db_names, table_names, date_range)
-* @ get_sync_metadata(db_name, table_name)
-* @ get_all_sync_metadata(db_name)
  */
 
 #[allow(dead_code)]
@@ -402,15 +400,9 @@ pub fn init_bucket(
 #[allow(dead_code)]
 pub async fn cloud_sync_parquet(db_name: &str, table_name: &str, date_range: HashMap<&str, &str>, username: Option<&str>) -> Result<Value, String> {
   let cloud_storage_manager = get_cloud_storage_manager().map_err(|e| e.to_string())?;
-  let mut database_manager = get_database_manager(None).map_err(|e| e.to_string())?;
 
   match cloud_storage_manager.cloud_sync_parquet(db_name, table_name, &date_range, username).await {
     Ok(_) => {
-      // Update sync metadata on successful sync
-      if let Err(e) = database_manager.update_sync_metadata(db_name, table_name, "sync") {
-        eprintln!("Warning: Failed to update sync metadata: {}", e);
-      }
-
       let result = TimonResult {
         status: 200,
         message: format!(
@@ -447,12 +439,6 @@ pub async fn cloud_sink_parquet(db_name: &str, table_name: &str) -> Result<Value
 
   match cloud_storage_manager.cloud_sink_parquet(db_name, table_name).await {
     Ok(_) => {
-      // Update sync metadata on successful sink
-      let mut database_manager = get_database_manager(None).map_err(|e| e.to_string())?;
-      if let Err(e) = database_manager.update_sync_metadata(db_name, table_name, "sink") {
-        eprintln!("Warning: Failed to update sync metadata: {}", e);
-      }
-
       let result = TimonResult {
         status: 200,
         message: format!(
@@ -482,12 +468,6 @@ pub async fn cloud_fetch_parquet(username: &str, db_name: &str, table_name: &str
     .await
   {
     Ok(_) => {
-      // Update sync metadata on successful fetch
-      let mut database_manager = get_database_manager(None).map_err(|e| e.to_string())?;
-      if let Err(e) = database_manager.update_sync_metadata(db_name, table_name, "fetch") {
-        eprintln!("Warning: Failed to update sync metadata: {}", e);
-      }
-
       let result = TimonResult {
         status: 200,
         message: format!(
@@ -558,11 +538,6 @@ pub async fn cloud_fetch_parquet_batch(
     match result {
       Ok(_) => {
         success_count += 1;
-        // Update sync metadata on successful fetch
-        let mut database_manager = get_database_manager(None).map_err(|e| e.to_string())?;
-        if let Err(e) = database_manager.update_sync_metadata(&db_name, &table_name, "fetch") {
-          eprintln!("Warning: Failed to update sync metadata for {}.{}: {}", db_name, table_name, e);
-        }
       }
       Err(e) => {
         error_count += 1;
@@ -592,52 +567,4 @@ pub async fn cloud_fetch_parquet_batch(
     })),
   };
   serde_json::to_value(&result).map_err(|e| e.to_string())
-}
-
-#[allow(dead_code)]
-pub fn get_sync_metadata(db_name: &str, table_name: &str) -> Result<Value, String> {
-  let database_manager = get_database_manager(None).map_err(|e| e.to_string())?;
-  match database_manager.get_sync_metadata(db_name, table_name) {
-    Ok(sync_info) => {
-      let result = TimonResult {
-        status: 200,
-        message: format!("Successfully retrieved sync metadata for '{}.{}'", db_name, table_name),
-        json_value: Some(sync_info),
-      };
-      serde_json::to_value(&result).map_err(|e| e.to_string())
-    }
-    Err(err) => {
-      let timon_error: TimonError = err.into();
-      let result = TimonResult {
-        status: timon_error.status_code(),
-        message: timon_error.to_string(),
-        json_value: None,
-      };
-      serde_json::to_value(&result).map_err(|e| e.to_string())
-    }
-  }
-}
-
-#[allow(dead_code)]
-pub fn get_all_sync_metadata(db_name: &str) -> Result<Value, String> {
-  let database_manager = get_database_manager(None).map_err(|e| e.to_string())?;
-  match database_manager.get_all_sync_metadata(db_name) {
-    Ok(sync_info) => {
-      let result = TimonResult {
-        status: 200,
-        message: format!("Successfully retrieved sync metadata for all tables in '{}'", db_name),
-        json_value: Some(sync_info),
-      };
-      serde_json::to_value(&result).map_err(|e| e.to_string())
-    }
-    Err(err) => {
-      let timon_error: TimonError = err.into();
-      let result = TimonResult {
-        status: timon_error.status_code(),
-        message: timon_error.to_string(),
-        json_value: None,
-      };
-      serde_json::to_value(&result).map_err(|e| e.to_string())
-    }
-  }
 }
