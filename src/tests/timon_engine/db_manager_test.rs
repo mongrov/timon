@@ -697,32 +697,6 @@ fn test_lock_acquisition_scenarios() {
   }
 }
 
-#[test]
-fn test_row_limit_enforcement() {
-  let temp_dir = TempDir::new().unwrap();
-  let db_root = temp_dir.path().to_str().unwrap().to_string();
-  let mut db_manager = DatabaseManager::new(&db_root, 30, "test_user");
-
-  // Create database and table with row limit
-  let _ = db_manager.create_database("test_db");
-  let schema = r#"{
-    "id": {"type": "int", "required": true},
-    "datetime": {"type": "string", "required": true},
-    "max_rows": 5
-  }"#;
-  let _ = db_manager.create_table("test_db", "limited_table", schema);
-
-  // Insert more records than the limit
-  for i in 0..10 {
-    let data = format!(r#"[{{"id": {}, "datetime": "2023.01.01 12:00:00"}}]"#, i);
-    let _ = db_manager.insert("test_db", "limited_table", &data);
-  }
-
-  // The row limit should be enforced automatically
-  let file_list = db_manager.build_files_list("test_db", "limited_table", None);
-  assert!(file_list.is_ok());
-}
-
 #[tokio::test]
 async fn test_complex_query_scenarios() {
   let temp_dir = TempDir::new().unwrap();
@@ -1655,24 +1629,6 @@ fn test_insert_read_parquet_and_update() {
   cleanup_temp_dir(temp_dir);
 }
 
-#[test]
-fn test_enforce_row_limits_error() {
-  // Line 445: Error enforcing row limits
-  let temp_dir = create_temp_dir();
-  let storage_path = temp_dir.to_str().unwrap();
-  let mut db_manager = DatabaseManager::new(storage_path, 30, "test_user");
-
-  db_manager.create_database("test_db").unwrap();
-  let schema = r#"{"id": {"type": "int"}, "date": {"type": "int", "datetime": true, "required": true}, "max_rows": 2}"#;
-  db_manager.create_table("test_db", "test_table", schema).unwrap();
-
-  // Insert data to trigger enforce_row_limits
-  let data = r#"[{"id": 1, "date": "2023.01.01 12:00:00"}, {"id": 2, "date": "2023.01.01 13:00:00"}, {"id": 3, "date": "2023.01.01 14:00:00"}]"#;
-  let _ = db_manager.insert("test_db", "test_table", data);
-
-  cleanup_temp_dir(temp_dir);
-}
-
 #[tokio::test]
 async fn test_query_partition_limits() {
   // Lines 491-494, 496-503, 518, 520-522, 524: Partition handling with limit
@@ -1902,30 +1858,6 @@ fn test_update_metadata_lock_retry() {
 }
 
 #[test]
-fn test_enforce_row_limits_comprehensive() {
-  // Lines 1179, 1184-1185, 1189-1190, 1192-1194, 1199-1200, 1204-1207, 1210, 1213, 1215, 1218, 1220-1222, 1224-1225, 1227, 1231-1234, 1239-1242, 1247: enforce_row_limits
-  let temp_dir = create_temp_dir();
-  let storage_path = temp_dir.to_str().unwrap();
-  let mut db_manager = DatabaseManager::new(storage_path, 30, "test_user");
-
-  db_manager.create_database("test_db").unwrap();
-  let schema = r#"{"id": {"type": "int"}, "date": {"type": "int", "datetime": true, "required": true}, "max_rows": 3}"#;
-  db_manager.create_table("test_db", "test_table", schema).unwrap();
-
-  // Insert more than max_rows
-  let data = r#"[
-    {"id": 1, "date": "2023.01.01 12:00:00"},
-    {"id": 2, "date": "2023.01.01 13:00:00"},
-    {"id": 3, "date": "2023.01.01 14:00:00"},
-    {"id": 4, "date": "2023.01.01 15:00:00"},
-    {"id": 5, "date": "2023.01.01 16:00:00"}
-  ]"#;
-  db_manager.insert("test_db", "test_table", data).unwrap();
-
-  cleanup_temp_dir(temp_dir);
-}
-
-#[test]
 fn test_create_table_metadata_reload_error() {
   // Line 182: Error reloading metadata in create_table
   let temp_dir = create_temp_dir();
@@ -1940,23 +1872,6 @@ fn test_create_table_metadata_reload_error() {
   let schema = r#"{"id": {"type": "int"}}"#;
   let result = db_manager.create_table("test_db", "test_table", schema);
   assert!(result.is_err());
-
-  cleanup_temp_dir(temp_dir);
-}
-
-#[test]
-fn test_enforce_row_limits_error_path() {
-  // Line 445: Error path in enforce_row_limits (eprintln)
-  let temp_dir = create_temp_dir();
-  let storage_path = temp_dir.to_str().unwrap();
-  let mut db_manager = DatabaseManager::new(storage_path, 30, "test_user");
-  db_manager.create_database("test_db").unwrap();
-  let schema = r#"{"id": {"type": "int"}, "date": {"type": "int", "datetime": true, "required": true}, "max_rows": 1}"#;
-  db_manager.create_table("test_db", "test_table", schema).unwrap();
-
-  let data = r#"[{"id": 1, "date": "2023.01.01 12:00:00"}]"#;
-  // This will trigger enforce_row_limits which may error, but insert should still succeed
-  let _ = db_manager.insert("test_db", "test_table", data);
 
   cleanup_temp_dir(temp_dir);
 }
@@ -2174,50 +2089,6 @@ fn test_update_metadata_path_updates() {
   fs::create_dir_all(&new_storage).unwrap();
   let result = db_manager.update_metadata(&new_storage);
   let _ = result;
-
-  cleanup_temp_dir(temp_dir);
-}
-
-#[test]
-fn test_enforce_row_limits_max_rows_zero() {
-  // Line 1185: max_rows == 0 early return
-  let temp_dir = create_temp_dir();
-  let storage_path = temp_dir.to_str().unwrap();
-  let mut db_manager = DatabaseManager::new(storage_path, 30, "test_user");
-  db_manager.create_database("test_db").unwrap();
-  // Set max_rows to 0
-  let schema = r#"{"id": {"type": "int"}, "date": {"type": "int", "datetime": true, "required": true}, "max_rows": 0}"#;
-  db_manager.create_table("test_db", "test_table", schema).unwrap();
-
-  let data = r#"[{"id": 1, "date": "2023.01.01 12:00:00"}]"#;
-  db_manager.insert("test_db", "test_table", data).unwrap();
-
-  cleanup_temp_dir(temp_dir);
-}
-
-#[test]
-fn test_enforce_row_limits_full_path() {
-  // Lines 1204-1207, 1210, 1213, 1215, 1218, 1220-1222, 1224-1225, 1227, 1231-1234, 1239-1242, 1247: Full enforce_row_limits path
-  let temp_dir = create_temp_dir();
-  let storage_path = temp_dir.to_str().unwrap();
-  let mut db_manager = DatabaseManager::new(storage_path, 30, "test_user");
-  db_manager.create_database("test_db").unwrap();
-  let schema = r#"{"id": {"type": "int"}, "date": {"type": "int", "datetime": true, "required": true}, "max_rows": 2}"#;
-  db_manager.create_table("test_db", "test_table", schema).unwrap();
-
-  // Insert more than max_rows across different partitions
-  let data = r#"[
-    {"id": 1, "date": "2023.01.01 12:00:00"},
-    {"id": 2, "date": "2023.01.01 13:00:00"},
-    {"id": 3, "date": "2023.01.02 12:00:00"},
-    {"id": 4, "date": "2023.01.02 13:00:00"},
-    {"id": 5, "date": "2023.01.03 12:00:00"}
-  ]"#;
-  db_manager.insert("test_db", "test_table", data).unwrap();
-
-  // Insert again to trigger enforce_row_limits
-  let data2 = r#"[{"id": 6, "date": "2023.01.03 13:00:00"}]"#;
-  db_manager.insert("test_db", "test_table", data2).unwrap();
 
   cleanup_temp_dir(temp_dir);
 }

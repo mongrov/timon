@@ -217,7 +217,6 @@ fn main() {
     // let _ = test_ziva_join_query().await;
     // let _ = insert_ziva_data_six_months().await;
     // let _ = test_ziva_range_selction_query().await;
-    // let _ = test_max_rows().await;
     // let _ = test_partition_limit().await;
     // let _ = test_sleep_queries().await;
     // let _ = test_hrv_queries().await;
@@ -720,64 +719,6 @@ async fn test_ziva_range_selction_query() -> Result<(), Box<dyn std::error::Erro
   const QUERY_2: &str = "SELECT COUNT(*) AS total FROM activitydetails WHERE partition_date BETWEEN '2025-08-27' AND '2025-09-20'";
   let result = query(DATABASE_NAME, QUERY_2, None, None).await?;
   println!("Range Selction Result: {} status: {}", result["json_value"], result["status"]);
-
-  Ok(())
-}
-
-#[allow(dead_code)]
-async fn test_max_rows() -> Result<(), Box<dyn std::error::Error>> {
-  const STORAGE_PATH: &str = "tmp";
-  const USERNAME: &str = "ahmed_test";
-  let _ = init_timon(STORAGE_PATH, 43200, USERNAME).unwrap();
-
-  const DATABASE_NAME: &str = "test_maxrows";
-  let database_result = create_database(DATABASE_NAME);
-  println!("create_database -> {}", database_result.unwrap());
-
-  let battery_readings_schema = r#"
-    {
-      "date": {
-        "type": "int",
-        "required": true,
-        "unique": true,
-        "datetime": true
-      },
-      "battery_level": {
-        "type": "int"
-      },
-      "max_rows": 10
-    }
-  "#;
-
-  let battery_table_result = create_table(DATABASE_NAME, "battery_readings", &battery_readings_schema);
-  println!("Create battery_readings table -> {}", battery_table_result.unwrap());
-
-  let battery_readings_json = r#"
-    [
-      {"date": "2025-01-01 03:04:00", "battery_level": 75},
-      {"date": "2025-01-01 03:05:00", "battery_level": 76},
-      {"date": "2025-01-01 03:06:00", "battery_level": 77},
-      {"date": "2025-01-01 03:07:00", "battery_level": 79},
-      {"date": "2025-01-01 03:08:00", "battery_level": 80},
-      {"date": "2025-01-01 03:09:00", "battery_level": 80},
-      {"date": "2025-01-01 04:00:00", "battery_level": 100}
-    ]
-  "#;
-
-  let battery_readings_result = insert(DATABASE_NAME, "battery_readings", &battery_readings_json);
-  println!("Insert battery_readings -> {}", battery_readings_result.unwrap());
-
-  let sql_query = format!(r#"SELECT battery_level FROM battery_readings ORDER BY date ASC"#);
-  let query_result = query(DATABASE_NAME, &sql_query, None, None).await;
-  println!("query_result: {}", query_result.unwrap()["json_value"]);
-
-  let sql_query = format!(r#"SELECT COUNT(*) as total FROM battery_readings"#);
-  let query_result = query(DATABASE_NAME, &sql_query, None, None).await;
-  println!("query_result count: {}", query_result.unwrap()["json_value"]);
-
-  let sql_query = format!(r#"SELECT MIN(battery_level) as min_battery, MAX(battery_level) as max_battery FROM battery_readings"#);
-  let query_result = query(DATABASE_NAME, &sql_query, None, None).await;
-  println!("query_result: {}", query_result.unwrap()["json_value"]);
 
   Ok(())
 }
