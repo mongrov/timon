@@ -21,7 +21,7 @@ bash coverage.sh
 Or if you have execute permissions:
 
 ```bash
-./coverage.sh
+./scripts/coverage.sh
 ```
 
 ### Why use `coverage.sh`?

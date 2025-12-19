@@ -2193,7 +2193,14 @@ async fn check_ziva_fecth_time() -> Result<(), Box<dyn std::error::Error>> {
   const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
   let _ = init_timon(STORAGE_PATH, 43200, USERNAME).unwrap();
-  init_bucket("https://s3.us-west-2.amazonaws.com", "zivaoneapp", "xxx", "xxx", "us-west-2").unwrap();
+  init_bucket(
+    "https://s3.us-west-2.amazonaws.com",
+    "zivaoneapp",
+    "xxxxxxxxxx",
+    "xxxxxxxxxx",
+    "us-west-2",
+  )
+  .unwrap();
 
   let start_time = Instant::now();
 

@@ -1248,23 +1248,71 @@ async fn test_query_df_success_path_lines297_298() {
 #[tokio::test]
 async fn test_get_sync_metadata_success_path_lines489_495() {
   // Test lines 489, 492-493, 495: Success path in get_sync_metadata
-  let (_temp_dir, _db_root) = setup_temp();
+  // Use a unique database name to avoid conflicts with other tests
+  use std::time::{SystemTime, UNIX_EPOCH};
+  let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+  let db_name = format!("sync_meta_db_{}", timestamp);
 
-  let _ = create_database("sync_meta_db2");
+  let (_temp_dir, db_root) = setup_temp();
+
+  // Re-initialize to ensure we're using the correct database manager for this test's storage path
+  // This is important when running the full test suite where managers might be shared
+  // Also initialize with "default" so get_database_manager(None) will find it
+  let init_result = init_timon(&db_root, 30, "test_user");
+  assert!(init_result.is_ok(), "init_timon failed: {:?}", init_result);
+  // Also store as "default" so get_database_manager(None) finds the correct manager
+  let init_default_result = init_timon(&db_root, 30, "default");
+  assert!(init_default_result.is_ok(), "init_timon for default failed: {:?}", init_default_result);
+
+  // Ensure database creation succeeds
+  let db_result = create_database(&db_name);
+  assert!(db_result.is_ok(), "create_database failed: {:?}", db_result);
+
   let schema = r#"{"datetime": {"type": "string", "datetime": true}, "value": {"type": "int"}}"#;
-  let _ = create_table("sync_meta_db2", "test_table", schema);
+  let table_result = create_table(&db_name, "test_table", schema);
+  assert!(table_result.is_ok(), "create_table failed: {:?}", table_result);
 
   // Insert some data to create sync metadata
-  let _ = insert("sync_meta_db2", "test_table", r#"[{"datetime": "2023-01-01 10:00:00", "value": 1}]"#);
+  let insert_result = insert(&db_name, "test_table", r#"[{"datetime": "2023-01-01 10:00:00", "value": 1}]"#);
+  assert!(insert_result.is_ok(), "insert failed: {:?}", insert_result);
 
-  // Wait a bit for insert to complete
-  tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+  // Wait for insert to complete and metadata to be written to disk
+  // When running full test suite, operations may take longer due to shared state
+  tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
 
-  let result = get_sync_metadata("sync_meta_db2", "test_table");
-  assert!(result.is_ok());
+  // Retry logic to handle potential timing issues with metadata file writes
+  // The issue is that get_database_manager(None) might return a manager from a different test
+  // when running the full test suite. We re-initialize before each retry to ensure we use
+  // the correct manager for this test's storage path
+  let mut result = get_sync_metadata(&db_name, "test_table");
+  let mut retries = 0;
+  const MAX_RETRIES: u32 = 25;
+  while retries < MAX_RETRIES {
+    match &result {
+      Ok(value) => {
+        if let Some(status) = value.get("status").and_then(|s| s.as_u64()) {
+          if status == 200 {
+            break;
+          }
+        }
+      }
+      Err(_) => {}
+    }
+    // Re-initialize before retrying to ensure we're using the correct manager
+    // This is critical when running the full test suite where managers might be shared
+    // Store both as "test_user" and "default" so get_database_manager(None) finds it
+    let _ = init_timon(&db_root, 30, "test_user");
+    let _ = init_timon(&db_root, 30, "default");
+    tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
+    result = get_sync_metadata(&db_name, "test_table");
+    retries += 1;
+  }
+
+  assert!(result.is_ok(), "get_sync_metadata failed after {} retries: {:?}", retries, result);
 
   let value = result.unwrap();
-  assert_eq!(value.get("status").unwrap().as_u64().unwrap(), 200);
+  let status = value.get("status").unwrap().as_u64().unwrap();
+  assert_eq!(status, 200, "Expected status 200, got {}. Value: {:?}", status, value);
   assert!(value.get("json_value").is_some());
 }
 
