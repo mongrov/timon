@@ -1,5 +1,5 @@
 mod timon_engine;
-use chrono::{DateTime, Duration, Local, Utc};
+use chrono::{DateTime, Duration, Local, NaiveDateTime, TimeZone, Utc};
 use serde_json::json;
 use std::time::Instant;
 pub use timon_engine::{
@@ -374,10 +374,10 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
   let activity_details_result = create_table(DATABASE_NAME, "activitydetails", &activity_details_schema);
   println!("Create activitydetails table -> {}", activity_details_result.unwrap());
 
-  let sleep_result = create_table(DATABASE_NAME, "sleep_table", &sleep_schema);
+  let sleep_result = create_table(DATABASE_NAME, "sleep", &sleep_schema);
   println!("Create sleep table -> {}", sleep_result.unwrap());
 
-  let spo2_result = create_table(DATABASE_NAME, "spo2_readings", &spo2_schema);
+  let spo2_result = create_table(DATABASE_NAME, "spo2", &spo2_schema);
   println!("Create SPO2 table -> {}", spo2_result.unwrap());
 
   let hr_result = create_table(DATABASE_NAME, "heartrate", &heartrate_schema);
@@ -432,7 +432,7 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
       })
       .collect();
     let spo2_json = serde_json::to_string(&formatted_spo2)?;
-    let insertion_result = insert(DATABASE_NAME, "spo2_readings", &spo2_json)?;
+    let insertion_result = insert(DATABASE_NAME, "spo2", &spo2_json)?;
     println!("SPO2 insertion result: {}", insertion_result);
   }
 
@@ -496,7 +496,7 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
       })
       .collect();
     let sleep_json = serde_json::to_string(&formatted_sleep)?;
-    let insertion_result = insert(DATABASE_NAME, "sleep_table", &sleep_json)?;
+    let insertion_result = insert(DATABASE_NAME, "sleep", &sleep_json)?;
     println!("Sleep insertion result: {}", insertion_result);
   }
 
@@ -528,100 +528,104 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
 #[allow(dead_code)]
 async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
   const STORAGE_PATH: &str = "tmp";
-  const USERNAME: &str = "ahmed_test";
   const DATABASE_NAME: &str = "zivaring";
-  let _ = init_timon(STORAGE_PATH, 43200, USERNAME).unwrap();
+  let usernames = ["rADQkoFBr4Pks9Y2H_sriram", "7TQBn6aSe49wfnuox_roshann", "MtvcHGtLWZ23hS3KT_spalaniswamy"];
+  let _ = init_timon(STORAGE_PATH, 43200, usernames[0]).unwrap();
 
-  // Query activity details
-  let start_time = Instant::now();
-  let activity_details_query = format!(r#"SELECT * FROM activitydetails"#);
-  let activity_details_result = query(DATABASE_NAME, &activity_details_query, None, None).await?;
-  let duration = start_time.elapsed();
-  println!(
-    "Activity details {} (Time taken: {:.3} seconds)",
-    activity_details_result["status"],
-    duration.as_secs_f64()
-  );
+  for username in &usernames {
+    println!("\n=== Testing queries for user: {} ===", username);
 
-  // Query SPO2 readings
-  let start_time = Instant::now();
-  let spo2_query = format!(r#"SELECT * FROM spo2_readings"#);
-  let spo2_result = query(DATABASE_NAME, &spo2_query, None, None).await?;
-  let duration = start_time.elapsed();
-  println!(
-    "SPO2 readings {} (Time taken: {:.3} seconds)",
-    spo2_result["status"],
-    duration.as_secs_f64()
-  );
+    // Query activity details
+    let start_time = Instant::now();
+    let activity_details_query = format!(r#"SELECT * FROM activitydetails"#);
+    let activity_details_result = query(DATABASE_NAME, &activity_details_query, Some(username), None).await?;
+    let duration = start_time.elapsed();
+    println!(
+      "Activity details {} (Time taken: {:.3} seconds)",
+      activity_details_result["status"],
+      duration.as_secs_f64()
+    );
 
-  // Query heart rate readings
-  let start_time = Instant::now();
-  let hr_query = format!(r#"SELECT * FROM heartrate"#);
-  let hr_result = query(DATABASE_NAME, &hr_query, None, None).await?;
-  let duration = start_time.elapsed();
-  println!(
-    "Heart rate readings {} (Time taken: {:.3} seconds)",
-    hr_result["status"],
-    duration.as_secs_f64()
-  );
+    // Query SPO2 readings
+    let start_time = Instant::now();
+    let spo2_query = format!(r#"SELECT * FROM spo2"#);
+    let spo2_result = query(DATABASE_NAME, &spo2_query, Some(username), None).await?;
+    let duration = start_time.elapsed();
+    println!(
+      "SPO2 readings {} (Time taken: {:.3} seconds)",
+      spo2_result["status"],
+      duration.as_secs_f64()
+    );
 
-  // Query HRV readings
-  let start_time = Instant::now();
-  let hrv_query = format!(r#"SELECT * FROM hrv_table"#);
-  let hrv_result = query(DATABASE_NAME, &hrv_query, None, None).await?;
-  let duration = start_time.elapsed();
-  println!(
-    "HRV readings {} (Time taken: {:.3} seconds)",
-    hrv_result["status"],
-    duration.as_secs_f64()
-  );
+    // Query heart rate readings
+    let start_time = Instant::now();
+    let hr_query = format!(r#"SELECT * FROM heartrate"#);
+    let hr_result = query(DATABASE_NAME, &hr_query, Some(username), None).await?;
+    let duration = start_time.elapsed();
+    println!(
+      "Heart rate readings {} (Time taken: {:.3} seconds)",
+      hr_result["status"],
+      duration.as_secs_f64()
+    );
 
-  // Query temperature readings
-  let start_time = Instant::now();
-  let temp_query = format!(r#"SELECT * FROM temperature_readings"#);
-  let temp_result = query(DATABASE_NAME, &temp_query, None, None).await?;
-  let duration = start_time.elapsed();
-  println!(
-    "Temperature readings {} (Time taken: {:.3} seconds)",
-    temp_result["status"],
-    duration.as_secs_f64()
-  );
+    // Query HRV readings
+    let start_time = Instant::now();
+    let hrv_query = format!(r#"SELECT * FROM hrv_table"#);
+    let hrv_result = query(DATABASE_NAME, &hrv_query, Some(username), None).await?;
+    let duration = start_time.elapsed();
+    println!(
+      "HRV readings {} (Time taken: {:.3} seconds)",
+      hrv_result["status"],
+      duration.as_secs_f64()
+    );
 
-  // Test some specific queries
-  println!("\nTesting specific queries:");
+    // Query temperature readings
+    let start_time = Instant::now();
+    let temp_query = format!(r#"SELECT * FROM temperature_readings"#);
+    let temp_result = query(DATABASE_NAME, &temp_query, Some(username), None).await?;
+    let duration = start_time.elapsed();
+    println!(
+      "Temperature readings {} (Time taken: {:.3} seconds)",
+      temp_result["status"],
+      duration.as_secs_f64()
+    );
 
-  // Query for average heart rate
-  let start_time = Instant::now();
-  let avg_hr_query = format!(r#"SELECT * FROM heartrate"#);
-  let avg_hr_result = query(DATABASE_NAME, &avg_hr_query, None, None).await?;
-  let duration = start_time.elapsed();
-  println!(
-    "Average heart rate {} (Time taken: {:.3} seconds)",
-    avg_hr_result["status"],
-    duration.as_secs_f64()
-  );
+    // Test some specific queries
+    println!("\nTesting specific queries:");
 
-  // Query for max SPO2
-  let start_time = Instant::now();
-  let max_spo2_query = format!(r#"SELECT * FROM spo2_readings"#);
-  let max_spo2_result = query(DATABASE_NAME, &max_spo2_query, None, None).await?;
-  let duration = start_time.elapsed();
-  println!(
-    "Max SPO2: {} (Time taken: {:.3} seconds)",
-    max_spo2_result["status"],
-    duration.as_secs_f64()
-  );
+    // Query for average heart rate
+    let start_time = Instant::now();
+    let avg_hr_query = format!(r#"SELECT * FROM heartrate"#);
+    let avg_hr_result = query(DATABASE_NAME, &avg_hr_query, Some(username), None).await?;
+    let duration = start_time.elapsed();
+    println!(
+      "Average heart rate {} (Time taken: {:.3} seconds)",
+      avg_hr_result["status"],
+      duration.as_secs_f64()
+    );
 
-  // Query for stress levels over time
-  let start_time = Instant::now();
-  let stress_query = format!(r#"SELECT * FROM hrv_table"#);
-  let stress_result = query(DATABASE_NAME, &stress_query, None, None).await?;
-  let duration = start_time.elapsed();
-  println!(
-    "Stress levels over time: {} (Time taken: {:.3} seconds)",
-    stress_result["status"],
-    duration.as_secs_f64()
-  );
+    // Query for max SPO2
+    let start_time = Instant::now();
+    let max_spo2_query = format!(r#"SELECT * FROM spo2"#);
+    let max_spo2_result = query(DATABASE_NAME, &max_spo2_query, Some(username), None).await?;
+    let duration = start_time.elapsed();
+    println!(
+      "Max SPO2: {} (Time taken: {:.3} seconds)",
+      max_spo2_result["status"],
+      duration.as_secs_f64()
+    );
+
+    // Query for stress levels over time
+    let start_time = Instant::now();
+    let stress_query = format!(r#"SELECT * FROM hrv_table"#);
+    let stress_result = query(DATABASE_NAME, &stress_query, Some(username), None).await?;
+    let duration = start_time.elapsed();
+    println!(
+      "Stress levels over time: {} (Time taken: {:.3} seconds)",
+      stress_result["status"],
+      duration.as_secs_f64()
+    );
+  }
 
   Ok(())
 }
@@ -629,16 +633,19 @@ async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
 #[allow(dead_code)]
 async fn test_ziva_join_query() -> Result<(), Box<dyn std::error::Error>> {
   const STORAGE_PATH: &str = "tmp";
-  const USERNAME: &str = "ahmed_test";
   const DATABASE_NAME: &str = "zivaring";
-  let _ = init_timon(STORAGE_PATH, 43200, USERNAME).unwrap();
+  let usernames = ["rADQkoFBr4Pks9Y2H_sriram", "7TQBn6aSe49wfnuox_roshann", "MtvcHGtLWZ23hS3KT_spalaniswamy"];
+  let _ = init_timon(STORAGE_PATH, 43200, usernames[0]).unwrap();
 
-  let start_time = Instant::now();
-  let sql_query = "SELECT * FROM activitydetails JOIN spo2_readings ON to_char(to_timestamp(activitydetails.date), 'YYYY-MM-DD') = to_char(to_timestamp(spo2_readings.date), 'YYYY-MM-DD') LIMIT 100";
-  let result = query(DATABASE_NAME, sql_query, None, None).await?;
-  let duration = start_time.elapsed();
-  println!("Query time: {:.3} seconds", duration.as_secs_f64());
-  println!("JOIN Query Result: {} status: {}", result["json_value"], result["status"]);
+  for username in &usernames {
+    println!("\n=== Testing JOIN query for user: {} ===", username);
+    let start_time = Instant::now();
+    let sql_query = "SELECT * FROM activitydetails JOIN spo2 ON to_char(to_timestamp(activitydetails.date), 'YYYY-MM-DD') = to_char(to_timestamp(spo2.date), 'YYYY-MM-DD') LIMIT 100";
+    let result = query(DATABASE_NAME, sql_query, Some(username), None).await?;
+    let duration = start_time.elapsed();
+    println!("Query time: {:.3} seconds", duration.as_secs_f64());
+    println!("JOIN Query Result: {} status: {}", result["json_value"], result["status"]);
+  }
 
   Ok(())
 }
@@ -689,17 +696,17 @@ async fn insert_ziva_data_six_months() -> Result<(), Box<dyn std::error::Error>>
       }
     }
     "#;
-  let spo2_result = create_table(DATABASE_NAME, "spo2_readings", &spo2_schema);
+  let spo2_result = create_table(DATABASE_NAME, "spo2", &spo2_schema);
   println!("Create SPO2 table -> {}", spo2_result.unwrap());
 
   // // SPO2 table Count: 53k rows
   let start: &'static str = "2024-11-01 00:00:00";
   let end = "2025-05-01 00:00:00";
   let _json_data = generate_spo2_data(start, end)?;
-  // let insertion_result = insert(DATABASE_NAME, "spo2_readings", &_json_data)?;
+  // let insertion_result = insert(DATABASE_NAME, "spo2", &_json_data)?;
   // println!("SPO2 data insertion result: {}", insertion_result);
 
-  const QUERY: &str = "SELECT * FROM spo2_readings ORDER BY date ASC";
+  const QUERY: &str = "SELECT * FROM spo2 ORDER BY date ASC";
   let start_time = std::time::Instant::now();
   let result = query(DATABASE_NAME, QUERY, None, None).await?;
   let duration = start_time.elapsed();
@@ -712,13 +719,23 @@ async fn insert_ziva_data_six_months() -> Result<(), Box<dyn std::error::Error>>
 #[allow(dead_code)]
 async fn test_ziva_range_selction_query() -> Result<(), Box<dyn std::error::Error>> {
   const STORAGE_PATH: &str = "tmp";
-  const USERNAME: &str = "ahmed_test";
   const DATABASE_NAME: &str = "zivaring";
-  let _ = init_timon(STORAGE_PATH, 43200, USERNAME).unwrap();
+  let usernames = ["rADQkoFBr4Pks9Y2H_sriram", "7TQBn6aSe49wfnuox_roshann", "MtvcHGtLWZ23hS3KT_spalaniswamy"];
+  let _ = init_timon(STORAGE_PATH, 43200, usernames[0]).unwrap();
 
-  const QUERY_2: &str = "SELECT COUNT(*) AS total FROM activitydetails WHERE partition_date BETWEEN '2025-08-27' AND '2025-09-20'";
-  let result = query(DATABASE_NAME, QUERY_2, None, None).await?;
-  println!("Range Selction Result: {} status: {}", result["json_value"], result["status"]);
+  for username in &usernames {
+    println!("\n=== Testing range selection query for user: {} ===", username);
+    let start_time = Instant::now();
+    const QUERY_2: &str = "SELECT COUNT(*) AS total FROM activitydetails WHERE partition_date BETWEEN '2025-08-27' AND '2025-09-20'";
+    let result = query(DATABASE_NAME, QUERY_2, Some(username), None).await?;
+    let duration = start_time.elapsed();
+    println!(
+      "Range Selection Result: {} status: {} (Time taken: {:.3} seconds)",
+      result["json_value"],
+      result["status"],
+      duration.as_secs_f64()
+    );
+  }
 
   Ok(())
 }
@@ -752,150 +769,164 @@ async fn test_partition_limit() -> Result<(), Box<dyn std::error::Error>> {
 async fn test_sleep_queries() -> Result<(), Box<dyn std::error::Error>> {
   println!("Testing Sleep Queries for Daily Vitality Score");
   const STORAGE_PATH: &str = "tmp";
-  const USERNAME: &str = "ahmed_test";
-  let _ = init_timon(STORAGE_PATH, 43200, USERNAME).unwrap();
+  let usernames = ["rADQkoFBr4Pks9Y2H_sriram", "7TQBn6aSe49wfnuox_roshann", "MtvcHGtLWZ23hS3KT_spalaniswamy"];
+  let _ = init_timon(STORAGE_PATH, 43200, usernames[0]).unwrap();
 
-  // Test 1: Get last night's sleep data (minute-by-minute objects)
-  println!("\n=== LAST NIGHT'S SLEEP DATA ===");
+  for username in &usernames {
+    println!("\n=== Testing Sleep Queries for user: {} ===", username);
 
-  let sleep_dates = vec![("2025-09-22", 1758499200, 1758585599)];
-  for (date_label, start_ts, end_ts) in &sleep_dates {
-    println!("\n--- Sleep data for {} ---", date_label);
+    // Test 1: Get last night's sleep data (minute-by-minute objects)
+    println!("\n=== LAST NIGHT'S SLEEP DATA ===");
 
-    let last_night_query = format!(
-      r#"
-      SELECT
-        COUNT(DISTINCT start) as sleep_sessions_count,
-        COUNT(*) / 60.0 AS sleep_total_hours,
-        (
-          SELECT MAX(session_minutes) / 60.0
-          FROM (
-            SELECT start, COUNT(*) as session_minutes
-            FROM sleep_table
-            WHERE date BETWEEN {} AND {}
-            GROUP BY start
-          ) as session_counts
-        ) AS sleep_longest_session,
-        COUNT(CASE WHEN quality = 1 THEN 1 END) / 60.0 AS sleep_light_hours,
-        COUNT(CASE WHEN quality = 2 THEN 1 END) / 60.0 AS sleep_deep_hours,
-        COUNT(CASE WHEN quality = 3 THEN 1 END) / 60.0 AS sleep_rem_hours
-      FROM sleep_table
-      WHERE date BETWEEN {} AND {}
-      "#,
-      start_ts, end_ts, start_ts, end_ts
-    );
+    let sleep_dates = vec![("2025-09-22", 1758499200, 1758585599)];
+    for (date_label, start_ts, end_ts) in &sleep_dates {
+      println!("\n--- Sleep data for {} ---", date_label);
+      let start_time = Instant::now();
 
-    let last_night_result = query("zivaring", &last_night_query, None, None).await?;
-    // println!("Last night's sleep data: {}", last_night_result["json_value"]);
-    let last_night_value = last_night_result["json_value"][0].clone();
-    println!(
-      "{:.1} hours total sleep, but broken into {} separate sessions - longest only {:.1} hours",
-      last_night_value["sleep_total_hours"].as_f64().unwrap_or(0.0),
-      last_night_value["sleep_sessions_count"],
-      last_night_value["sleep_longest_session"].as_f64().unwrap_or(0.0)
-    );
-    println!(
-      "Deep: {:.1}h * Light: {:.1}h * REM: {:.1}h",
-      last_night_value["sleep_deep_hours"].as_f64().unwrap_or(0.0),
-      last_night_value["sleep_light_hours"].as_f64().unwrap_or(0.0),
-      last_night_value["sleep_rem_hours"].as_f64().unwrap_or(0.0)
-    );
-  }
-
-  // Test 2: Get sleep consistency data (previous 6 nights)
-  println!("\n=== SLEEP CONSISTENCY DATA (Previous 6 nights) ===");
-
-  // For sleep consistency, we need to analyze sleep sessions from each of the previous 6 days
-  // Let's query each day separately to get sleep sessions per day
-  let consistency_dates = vec![
-    ("2025-09-22", 1758499200, 1758585599), // Sep 22: 00:00 to 23:59
-    ("2025-09-21", 1758412800, 1758499199), // Sep 21: 00:00 to 23:59
-    ("2025-09-20", 1758326400, 1758412799), // Sep 20: 00:00 to 23:59
-    ("2025-09-19", 1758240000, 1758326399), // Sep 19: 00:00 to 23:59
-    ("2025-09-18", 1758153600, 1758239999), // Sep 18: 00:00 to 23:59
-    ("2025-09-17", 1758067200, 1758153599), // Sep 17: 00:00 to 23:59
-  ];
-
-  // Collect all consistency data first
-  let mut consistency_data = Vec::new();
-  for (date_label, start_ts, end_ts) in &consistency_dates {
-    let day_consistency_query = format!(
-      r#"
-      SELECT
-        '{}' as date,
-        COUNT(DISTINCT start) as sessions_count,
-        COALESCE(SUM(session_duration), 0) as total_sleep_minutes
-      FROM (
-        SELECT start, COUNT(*) as session_duration
-        FROM sleep_table
+      let last_night_query = format!(
+        r#"
+        SELECT
+          COUNT(DISTINCT start) as sleep_sessions_count,
+          COUNT(*) / 60.0 AS sleep_total_hours,
+          (
+            SELECT MAX(session_minutes) / 60.0
+            FROM (
+              SELECT start, COUNT(*) as session_minutes
+              FROM sleep
+              WHERE date BETWEEN {} AND {}
+              GROUP BY start
+            ) as session_counts
+          ) AS sleep_longest_session,
+          COUNT(CASE WHEN quality = 1 THEN 1 END) / 60.0 AS sleep_light_hours,
+          COUNT(CASE WHEN quality = 2 THEN 1 END) / 60.0 AS sleep_deep_hours,
+          COUNT(CASE WHEN quality = 3 THEN 1 END) / 60.0 AS sleep_rem_hours
+        FROM sleep
         WHERE date BETWEEN {} AND {}
-        GROUP BY start
-      ) as daily_sessions
-    "#,
-      date_label, start_ts, end_ts
-    );
+        "#,
+        start_ts, end_ts, start_ts, end_ts
+      );
 
-    let day_result = query("zivaring", &day_consistency_query, None, None).await?;
-    println!("day_result {} status: {} \n", day_result["json_value"], day_result["status"]);
-    if let Some(day_data) = day_result["json_value"].as_array().and_then(|arr| arr.get(0)) {
-      if let (Some(sessions), Some(minutes)) = (day_data["sessions_count"].as_i64(), day_data["total_sleep_minutes"].as_i64()) {
-        consistency_data.push((sessions, minutes));
+      let last_night_result = query("zivaring", &last_night_query, Some(username), None).await?;
+      let duration = start_time.elapsed();
+      println!("(Query time: {:.3} seconds)", duration.as_secs_f64());
+      // println!("Last night's sleep data: {}", last_night_result["json_value"]);
+      let last_night_value = last_night_result["json_value"][0].clone();
+      println!(
+        "{:.1} hours total sleep, but broken into {} separate sessions - longest only {:.1} hours",
+        last_night_value["sleep_total_hours"].as_f64().unwrap_or(0.0),
+        last_night_value["sleep_sessions_count"],
+        last_night_value["sleep_longest_session"].as_f64().unwrap_or(0.0)
+      );
+      println!(
+        "Deep: {:.1}h * Light: {:.1}h * REM: {:.1}h",
+        last_night_value["sleep_deep_hours"].as_f64().unwrap_or(0.0),
+        last_night_value["sleep_light_hours"].as_f64().unwrap_or(0.0),
+        last_night_value["sleep_rem_hours"].as_f64().unwrap_or(0.0)
+      );
+    }
+
+    // Test 2: Get sleep consistency data (previous 6 nights)
+    println!("\n=== SLEEP CONSISTENCY DATA (Previous 6 nights) ===");
+
+    // For sleep consistency, we need to analyze sleep sessions from each of the previous 6 days
+    // Let's query each day separately to get sleep sessions per day
+    let consistency_dates = vec![
+      ("2025-09-22", 1758499200, 1758585599), // Sep 22: 00:00 to 23:59
+      ("2025-09-21", 1758412800, 1758499199), // Sep 21: 00:00 to 23:59
+      ("2025-09-20", 1758326400, 1758412799), // Sep 20: 00:00 to 23:59
+      ("2025-09-19", 1758240000, 1758326399), // Sep 19: 00:00 to 23:59
+      ("2025-09-18", 1758153600, 1758239999), // Sep 18: 00:00 to 23:59
+      ("2025-09-17", 1758067200, 1758153599), // Sep 17: 00:00 to 23:59
+    ];
+
+    // Collect all consistency data first
+    let mut consistency_data = Vec::new();
+    for (date_label, start_ts, end_ts) in &consistency_dates {
+      let day_start_time = Instant::now();
+      let day_consistency_query = format!(
+        r#"
+        SELECT
+          '{}' as date,
+          COUNT(DISTINCT start) as sessions_count,
+          COALESCE(SUM(session_duration), 0) as total_sleep_minutes
+        FROM (
+          SELECT start, COUNT(*) as session_duration
+          FROM sleep
+          WHERE date BETWEEN {} AND {}
+          GROUP BY start
+        ) as daily_sessions
+      "#,
+        date_label, start_ts, end_ts
+      );
+
+      let day_result = query("zivaring", &day_consistency_query, Some(username), None).await?;
+      let day_duration = day_start_time.elapsed();
+      println!(
+        "day_result {} status: {} (Time: {:.3}s) \n",
+        day_result["json_value"],
+        day_result["status"],
+        day_duration.as_secs_f64()
+      );
+      if let Some(day_data) = day_result["json_value"].as_array().and_then(|arr| arr.get(0)) {
+        if let (Some(sessions), Some(minutes)) = (day_data["sessions_count"].as_i64(), day_data["total_sleep_minutes"].as_i64()) {
+          consistency_data.push((sessions, minutes));
+        }
       }
     }
-  }
 
-  // Calculate sleep consistency score based on variance
-  if consistency_data.len() >= 3 {
-    let durations: Vec<f64> = consistency_data.iter().map(|(_, minutes)| *minutes as f64).collect();
+    // Calculate sleep consistency score based on variance
+    if consistency_data.len() >= 3 {
+      let durations: Vec<f64> = consistency_data.iter().map(|(_, minutes)| *minutes as f64).collect();
 
-    let mean = durations.iter().sum::<f64>() / durations.len() as f64;
-    let variance = durations.iter().map(|duration| (duration - mean).powi(2)).sum::<f64>() / durations.len() as f64;
-    let stddev = variance.sqrt();
+      let mean = durations.iter().sum::<f64>() / durations.len() as f64;
+      let variance = durations.iter().map(|duration| (duration - mean).powi(2)).sum::<f64>() / durations.len() as f64;
+      let stddev = variance.sqrt();
 
-    // Calculate consistency score based on standard deviation thresholds
-    let consistency_score = if stddev <= 30.0 {
-      100 // Excellent consistency (±30 min)
-    } else if stddev <= 60.0 {
-      75 // Good consistency (±60 min)
-    } else if stddev <= 90.0 {
-      50 // Fair consistency (±90 min)
-    } else {
-      25 // Poor consistency (>90 min)
-    };
+      // Calculate consistency score based on standard deviation thresholds
+      let consistency_score = if stddev <= 30.0 {
+        100 // Excellent consistency (±30 min)
+      } else if stddev <= 60.0 {
+        75 // Good consistency (±60 min)
+      } else if stddev <= 90.0 {
+        50 // Fair consistency (±90 min)
+      } else {
+        25 // Poor consistency (>90 min)
+      };
 
-    // Determine consistency message
-    let consistency_message = if consistency_score >= 90 {
-      "Excellent sleep consistency this week"
-    } else if consistency_score >= 70 {
-      "Good sleep routine maintained"
-    } else if consistency_score >= 50 {
-      "Sleep schedule somewhat variable"
-    } else {
-      "Irregular sleep pattern - try consistent bedtime"
-    };
+      // Determine consistency message
+      let consistency_message = if consistency_score >= 90 {
+        "Excellent sleep consistency this week"
+      } else if consistency_score >= 70 {
+        "Good sleep routine maintained"
+      } else if consistency_score >= 50 {
+        "Sleep schedule somewhat variable"
+      } else {
+        "Irregular sleep pattern - try consistent bedtime"
+      };
 
-    println!("\n=== SLEEP CONSISTENCY SCORE ===");
-    println!("Duration Standard Deviation: {:.1} minutes", stddev);
-    println!("Consistency Score: {}/100 ({})", consistency_score, consistency_message);
+      println!("\n=== SLEEP CONSISTENCY SCORE ===");
+      println!("Duration Standard Deviation: {:.1} minutes", stddev);
+      println!("Consistency Score: {}/100 ({})", consistency_score, consistency_message);
 
-    // Display individual night data
-    println!("\n=== INDIVIDUAL NIGHT DATA ===");
-    for (i, (date_label, _, _)) in consistency_dates.iter().enumerate() {
-      if i < consistency_data.len() {
-        let (sessions, minutes) = consistency_data[i];
-        println!(
-          "{}: {} sessions, {} minutes ({:.1}h)",
-          date_label,
-          sessions,
-          minutes,
-          minutes as f64 / 60.0
-        );
+      // Display individual night data
+      println!("\n=== INDIVIDUAL NIGHT DATA ===");
+      for (i, (date_label, _, _)) in consistency_dates.iter().enumerate() {
+        if i < consistency_data.len() {
+          let (sessions, minutes) = consistency_data[i];
+          println!(
+            "{}: {} sessions, {} minutes ({:.1}h)",
+            date_label,
+            sessions,
+            minutes,
+            minutes as f64 / 60.0
+          );
+        }
       }
+    } else {
+      println!("\n=== SLEEP CONSISTENCY SCORE ===");
+      println!("Insufficient data for consistency scoring (need at least 3 nights)");
+      println!("Available data points: {}", consistency_data.len());
     }
-  } else {
-    println!("\n=== SLEEP CONSISTENCY SCORE ===");
-    println!("Insufficient data for consistency scoring (need at least 3 nights)");
-    println!("Available data points: {}", consistency_data.len());
   }
 
   Ok(())
@@ -905,10 +936,14 @@ async fn test_sleep_queries() -> Result<(), Box<dyn std::error::Error>> {
 async fn test_hrv_queries() -> Result<(), Box<dyn std::error::Error>> {
   println!("\n=== HRV QUERIES FOR RECOVERY COMPONENT ===");
   const STORAGE_PATH: &str = "tmp";
-  const USERNAME: &str = "ahmed_test";
-  let _ = init_timon(STORAGE_PATH, 43200, USERNAME).unwrap();
+  let usernames = ["rADQkoFBr4Pks9Y2H_sriram", "7TQBn6aSe49wfnuox_roshann", "MtvcHGtLWZ23hS3KT_spalaniswamy"];
+  let _ = init_timon(STORAGE_PATH, 43200, usernames[0]).unwrap();
 
-  let rhr_hrv_query = r#"
+  for username in &usernames {
+    println!("\n=== Testing HRV queries for user: {} ===", username);
+    let start_time = Instant::now();
+
+    let rhr_hrv_query = r#"
   WITH date_params AS (
   SELECT 
       '2025-10-01'::DATE as target_date_local,
@@ -1111,11 +1146,15 @@ async fn test_hrv_queries() -> Result<(), Box<dyn std::error::Error>> {
   CROSS JOIN hrv_recovery_score hrs;
   "#;
 
-  let hrv_score_result = query("zivaring", rhr_hrv_query, None, None).await?;
-  println!(
-    "Resting Heart Rate Result: {} status: {}",
-    hrv_score_result["json_value"], hrv_score_result["status"]
-  );
+    let hrv_score_result = query("zivaring", rhr_hrv_query, Some(username), None).await?;
+    let duration = start_time.elapsed();
+    println!(
+      "Resting Heart Rate Result: {} status: {} (Time taken: {:.3} seconds)",
+      hrv_score_result["json_value"],
+      hrv_score_result["status"],
+      duration.as_secs_f64()
+    );
+  }
 
   Ok(())
 }
@@ -1124,10 +1163,14 @@ async fn test_hrv_queries() -> Result<(), Box<dyn std::error::Error>> {
 async fn test_rhr_queries() -> Result<(), Box<dyn std::error::Error>> {
   println!("\n=== RHR QUERIES FOR HEART HEALTH COMPONENT ===");
   const STORAGE_PATH: &str = "tmp";
-  const USERNAME: &str = "ahmed_test";
-  let _ = init_timon(STORAGE_PATH, 43200, USERNAME).unwrap();
+  let usernames = ["rADQkoFBr4Pks9Y2H_sriram", "7TQBn6aSe49wfnuox_roshann", "MtvcHGtLWZ23hS3KT_spalaniswamy"];
+  let _ = init_timon(STORAGE_PATH, 43200, usernames[0]).unwrap();
 
-  let rhr_sql_query = r#"
+  for username in &usernames {
+    println!("\n=== Testing RHR queries for user: {} ===", username);
+    let start_time = Instant::now();
+
+    let rhr_sql_query = r#"
   WITH date_params AS (
     SELECT
       to_timestamp('2025-09-01T00:00:00') AS target_date_utc,
@@ -1145,7 +1188,7 @@ async fn test_rhr_queries() -> Result<(), Box<dyn std::error::Error>> {
     SELECT
       CAST(s.date AS BIGINT) AS sleep_epoch,
       to_timestamp_seconds(CAST(s.date AS BIGINT)) AS sleep_timestamp_utc
-    FROM sleep_table s
+    FROM sleep s
     CROSS JOIN date_params dp
     WHERE to_timestamp_seconds(CAST(s.date AS BIGINT))
       BETWEEN dp.sleep_window_start_utc AND dp.sleep_window_end_utc
@@ -1329,11 +1372,15 @@ async fn test_rhr_queries() -> Result<(), Box<dyn std::error::Error>> {
   FROM date_params dp
   CROSS JOIN rhr_analysis ra;
   "#;
-  let rhr_score_result = query("zivaring", rhr_sql_query, None, None).await?;
-  println!(
-    "Resting Heart Rate Result: {} status: {}",
-    rhr_score_result["json_value"], rhr_score_result["status"]
-  );
+    let rhr_score_result = query("zivaring", rhr_sql_query, Some(username), None).await?;
+    let duration = start_time.elapsed();
+    println!(
+      "Resting Heart Rate Result: {} status: {} (Time taken: {:.3} seconds)",
+      rhr_score_result["json_value"],
+      rhr_score_result["status"],
+      duration.as_secs_f64()
+    );
+  }
 
   Ok(())
 }
@@ -1342,10 +1389,14 @@ async fn test_rhr_queries() -> Result<(), Box<dyn std::error::Error>> {
 async fn test_vitality_queries() -> Result<(), Box<dyn std::error::Error>> {
   println!("\n=== VITALITY QUERIES COMPONENT ===");
   const STORAGE_PATH: &str = "tmp";
-  const USERNAME: &str = "ahmed_test";
-  let _ = init_timon(STORAGE_PATH, 43200, USERNAME).unwrap();
+  let usernames = ["rADQkoFBr4Pks9Y2H_sriram", "7TQBn6aSe49wfnuox_roshann", "MtvcHGtLWZ23hS3KT_spalaniswamy"];
+  let _ = init_timon(STORAGE_PATH, 43200, usernames[0]).unwrap();
 
-  let vitality_sql_query = r#"
+  for username in &usernames {
+    println!("\n=== Testing Vitality queries for user: {} ===", username);
+    let start_time = Instant::now();
+
+    let vitality_sql_query = r#"
   WITH date_params AS (
       SELECT
           to_timestamp('2025-09-22T00:00:00') AT TIME ZONE 'UTC' as now_utc,
@@ -1498,7 +1549,7 @@ async fn test_vitality_queries() -> Result<(), Box<dyn std::error::Error>> {
               SUM(CASE WHEN quality = 5 THEN 1 ELSE 0 END) as rem_minutes,
               SUM(CASE WHEN quality = 2 THEN 1 ELSE 0 END) as light_minutes,
               SUM(CASE WHEN quality = 1 THEN 1 ELSE 0 END) as awake_minutes
-          FROM sleep_table
+          FROM sleep
           WHERE TO_TIMESTAMP(date) >=
                 (SELECT sleep_window_start FROM date_params)
               AND TO_TIMESTAMP(date) <
@@ -1623,7 +1674,7 @@ async fn test_vitality_queries() -> Result<(), Box<dyn std::error::Error>> {
               DATE_TRUNC('day', TO_TIMESTAMP(date)) as sleep_date,
               COUNT(*) as night_minutes,
               COUNT(DISTINCT start) as sessions
-          FROM sleep_table
+          FROM sleep
           WHERE TO_TIMESTAMP(date) >=
                 (SELECT week_ago FROM date_params)
               AND TO_TIMESTAMP(date) <
@@ -1804,7 +1855,7 @@ async fn test_vitality_queries() -> Result<(), Box<dyn std::error::Error>> {
           SELECT
               AVG("automaticSpo2Data") as overnight_avg,
               COUNT(CASE WHEN "automaticSpo2Data" < 90 THEN 1 END) as dips_below_90
-          FROM spo2_readings
+          FROM spo2
           WHERE DATE_TRUNC('day', TO_TIMESTAMP(date)) =
                 (SELECT today_utc FROM date_params)
               AND "automaticSpo2Data" BETWEEN 70 AND 100
@@ -2031,8 +2082,15 @@ async fn test_vitality_queries() -> Result<(), Box<dyn std::error::Error>> {
   FROM vitality_calculation;
   "#;
 
-  let vitality_result = query("zivaring", vitality_sql_query, None, None).await?;
-  println!("vitality Result: {} status: {}", vitality_result["json_value"], vitality_result["status"]);
+    let vitality_result = query("zivaring", vitality_sql_query, Some(username), None).await?;
+    let duration = start_time.elapsed();
+    println!(
+      "vitality Result: {} status: {} (Time taken: {:.3} seconds)",
+      vitality_result["json_value"],
+      vitality_result["status"],
+      duration.as_secs_f64()
+    );
+  }
 
   Ok(())
 }
@@ -2041,10 +2099,14 @@ async fn test_vitality_queries() -> Result<(), Box<dyn std::error::Error>> {
 async fn ziva_app_queries() -> Result<(), Box<dyn std::error::Error>> {
   println!("\n=== ZIVA APP QUERIES COMPONENT ===");
   const STORAGE_PATH: &str = "tmp";
-  const USERNAME: &str = "ahmed_test";
-  let _ = init_timon(STORAGE_PATH, 43200, USERNAME).unwrap();
+  let usernames = ["rADQkoFBr4Pks9Y2H_sriram", "7TQBn6aSe49wfnuox_roshann", "MtvcHGtLWZ23hS3KT_spalaniswamy"];
+  let _ = init_timon(STORAGE_PATH, 43200, usernames[0]).unwrap();
 
-  let query_x = r#"
+  for username in &usernames {
+    println!("\n=== Testing Ziva App queries for user: {} ===", username);
+    let start_time = Instant::now();
+
+    let query_x = r#"
   WITH transformed AS (
       SELECT 
         step,
@@ -2066,8 +2128,15 @@ async fn ziva_app_queries() -> Result<(), Box<dyn std::error::Error>> {
     ORDER BY day, hour;
   "#;
 
-  let result_x = query("zivaring", &query_x, None, None).await?;
-  println!("result_x: {} status: {}", result_x["json_value"], result_x["status"]);
+    let result_x = query("zivaring", &query_x, Some(username), None).await?;
+    let duration = start_time.elapsed();
+    println!(
+      "result_x: {} status: {} (Time taken: {:.3} seconds)",
+      result_x["json_value"],
+      result_x["status"],
+      duration.as_secs_f64()
+    );
+  }
 
   Ok(())
 }
@@ -2079,7 +2148,7 @@ async fn ziva_username_query_matching() -> Result<(), Box<dyn std::error::Error>
   const USERNAME: &str = "ahmed_test";
   let _ = init_timon(STORAGE_PATH, 43200, USERNAME).unwrap();
 
-  let query_x = "SELECT COUNT(*) as full_counter FROM spo2_readings;";
+  let query_x = "SELECT COUNT(*) as full_counter FROM spo2;";
 
   const USERNAME1: &str = "rADQkoFBr4Pks9Y2H_sriram";
   const USERNAME2: &str = "7TQBn6aSe49wfnuox_roshann";
