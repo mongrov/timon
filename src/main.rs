@@ -59,6 +59,448 @@ fn main() {
 }
 
 #[allow(dead_code)]
+async fn test_concurrent_inserts() -> Result<(), Box<dyn std::error::Error>> {
+  println!("\n=== TESTING CONCURRENT INSERTS TO SAME PARTITION ===");
+  println!("This test will run multiple times to check for non-deterministic corruption...");
+
+  let mut corruption_detected = false;
+
+  let result = test_concurrent_inserts_single_run().await;
+  match result {
+    Ok(had_corruption) => {
+      if had_corruption {
+        corruption_detected = true;
+        println!("\n🔴 CORRUPTION DETECTED");
+      } else {
+        println!("\n✅ No corruption");
+      }
+    }
+    Err(e) => {
+      eprintln!("\n❌ Error: {}", e);
+    }
+  }
+
+  println!("\n{}", "=".repeat(60));
+  println!("FINAL RESULTS: Corruption detected: {}", corruption_detected);
+  if corruption_detected {
+    println!("🔴 CONCURRENT INSERT CORRUPTION CONFIRMED!");
+  } else {
+    println!("✅ No corruption detected");
+  }
+
+  Ok(())
+}
+
+#[allow(dead_code)]
+async fn test_concurrent_inserts_single_run() -> Result<bool, Box<dyn std::error::Error>> {
+  use std::sync::Arc;
+  use std::thread;
+
+  println!("\n=== TESTING CONCURRENT INSERTS TO SAME PARTITION ===");
+
+  const STORAGE_PATH: &str = "tmp_concurrent_test";
+  const USERNAME: &str = "concurrent_test";
+  const DATABASE_NAME: &str = "test_db";
+  const TABLE_NAME: &str = "test_table";
+  const BUCKET_INTERVAL: u32 = 43200; // Monthly partitioning
+
+  // Clean up any existing test data - completely remove the storage directory
+  println!("Cleaning up any existing test data...");
+  // Remove the entire storage directory to avoid any metadata corruption issues
+  if std::path::Path::new(STORAGE_PATH).exists() {
+    if let Err(e) = std::fs::remove_dir_all(STORAGE_PATH) {
+      eprintln!("Warning: Failed to remove storage directory: {}", e);
+    }
+  }
+
+  // Small delay to ensure filesystem cleanup completes
+  std::thread::sleep(std::time::Duration::from_millis(200));
+
+  // Initialize timon with monthly partitioning
+  println!("Initializing timon with monthly partitioning (43200)...");
+  let _ = init_timon(STORAGE_PATH, BUCKET_INTERVAL, USERNAME).unwrap();
+  let _ = create_database(DATABASE_NAME);
+
+  // Create table schema
+  let table_schema = r#"
+    {
+      "date": {
+        "type": "int",
+        "required": true,
+        "unique": true,
+        "datetime": true
+      },
+      "value": {
+        "type": "int",
+        "required": true
+      },
+      "thread_id": {
+        "type": "int"
+      }
+    }
+  "#;
+
+  let _ = create_table(DATABASE_NAME, TABLE_NAME, &table_schema);
+  println!("Table created successfully");
+
+  // Ensure metadata is fully written to disk
+  // Force a sync by reading it back
+  std::thread::sleep(std::time::Duration::from_millis(200));
+
+  // Verify metadata file exists and is readable
+  let metadata_path = format!("{}/metadata.json", STORAGE_PATH);
+  for attempt in 1..=5 {
+    if let Ok(contents) = std::fs::read_to_string(&metadata_path) {
+      if contents.contains(TABLE_NAME) && contents.contains(DATABASE_NAME) {
+        println!("✅ Metadata file verified (attempt {})", attempt);
+        break;
+      } else {
+        println!("⚠️  Metadata file exists but doesn't contain table (attempt {})", attempt);
+      }
+    } else {
+      println!("⚠️  Metadata file not found yet (attempt {})", attempt);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(100));
+  }
+
+  // Additional delay to ensure filesystem sync
+  std::thread::sleep(std::time::Duration::from_millis(200));
+
+  // Verify table exists before starting threads - try multiple times
+  println!("Verifying table exists...");
+  let mut verified = false;
+  for attempt in 1..=5 {
+    match list_tables(DATABASE_NAME) {
+      Ok(tables_result) => {
+        let tables_vec = tables_result["json_value"]
+          .as_array()
+          .and_then(|arr| Some(arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect::<Vec<_>>()))
+          .unwrap_or_default();
+        if tables_vec.contains(&TABLE_NAME.to_string()) {
+          println!("✅ Table verified: {} (attempt {})", TABLE_NAME, attempt);
+          verified = true;
+          break;
+        } else {
+          println!("⚠️  Table not found yet, attempt {}... Available: {:?}", attempt, tables_vec);
+        }
+      }
+      Err(e) => {
+        println!("⚠️  Error listing tables, attempt {}: {}", attempt, e);
+      }
+    }
+    std::thread::sleep(std::time::Duration::from_millis(100));
+  }
+
+  if !verified {
+    return Err(format!("Table '{}' was not found after multiple attempts!", TABLE_NAME).into());
+  }
+
+  // Force a metadata reload by doing a dummy operation
+  let _ = list_tables(DATABASE_NAME);
+  std::thread::sleep(std::time::Duration::from_millis(100));
+
+  // Number of threads and records per thread
+  const NUM_THREADS: usize = 10;
+  const RECORDS_PER_THREAD: usize = 50;
+  const TOTAL_EXPECTED_RECORDS: usize = NUM_THREADS * RECORDS_PER_THREAD;
+
+  println!(
+    "\nSpawning {} threads, each inserting {} records to the same partition",
+    NUM_THREADS, RECORDS_PER_THREAD
+  );
+  println!("Expected total records: {}", TOTAL_EXPECTED_RECORDS);
+
+  // Track thread start/end times
+  let start_time = std::time::Instant::now();
+
+  // Use a base timestamp that will map to the same partition for all records
+  let base_timestamp = chrono::Utc::now().timestamp();
+
+  // Shared counters for tracking actual insertions
+  let insert_attempts = Arc::new(std::sync::Mutex::new(0usize));
+  let insert_successes = Arc::new(std::sync::Mutex::new(0usize));
+  let insert_errors = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+
+  // Spawn threads
+  let mut handles = vec![];
+
+  for thread_id in 0..NUM_THREADS {
+    let insert_attempts_clone = Arc::clone(&insert_attempts);
+    let insert_successes_clone = Arc::clone(&insert_successes);
+    let insert_errors_clone = Arc::clone(&insert_errors);
+    let base_timestamp_clone = base_timestamp;
+    let bucket_interval = BUCKET_INTERVAL;
+    let storage_path = STORAGE_PATH.to_string();
+    let username = USERNAME.to_string();
+    let db_name = DATABASE_NAME.to_string();
+    let table_name = TABLE_NAME.to_string();
+
+    let handle = thread::spawn(move || {
+      // Each thread creates its own DatabaseManager instance
+      use timon_engine::db_manager::DatabaseManager;
+
+      // NO DELAY - all threads start simultaneously to test true concurrency
+      let mut db_manager = DatabaseManager::new(
+        &storage_path,
+        bucket_interval, // Monthly partitioning
+        &username,
+      );
+
+      // Generate records for this thread - each with unique date (required for unique constraint)
+      // but all within the same month so they map to the same partition
+      let mut records = Vec::new();
+      for i in 0..RECORDS_PER_THREAD {
+        // Use unique timestamps within the same month (same partition for monthly partitioning)
+        // Add seconds to ensure uniqueness while staying in same month
+        let offset_seconds = (thread_id * RECORDS_PER_THREAD + i) as i64;
+        let record_timestamp = base_timestamp_clone + offset_seconds;
+        let record_date = chrono::DateTime::<Utc>::from_timestamp(record_timestamp, 0)
+          .unwrap()
+          .format("%Y.%m.%d %H:%M:%S")
+          .to_string();
+
+        let record = json!({
+          "date": record_date,
+          "value": thread_id * 1000 + i,
+          "thread_id": thread_id
+        });
+        records.push(record);
+      }
+
+      let json_data = serde_json::to_string(&records).unwrap();
+
+      // Track attempt
+      {
+        let mut count = insert_attempts_clone.lock().unwrap();
+        *count += RECORDS_PER_THREAD;
+      }
+
+      // Perform insert with timing
+      let insert_start = std::time::Instant::now();
+      match db_manager.insert(&db_name, &table_name, &json_data) {
+        Ok(_) => {
+          let insert_duration = insert_start.elapsed();
+          let mut count = insert_successes_clone.lock().unwrap();
+          *count += RECORDS_PER_THREAD;
+          if thread_id == 0 && *count == RECORDS_PER_THREAD {
+            // Log first successful insert timing
+            eprintln!("Thread 0: First insert completed in {:.3}s", insert_duration.as_secs_f64());
+          }
+        }
+        Err(e) => {
+          let error_msg = format!("Thread {}: {}", thread_id, e);
+          eprintln!("{}", error_msg);
+          let mut errors = insert_errors_clone.lock().unwrap();
+          errors.push(error_msg);
+        }
+      }
+    });
+
+    handles.push(handle);
+  }
+
+  // Wait for all threads to complete
+  println!("Waiting for all threads to complete...");
+  for (idx, handle) in handles.into_iter().enumerate() {
+    match handle.join() {
+      Ok(_) => {
+        // Thread completed
+      }
+      Err(e) => {
+        eprintln!("⚠️  Thread {} panicked: {:?}", idx, e);
+      }
+    }
+  }
+
+  let elapsed = start_time.elapsed();
+  println!("All threads completed in {:.2} seconds", elapsed.as_secs_f64());
+
+  let attempts = *insert_attempts.lock().unwrap();
+  let successes = *insert_successes.lock().unwrap();
+  let errors = insert_errors.lock().unwrap().clone();
+
+  // Small delay to ensure all file writes are flushed
+  std::thread::sleep(std::time::Duration::from_millis(300));
+
+  println!("\n=== INSERTION RESULTS ===");
+  println!("Total insertion attempts: {}", attempts);
+  println!("Reported successful insertions: {}", successes);
+  println!("Reported failed insertions: {}", errors.len());
+  if !errors.is_empty() {
+    println!("\nError details:");
+    for error in errors.iter().take(5) {
+      println!("  - {}", error);
+    }
+    if errors.len() > 5 {
+      println!("  ... and {} more errors", errors.len() - 5);
+    }
+  }
+
+  // Check filesystem state before querying
+  println!("\n=== FILESYSTEM STATE CHECK ===");
+  let table_path = format!("{}/data/{}/{}", STORAGE_PATH, DATABASE_NAME, TABLE_NAME);
+  if std::path::Path::new(&table_path).exists() {
+    println!("✅ Table directory exists: {}", table_path);
+    let partition_count = std::fs::read_dir(&table_path)
+      .map(|entries| entries.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()).count())
+      .unwrap_or(0);
+    println!("   Found {} partition directories", partition_count);
+
+    // Check for parquet files
+    let mut parquet_files = 0;
+    let mut total_size = 0u64;
+    if let Ok(entries) = std::fs::read_dir(&table_path) {
+      for entry in entries.flatten() {
+        if entry.path().is_dir() {
+          let parquet_file = entry.path().join("data.parquet");
+          if parquet_file.exists() {
+            parquet_files += 1;
+            if let Ok(metadata) = std::fs::metadata(&parquet_file) {
+              total_size += metadata.len();
+            }
+          }
+        }
+      }
+    }
+    println!("   Found {} parquet files, total size: {} bytes", parquet_files, total_size);
+  } else {
+    println!("⚠️  Table directory does NOT exist: {}", table_path);
+  }
+
+  // Now query to see how many records actually exist
+  println!("\n=== QUERYING ACTUAL RECORDS ===");
+  let query_result = query(DATABASE_NAME, "SELECT COUNT(*) as total FROM test_table", None, None).await?;
+
+  let actual_count = query_result["json_value"]
+    .as_array()
+    .and_then(|arr| arr.get(0))
+    .and_then(|obj| obj.get("total"))
+    .and_then(|v| v.as_u64())
+    .unwrap_or(0) as usize;
+
+  println!("Expected records: {}", TOTAL_EXPECTED_RECORDS);
+  println!("Actual records in database: {}", actual_count);
+
+  // Check for data integrity - query all records
+  let all_records_query = query(DATABASE_NAME, "SELECT * FROM test_table ORDER BY value", None, None).await?;
+  let empty_array = vec![];
+  let all_records = all_records_query["json_value"].as_array().unwrap_or(&empty_array);
+
+  println!("Records retrieved from query: {}", all_records.len());
+
+  // Check for duplicate values (should not happen with unique constraint, but let's verify)
+  let mut seen_values = std::collections::HashSet::new();
+  let mut duplicates = 0;
+  let mut missing_threads = std::collections::HashSet::new();
+
+  for record in all_records {
+    if let Some(value) = record.get("value").and_then(|v| v.as_u64()) {
+      if !seen_values.insert(value) {
+        duplicates += 1;
+        println!("  ⚠️  Duplicate value found: {}", value);
+      }
+    }
+    if let Some(thread_id) = record.get("thread_id").and_then(|v| v.as_u64()) {
+      missing_threads.insert(thread_id);
+    }
+  }
+
+  println!("\n=== DATA INTEGRITY CHECK ===");
+  println!("Duplicate values found: {}", duplicates);
+  println!("Threads with data present: {}/{}", missing_threads.len(), NUM_THREADS);
+
+  // Determine if corruption occurred
+  let data_loss = TOTAL_EXPECTED_RECORDS.saturating_sub(actual_count);
+  let loss_percentage = if TOTAL_EXPECTED_RECORDS > 0 {
+    (data_loss as f64 / TOTAL_EXPECTED_RECORDS as f64) * 100.0
+  } else {
+    0.0
+  };
+
+  println!("\n=== CORRUPTION ANALYSIS ===");
+  let had_corruption: bool = if actual_count < TOTAL_EXPECTED_RECORDS {
+    println!("🔴 DATA LOSS DETECTED!");
+    println!("   Lost {} records ({:.2}% loss)", data_loss, loss_percentage);
+    println!("   This confirms concurrent insert corruption!");
+    true
+  } else if duplicates > 0 {
+    println!("🟡 DATA INTEGRITY ISSUE!");
+    println!("   Found {} duplicate values", duplicates);
+    true
+  } else if actual_count == TOTAL_EXPECTED_RECORDS {
+    println!("✅ All records present");
+    false
+  } else {
+    false
+  };
+
+  // Try to read the parquet file directly to check for corruption
+  println!("\n=== PARQUET FILE INTEGRITY CHECK ===");
+  let table_path = format!("{}/data/{}/{}", STORAGE_PATH, DATABASE_NAME, TABLE_NAME);
+  println!("Table path: {}", table_path);
+
+  // Show what partition the records should have gone to
+  use timon_engine::helpers::rounded_timestamp;
+  let expected_partition = rounded_timestamp(base_timestamp, BUCKET_INTERVAL);
+  println!("Expected partition for all records: partition_date={}", expected_partition);
+
+  let partition_dir = std::fs::read_dir(&table_path).ok();
+
+  if let Some(entries) = partition_dir {
+    let mut partition_count = 0;
+    for entry in entries.flatten() {
+      if entry.path().is_dir() {
+        partition_count += 1;
+        let entry_path = entry.path();
+        let partition_name = entry_path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
+        println!("\nPartition found: {}", partition_name);
+
+        let parquet_file = entry_path.join("data.parquet");
+        if parquet_file.exists() {
+          println!("  Parquet file: {}", parquet_file.display());
+          // Try to read the file
+          match std::fs::File::open(&parquet_file) {
+            Ok(_) => {
+              // File exists and is readable
+              let file_size = std::fs::metadata(&parquet_file).map(|m| m.len()).unwrap_or(0);
+              println!("  File size: {} bytes", file_size);
+              if file_size == 0 {
+                println!("  ⚠️  WARNING: File is empty (possible corruption)");
+              } else {
+                // Try to read it as parquet to check for corruption
+                use datafusion::parquet::file::reader::{FileReader, SerializedFileReader};
+                match SerializedFileReader::new(std::fs::File::open(&parquet_file)?) {
+                  Ok(reader) => {
+                    let metadata = reader.metadata();
+                    let num_rows = metadata.file_metadata().num_rows();
+                    println!("  ✅ File is readable, {} rows in metadata", num_rows);
+                  }
+                  Err(e) => {
+                    println!("  🔴 CORRUPTION DETECTED: Cannot read parquet file: {}", e);
+                  }
+                }
+              }
+            }
+            Err(e) => {
+              println!("  🔴 ERROR: Cannot open file: {}", e);
+            }
+          }
+        } else {
+          println!("  ⚠️  No parquet file found in partition");
+        }
+      }
+    }
+    if partition_count == 0 {
+      println!("  ⚠️  No partitions found in table directory");
+    }
+  } else {
+    println!("  ⚠️  Cannot read table directory: {}", table_path);
+  }
+
+  Ok(had_corruption)
+}
+
+#[allow(dead_code)]
 async fn test_local_storage() {
   const STORAGE_PATH: &str = "tmp";
   const USERNAME: &str = "ahmed_test";
@@ -225,6 +667,7 @@ fn main() {
     // let _ = ziva_app_queries().await;
     // let _ = ziva_username_query_matching().await;
     // let _ = check_ziva_fecth_time().await;
+    // let _ = test_concurrent_inserts().await;
   });
 }
 

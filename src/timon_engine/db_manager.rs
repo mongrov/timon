@@ -463,6 +463,7 @@ impl DatabaseManager {
     }
 
     // Write updated and newly created files
+    // Each write is now protected by file locking in parquet_file_writer
     for (file, records) in file_records {
       if updated_files.contains(&file) {
         let (arrays, schema) = json_to_arrow(&records)?;
@@ -757,15 +758,79 @@ impl DatabaseManager {
   }
 
   fn parquet_file_writer(path: &Path, schema: Schema, array: Vec<Arc<dyn Array>>) -> Result<String, Box<dyn Error>> {
-    // Create a Parquet writer
-    let file = fs::File::create(&path)?;
+    // Ensure parent directory exists
+    if let Some(parent) = path.parent() {
+      fs::create_dir_all(parent)?;
+    }
+
+    // Strategy: Write to a temporary file first, then atomically rename
+    // This prevents corruption if the process crashes mid-write
+    // Use a proper temp file name that won't conflict
+    let temp_path = path
+      .parent()
+      .map(|p| p.join(format!("{}.tmp", path.file_name().and_then(|n| n.to_str()).unwrap_or("data.parquet"))))
+      .unwrap_or_else(|| path.with_file_name("data.parquet.tmp"));
+
+    // Use a lock file approach: create a .lock file next to the target file
+    // This is more reliable than locking the parquet file itself
+    let lock_file_path = path.with_extension("parquet.lock");
+
+    // Acquire exclusive lock on the lock file with retries
+    let max_retries = 10;
+    let retry_delay = Duration::from_millis(20);
+    let mut retries = 0;
+    let lock_file = loop {
+      match fs::OpenOptions::new().create(true).write(true).truncate(false).open(&lock_file_path) {
+        Ok(file) => {
+          match file.lock_exclusive() {
+            Ok(_) => break file, // Lock acquired successfully
+            Err(_) => {
+              if retries >= max_retries {
+                return Err(
+                  format!(
+                    "Failed to acquire file lock for '{}' after {} retries. Another process may be writing to this file.",
+                    path.display(),
+                    max_retries
+                  )
+                  .into(),
+                );
+              }
+              retries += 1;
+              std::thread::sleep(retry_delay);
+            }
+          }
+        }
+        Err(_) => {
+          if retries >= max_retries {
+            return Err(format!("Failed to create lock file for '{}' after {} retries.", path.display(), max_retries).into());
+          }
+          retries += 1;
+          std::thread::sleep(retry_delay);
+        }
+      }
+    };
+
+    // Now that we have the lock, write to temporary file
+    let temp_file = fs::File::create(&temp_path)?;
     let props = WriterProperties::builder().build();
-    let mut writer = ArrowWriter::try_new(file, Arc::new(schema.clone()), Some(props))?;
-    // Write the combined record batch to the Parquet file
+    let mut writer = ArrowWriter::try_new(&temp_file, Arc::new(schema.clone()), Some(props))?;
     let combined_batch = RecordBatch::try_new(Arc::new(schema), array)?;
     writer.write(&combined_batch)?;
-    // Close the writer to ensure data is written to the file
     writer.close()?;
+
+    // Flush and sync to ensure data is written to disk
+    temp_file.sync_all()?;
+    drop(temp_file);
+
+    // Atomically rename temporary file to final location
+    // This is an atomic operation on most filesystems
+    fs::rename(&temp_path, path)?;
+
+    // Release the lock by dropping the lock file handle
+    // The lock file will be automatically removed when dropped (on Unix) or we can remove it explicitly
+    drop(lock_file);
+    let _ = fs::remove_file(&lock_file_path); // Clean up lock file
+
     Ok(format!("Data was successfully written to '{}'", path.to_string_lossy()))
   }
 
