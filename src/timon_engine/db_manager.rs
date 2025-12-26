@@ -17,14 +17,20 @@ use datafusion::prelude::*;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::error::Error;
 use std::fs::File;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use std::{fmt, fs};
 use tokio::io::Result as TokioResult;
+
+// Global mutex map for file-level locking (process-wide, works across threads)
+fn get_file_locks() -> &'static Mutex<HashMap<String, Arc<Mutex<()>>>> {
+  static FILE_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+  FILE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 pub enum DataFusionOutput {
   Json(Value),
@@ -411,27 +417,14 @@ impl DatabaseManager {
       self.validate_data_against_schema(&table_schema, json_value)?;
     }
 
-    // Load existing records from partitioned files
-    let file_list = self.build_files_list(db_name, table_name, None)?;
-    let mut file_records: HashMap<String, Vec<Value>> = HashMap::new();
-    let mut record_index: HashMap<String, (String, usize)> = HashMap::new(); // key -> (file_path, record_index)
-
-    for file in &file_list {
-      if let Ok(existing_records) = self.read_parquet_file(file) {
-        for (index, record) in existing_records.iter().enumerate() {
-          let key = build_key(record);
-          record_index.insert(key, (file.clone(), index));
-        }
-        file_records.insert(file.clone(), existing_records);
-      }
-    }
-
+    // Group new records by target file (partition)
+    // This allows us to process each file atomically
     let mut seen_records: HashMap<String, Value> = HashMap::new();
-    let mut updated_files = HashSet::new();
-    let mut new_records_by_file: HashMap<String, Vec<Value>> = HashMap::new();
+    let mut records_by_file: HashMap<String, Vec<Value>> = HashMap::new();
 
     for new_record in new_json_values.into_iter() {
       let key = build_key(&new_record);
+      // Skip duplicates within the same insert batch
       if seen_records.insert(key.clone(), new_record.clone()).is_some() {
         continue;
       }
@@ -444,30 +437,17 @@ impl DatabaseManager {
       fs::create_dir_all(&partition_dir).ok(); // Create partition directory if it doesn't exist
       let target_file = format!("{}/data.parquet", partition_dir);
 
-      if let Some((file, index)) = record_index.get(&key) {
-        // Update existing record in-place
-        if let Some(records) = file_records.get_mut(file) {
-          records[*index] = new_record;
-          updated_files.insert(file.clone());
-        }
-      } else {
-        // Ensure we create the correct partitioned file instead of writing to an existing one
-        new_records_by_file.entry(target_file.clone()).or_insert_with(Vec::new).push(new_record);
-        updated_files.insert(target_file.clone());
-      }
+      records_by_file.entry(target_file).or_insert_with(Vec::new).push(new_record);
     }
 
-    // Create new files if needed and insert records into the correct partition
-    for (file, new_records) in new_records_by_file {
-      file_records.entry(file.clone()).or_insert_with(Vec::new).extend(new_records);
-    }
-
-    // Write updated and newly created files
-    // Each write is now protected by file locking in parquet_file_writer
-    for (file, records) in file_records {
-      if updated_files.contains(&file) {
-        let (arrays, schema) = json_to_arrow(&records)?;
-        Self::parquet_file_writer(Path::new(&file), schema, arrays)?;
+    // Process each file atomically: lock -> read -> merge -> write -> unlock
+    for (file_path, new_records) in records_by_file {
+      let file_path_clone = file_path.clone();
+      if let Err(e) = Self::atomic_file_insert(Path::new(&file_path_clone), &new_records, &build_key) {
+        // Log the error but don't fail the entire insert operation
+        // This allows other files to be processed even if one fails
+        eprintln!("Error in atomic_file_insert for '{}': {}", file_path_clone, e);
+        return Err(format!("Failed to insert records into file '{}': {}", file_path_clone, e).into());
       }
     }
 
@@ -757,7 +737,120 @@ impl DatabaseManager {
     Ok(base_table_path.to_string_lossy().to_string())
   }
 
-  fn parquet_file_writer(path: &Path, schema: Schema, array: Vec<Arc<dyn Array>>) -> Result<String, Box<dyn Error>> {
+  /// Atomically insert records into a parquet file: lock -> read -> merge -> write -> unlock
+  /// This ensures that concurrent inserts don't lose data by always working with the latest file contents
+  fn atomic_file_insert(file_path: &Path, new_records: &[Value], build_key: &dyn Fn(&Value) -> String) -> Result<(), Box<dyn Error>> {
+    // Ensure parent directory exists
+    if let Some(parent) = file_path.parent() {
+      fs::create_dir_all(parent)?;
+    }
+
+    // Use process-wide mutex for this file path (works reliably across threads in same process)
+    let file_path_str = file_path.to_string_lossy().to_string();
+
+    // Get or create a mutex for this file path
+    let file_mutex = {
+      let mut locks = get_file_locks().lock().unwrap();
+      locks.entry(file_path_str.clone()).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+    };
+
+    // Acquire the mutex (this will block until available)
+    let _guard = file_mutex.lock().unwrap();
+
+    // Now that we have the lock, read the latest data from the file (if it exists)
+    let mut existing_records: Vec<Value> = if file_path.exists() {
+      // Re-read the file to get the latest data (another thread may have written)
+      match Self::read_parquet_file_static(file_path) {
+        Ok(records) => records,
+        Err(_) => {
+          // If file is corrupted or unreadable, start with empty records
+          Vec::new()
+        }
+      }
+    } else {
+      Vec::new()
+    };
+
+    // Build index of existing records by key for efficient lookups
+    let mut existing_keys: HashMap<String, usize> = HashMap::new();
+    for (index, record) in existing_records.iter().enumerate() {
+      let key = build_key(record);
+      existing_keys.insert(key, index);
+    }
+
+    // Merge new records with existing ones
+    let initial_count = existing_records.len();
+    for new_record in new_records {
+      let key = build_key(new_record);
+      if let Some(&existing_index) = existing_keys.get(&key) {
+        // Update existing record
+        existing_records[existing_index] = new_record.clone();
+      } else {
+        // Insert new record
+        existing_records.push(new_record.clone());
+        existing_keys.insert(key, existing_records.len() - 1);
+      }
+    }
+
+    // Write the merged records back to the file
+    // We should always have records to write (either existing or new)
+    if existing_records.is_empty() {
+      return Err(
+        format!(
+          "No records to write to '{}' (this should not happen - had {} existing, {} new)",
+          file_path.display(),
+          initial_count,
+          new_records.len()
+        )
+        .into(),
+      );
+    }
+
+    let (arrays, schema) =
+      json_to_arrow(&existing_records).map_err(|e| format!("Failed to convert records to arrow format for '{}': {}", file_path.display(), e))?;
+
+    // Write while holding the lock
+    Self::parquet_file_writer_locked(file_path, schema, arrays)
+      .map_err(|e| format!("Failed to write parquet file '{}': {}", file_path.display(), e))?;
+
+    // Verify the file was written and has content
+    let file_size = fs::metadata(file_path).map(|m| m.len()).unwrap_or(0);
+    if file_size == 0 {
+      return Err(format!("File '{}' was created but is empty (0 bytes)", file_path.display()).into());
+    }
+
+    // Lock is released when _guard is dropped here
+
+    Ok(())
+  }
+
+  /// Read parquet file (static version for use in atomic operations)
+  fn read_parquet_file_static(file_path: &Path) -> Result<Vec<Value>, Box<dyn Error>> {
+    let file = fs::File::open(file_path)?;
+    let reader = SerializedFileReader::new(file)?;
+    let mut iter = reader.get_row_iter(None)?;
+
+    let mut json_records = Vec::new();
+    while let Some(record_result) = iter.next() {
+      match record_result {
+        Ok(record) => {
+          let json_record = row_to_json(&record);
+          json_records.push(json_record);
+        }
+        Err(_) => {
+          return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Error reading record from parquet file",
+          )));
+        }
+      }
+    }
+    Ok(json_records)
+  }
+
+  /// Write parquet file (internal version that assumes lock is already held)
+  /// This version doesn't acquire a lock - it should only be called from atomic_file_insert
+  fn parquet_file_writer_locked(path: &Path, schema: Schema, array: Vec<Arc<dyn Array>>) -> Result<String, Box<dyn Error>> {
     // Ensure parent directory exists
     if let Some(parent) = path.parent() {
       fs::create_dir_all(parent)?;
@@ -765,52 +858,21 @@ impl DatabaseManager {
 
     // Strategy: Write to a temporary file first, then atomically rename
     // This prevents corruption if the process crashes mid-write
-    // Use a proper temp file name that won't conflict
+    // Use a unique temp file name with timestamp to avoid conflicts
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
     let temp_path = path
       .parent()
-      .map(|p| p.join(format!("{}.tmp", path.file_name().and_then(|n| n.to_str()).unwrap_or("data.parquet"))))
-      .unwrap_or_else(|| path.with_file_name("data.parquet.tmp"));
+      .map(|p| {
+        p.join(format!(
+          "{}.{}.tmp",
+          path.file_name().and_then(|n| n.to_str()).unwrap_or("data.parquet"),
+          timestamp
+        ))
+      })
+      .unwrap_or_else(|| path.with_file_name(format!("data.parquet.{}.tmp", timestamp)));
 
-    // Use a lock file approach: create a .lock file next to the target file
-    // This is more reliable than locking the parquet file itself
-    let lock_file_path = path.with_extension("parquet.lock");
-
-    // Acquire exclusive lock on the lock file with retries
-    let max_retries = 10;
-    let retry_delay = Duration::from_millis(20);
-    let mut retries = 0;
-    let lock_file = loop {
-      match fs::OpenOptions::new().create(true).write(true).truncate(false).open(&lock_file_path) {
-        Ok(file) => {
-          match file.lock_exclusive() {
-            Ok(_) => break file, // Lock acquired successfully
-            Err(_) => {
-              if retries >= max_retries {
-                return Err(
-                  format!(
-                    "Failed to acquire file lock for '{}' after {} retries. Another process may be writing to this file.",
-                    path.display(),
-                    max_retries
-                  )
-                  .into(),
-                );
-              }
-              retries += 1;
-              std::thread::sleep(retry_delay);
-            }
-          }
-        }
-        Err(_) => {
-          if retries >= max_retries {
-            return Err(format!("Failed to create lock file for '{}' after {} retries.", path.display(), max_retries).into());
-          }
-          retries += 1;
-          std::thread::sleep(retry_delay);
-        }
-      }
-    };
-
-    // Now that we have the lock, write to temporary file
+    // Write to temporary file (lock is already held by caller)
     let temp_file = fs::File::create(&temp_path)?;
     let props = WriterProperties::builder().build();
     let mut writer = ArrowWriter::try_new(&temp_file, Arc::new(schema.clone()), Some(props))?;
@@ -824,12 +886,19 @@ impl DatabaseManager {
 
     // Atomically rename temporary file to final location
     // This is an atomic operation on most filesystems
+    // IMPORTANT: We must hold the lock until AFTER the rename completes
+    // to ensure no other thread can overwrite our file
     fs::rename(&temp_path, path)?;
 
-    // Release the lock by dropping the lock file handle
-    // The lock file will be automatically removed when dropped (on Unix) or we can remove it explicitly
-    drop(lock_file);
-    let _ = fs::remove_file(&lock_file_path); // Clean up lock file
+    // Sync the parent directory to ensure the rename is persisted to disk
+    if let Some(parent) = path.parent() {
+      if let Ok(parent_file) = fs::File::open(parent) {
+        let _ = parent_file.sync_all();
+      }
+    }
+
+    // Clean up temp file if it still exists (shouldn't happen after successful rename)
+    let _ = fs::remove_file(&temp_path);
 
     Ok(format!("Data was successfully written to '{}'", path.to_string_lossy()))
   }
@@ -1012,36 +1081,56 @@ impl DatabaseManager {
     Ok(())
   }
 
-  fn read_parquet_file(&self, file_path: &str) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
-    let file = fs::File::open(&Path::new(file_path))?;
-    let reader = SerializedFileReader::new(file)?;
-    let mut iter = reader.get_row_iter(None)?;
+  fn read_metadata(&self) -> Result<Metadata, Box<dyn Error>> {
+    // Retry logic to handle cases where metadata is being written
+    let max_retries = 10;
+    let retry_delay = Duration::from_millis(50);
 
-    let mut json_records = Vec::new();
+    for attempt in 0..max_retries {
+      match fs::read_to_string(&self.metadata_path) {
+        Ok(metadata_contents) => {
+          if metadata_contents.trim().is_empty() {
+            // If the metadata file is empty, return a default Metadata object
+            return Ok(Metadata { databases: HashMap::new() });
+          }
 
-    while let Some(record_result) = iter.next() {
-      match record_result {
-        Ok(record) => {
-          // Convert the record to a JSON-like format
-          let json_record = row_to_json(&record);
-          json_records.push(json_record);
+          // Try to parse the JSON
+          match serde_json::from_str::<Metadata>(&metadata_contents) {
+            Ok(metadata) => return Ok(metadata),
+            Err(e) => {
+              // If parsing fails, it might be because the file is being written
+              // Check if it's a JSON parse error (not just a corrupted file)
+              if attempt < max_retries - 1 {
+                // Wait and retry - file might be partially written
+                std::thread::sleep(retry_delay);
+                continue;
+              } else {
+                // Last attempt failed - return the error
+                return Err(format!("Failed to parse metadata after {} attempts: {}", max_retries, e).into());
+              }
+            }
+          }
         }
-        Err(_) => {
-          return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Error reading record")));
+        Err(e) => {
+          // File doesn't exist or can't be read
+          if e.kind() == std::io::ErrorKind::NotFound {
+            // Metadata file doesn't exist - return empty metadata
+            return Ok(Metadata { databases: HashMap::new() });
+          }
+
+          // Other error - retry if we have attempts left
+          if attempt < max_retries - 1 {
+            std::thread::sleep(retry_delay);
+            continue;
+          } else {
+            return Err(format!("Failed to read metadata after {} attempts: {}", max_retries, e).into());
+          }
         }
       }
     }
-    Ok(json_records)
-  }
 
-  fn read_metadata(&self) -> Result<Metadata, Box<dyn Error>> {
-    let metadata_contents = fs::read_to_string(&self.metadata_path)?;
-    if metadata_contents.trim().is_empty() {
-      // If the metadata file is empty, return a default Metadata object
-      return Ok(Metadata { databases: HashMap::new() });
-    }
-    let metadata: Metadata = serde_json::from_str(&metadata_contents).map_err(|e| Box::new(e) as Box<dyn Error>)?;
-    Ok(metadata)
+    // Should never reach here, but return empty metadata as fallback
+    Ok(Metadata { databases: HashMap::new() })
   }
 
   /// Get metadata with caching support (infinite TTL, invalidated only on writes)
@@ -1105,9 +1194,31 @@ impl DatabaseManager {
   }
 
   fn save_metadata(&self) -> TokioResult<()> {
-    // Serialize the metadata structure and save it to the file
+    // Use atomic write: write to temp file, then rename
+    // This ensures metadata file is never in a partially-written state
+    let temp_path = format!("{}.tmp", self.metadata_path);
+
+    // Serialize the metadata structure
     let json = serde_json::to_string(&self.metadata)?;
-    fs::write(&self.metadata_path, json)?;
+
+    // Write to temporary file
+    fs::write(&temp_path, json)?;
+
+    // Sync to ensure data is written to disk
+    if let Ok(temp_file) = fs::File::open(&temp_path) {
+      temp_file.sync_all().ok();
+    }
+
+    // Atomically rename temp file to final location
+    fs::rename(&temp_path, &self.metadata_path)?;
+
+    // Sync the parent directory to ensure rename is persisted
+    if let Some(parent) = Path::new(&self.metadata_path).parent() {
+      if let Ok(parent_file) = fs::File::open(parent) {
+        parent_file.sync_all().ok();
+      }
+    }
+
     // Invalidate cache after saving metadata
     self.invalidate_cache();
     Ok(())
@@ -1167,7 +1278,9 @@ impl DatabaseManager {
 
     // Rest of the update_metadata implementation...
     let new_data_path = storage_path.to_string() + "/data";
-    let mut metadata = self.get_metadata_cached().unwrap();
+    let mut metadata = self
+      .get_metadata_cached()
+      .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to read metadata: {}", e)))?;
 
     for (db_name, db) in metadata.databases.iter_mut() {
       for (table_name, table) in db.tables.iter_mut() {
