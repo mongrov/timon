@@ -26,7 +26,7 @@ external fun initTimon(storagePath: String, bucketInterval: Number, userName: St
 external fun createDatabase(dbName: String): String
 
 // Create a new table within a specific database
-external fun createTable(dbName: String, tableName: String): String
+external fun createTable(dbName: String, tableName: String, schema: String): String
 
 // List all available databases
 external fun listDatabases(): String
@@ -44,11 +44,14 @@ external fun deleteTable(dbName: String, tableName: String): String
 external fun insert(dbName: String, tableName: String, jsonData: String): String
 
 // Query a database with SQL query
-external fun query(dbName: String, sqlQuery: String): String
+// username: Optional username for group user queries (null for default user)
+// limitPartitions: Optional limit on number of partitions to scan (null for all partitions)
+external fun query(dbName: String, sqlQuery: String, userName: String?, limitPartitions: Number?): String
 
-// Pre-load specific tables at startup to eliminate first-query latency
-// Returns JSON with status and list of successfully loaded tables
-external fun preloadTables(dbName: String, tableNames: Array<String>, userName: String?): String
+// Query a database and return DataFrame (for advanced use cases)
+// username: Optional username for group user queries (null for default user)
+// limitPartitions: Optional limit on number of partitions to scan (null for all partitions)
+external fun queryDf(dbName: String, sqlQuery: String, userName: String?, limitPartitions: Number?): DataFrame
 ```
 
 ### Usage Example: Pre-warming Tables
@@ -65,7 +68,7 @@ useEffect(() => {
 }, []);
 
 // Later queries to these tables will be instant!
-const result = await query("mydb", "SELECT * FROM users", "username");
+const result = await query("mydb", "SELECT * FROM users", "username", null);
 ```
 
 **Response Format:**
@@ -94,8 +97,16 @@ external fun initBucket(bucket_endpoint: String, bucket_name: String, access_key
 // Sink daily data to Parquet format in the bucket
 external fun cloudSinkParquet(dbName: String, tableName: String): String
 
+// Sync data: upload local data to cloud and fetch updates (bidirectional sync)
+// username: Optional username for group user sync (null for default user)
+external fun cloudSyncParquet(dbName: String, tableName: String, dateRange: Map<String, String>, userName: String?): String
+
 // Fetch data from a given user and save it locally
 external fun cloudFetchParquet(userName: String, dbName: String, tableName: String, dateRange: Map<String, String>): String
+
+// Batch fetch data for multiple users, databases, and tables in parallel
+// Returns summary with success/error counts and duration
+external fun cloudFetchParquetBatch(usernames: Array<String>, dbNames: Array<String>, tableNames: Array<String>, dateRange: Map<String, String>): String
 ```
 
 ## Get The Latest Utility Build

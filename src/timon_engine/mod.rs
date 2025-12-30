@@ -16,13 +16,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
 /* ******************************** Local File Storage ********************************
-* @ init_timon/new(storage_path, bucket_interval)
+* @ init_timon/new(storage_path, bucket_interval, username)
 * @ create_database(db_name)
-* @ create_table(db_name, table_name)
+* @ create_table(db_name, table_name, schema)
 * @ list_databases() & list_tables(db_name)
 * @ delete_database(db_name) & delete_table(db_name, table_name)
 * @ insert(db_name, table_name, json_data)
-* @ query(db_name, sql_query, username?)
+* @ query(db_name, sql_query, username?, limit_partitions?)
 * @ query_df(db_name, sql_query, username?)
  */
 #[derive(Serialize)]

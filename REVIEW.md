@@ -122,10 +122,12 @@ The library extends DataFusion with:
 
 ### State Management
 
-The `SessionContext` is handled properly for queries, but with some limitations:
+The `SessionContext` is handled with per-username isolation:
 
-- Each query gets a new context, which might impact performance for repeated queries
-- No reuse of registered tables between queries
+- Each `DatabaseManager` instance maintains its own `SessionContext` (one per username)
+- When cloning `DatabaseManager`, a fresh `SessionContext` is created for isolation (see `Clone` implementation in `db_manager.rs:96-113`)
+- Tables are registered per-username context, allowing concurrent queries for different users
+- This design ensures thread-safety and isolation between different user contexts
 
 ### Data Source Interaction
 
@@ -134,6 +136,21 @@ The library creates Parquet files for DataFusion to query:
 - Files are properly partitioned for time-based queries
 - File management is handled logically
 - Predicate pushdown is leveraged through date filtering
+
+### Query Path Resolution
+
+The library supports two data path structures:
+
+- **Default Path**: `{storage_path}/data/{db_name}/{table_name}/` - for local user data
+- **Group Path**: `{storage_path}/group/{username}/{db_name}/{table_name}/` - for group/shared user data
+
+**Current Implementation** (`resolve_table_dir` in `db_manager.rs:674-738`):
+- For default user (username=None): Only queries default path
+- For group users (username provided): Only queries group path
+- ⚠️ **Known Limitation**: See [Issue #64](https://github.com/mongrov/timon/issues/64) - queries do NOT merge data from both paths
+  - If same file exists in both locations, only one path is queried
+  - This can lead to missing data if files exist in both default and group paths
+  - Potential solutions: merge both files or query both paths with duplicate removal at query time
 
 ## 4. Rust Code Quality & Best Practices
 
@@ -177,6 +194,42 @@ Several performance optimizations are evident:
 - File locking for concurrent access safety
 - Query filtering to minimize data processing
 
+**Performance Benchmarks** (see `INSERT_PERFORMANCE_REPORT.md` and `TIMON_QUERY_REPORT.md`):
+
+- **Insert Operations**: 
+  - Fresh inserts: ~15K records/sec (consistent across 1K-1M records)
+  - Updates: Performance degrades with existing data size (594-11,713 records/sec)
+  - Table loading: 29K-42K records/sec (2-3x faster than inserts)
+  
+- **Query Operations** (tested with 1M records per table):
+  - Simple queries: 17-23ms (excellent)
+  - COUNT aggregations: 17.7ms (excellent)
+  - JOIN queries: 435-510ms (good, scales linearly)
+  - Complex analytics: 87-490ms (good)
+  - Partition filtering: 20.7ms (excellent, found 112K records efficiently)
+  
+- **Realistic Use Case** (20K records/month, typical for ZivaApp-Ring):
+  - Insert: ~1.4s
+  - Load: ~0.5s
+  - Query: <25ms for simple queries
+
+### Concurrency & Race Condition Handling
+
+The library implements robust concurrency controls:
+
+- ✅ **Atomic File Writes**: Implemented using temp file strategy (`parquet_file_writer_locked` in `db_manager.rs:853-904`)
+  - Writes to temporary file first, then atomically renames to final location
+  - Prevents corruption if process crashes mid-write
+  - Uses unique timestamp-based temp file names to avoid conflicts
+- ✅ **File-Level Locking**: Process-wide mutex map for file-level locking (`atomic_file_insert` in `db_manager.rs:742-825`)
+  - Each file path has its own mutex to prevent concurrent writes
+  - Lock is held during read-merge-write cycle to ensure atomicity
+  - Prevents race conditions when multiple threads insert to same partition
+- ⚠️ **Known Limitation**: See [Issue #135](https://github.com/mongrov/timon/issues/135) - Insert-Query Race Condition
+  - **Problem**: Queries may attempt to read parquet files while inserts are writing them, even with atomic writes
+  - **Impact**: Can cause ("Corrupt Footer", "Protocol Error" and "Out of Range of File") errors when DataFusion reads incomplete files
+  - **Status**: Marked as "wontfix" - atomic write strategy is implemented but insert-query race condition remains
+
 ## 5. Testing & Documentation
 
 ### Test Coverage
@@ -200,11 +253,10 @@ Documentation could be improved:
 
 1. __DataFusion Integration:__
 
-   - ✅ Consider reusing `SessionContext` for repeated queries *(Fixed: Implemented persistent SessionContext with thread-safe table registration caching)*
-     - ⚠️ **Potential Concerns:**
-       - **Memory Footprint**: The `SessionContext` and registered table mappings consume memory for the app's lifetime
-       - **Table Registration Growth**: If an app queries many different tables over time, the registration cache grows
    - ✅ Optimize the partition selection logic *(Fixed: Implemented efficient CTE-based partition handling)*
+   - ⚠️ **SessionContext Management**: Each `DatabaseManager` clone creates a fresh `SessionContext` for isolation
+     - This ensures thread-safety but means table registrations are not shared across clones
+     - Current design prioritizes isolation over reuse, which is appropriate for multi-user scenarios
    - Evaluate using DataFusion's more advanced features like caching
 
 2. __Error Handling:__
@@ -238,6 +290,105 @@ Documentation could be improved:
 
    - Add more comprehensive function-level documentation
    - Include examples for complex operations
-   - Document performance characteristics and trade-offs
+   - ✅ **Performance characteristics documented** - See `INSERT_PERFORMANCE_REPORT.md` and `QUERY_PERFORMANCE_REPORT.md`
+   
+   **Performance Summary:**
+   - **Insert Performance**: ~15K records/sec for fresh inserts, consistent across sizes (1K-1M)
+   - **Update Performance**: 594-11,713 records/sec depending on existing data size (degrades with larger datasets)
+   - **Query Performance**: Excellent for simple queries (<25ms with 1M records), good for JOINs (<520ms)
+   - **Table Loading**: 29K-42K records/sec (2-3x faster than inserts)
+   - **Realistic Use Case** (20K records/month): Insert ~1.4s, Load ~0.5s
 
-Overall, Timon is a well-designed library that effectively leverages DataFusion for time-series data management, with a clean API and good error handling. The main areas for improvement are in DataFusion integration optimization, documentation, and potentially performance optimizations in specific hot paths.
+6. __Known Issues & Limitations:__
+
+   - ⚠️ **Issue #64**: Query default user missing group files
+     - **Problem**: Queries only check one path (default OR group), not both
+     - **Impact**: Can miss data if same file exists in both locations
+     - **Status**: Open issue - see [GitHub Issue #64](https://github.com/mongrov/timon/issues/64)
+     - **Potential Solutions**: Merge both files or query both paths with duplicate removal
+   
+   - ⚠️ **Issue #135**: Insert-Query Race Condition
+     - **Problem**: Queries may read parquet files while inserts are writing them, causing "Invalid partitioning found on disk" errors
+     - **Impact**: DataFusion can encounter incomplete or corrupted files during query execution
+     - **Status**: Marked as "wontfix" - see [GitHub Issue #135](https://github.com/mongrov/timon/issues/135)
+     - **Note**: Atomic temp file strategy IS implemented (`parquet_file_writer_locked`) for write-write safety, but insert-query race condition remains
+
+## 7. Additional Code Review Findings
+
+### Potential Issues Identified
+
+1. **Mutex Poisoning Risk** (`db_manager.rs:753, 758`):
+   - ⚠️ **Issue**: `unwrap()` on mutex locks can panic if mutex is poisoned (thread panicked while holding lock)
+   - **Location**: `atomic_file_insert()` function
+   - **Impact**: Could cause entire insert operation to fail if a previous thread panicked
+   - **Recommendation**: Use `lock().map_err()` or `lock().unwrap_or_else()` to handle poisoned mutexes gracefully
+   - **Code**: 
+     ```rust
+     let mut locks = get_file_locks().lock().unwrap(); // Line 753
+     let _guard = file_mutex.lock().unwrap(); // Line 758
+     ```
+
+2. **Incomplete Edge Case Handling** (`helpers.rs:525`):
+   - ⚠️ **Issue**: `todo!()` macro in `filter_files_by_date_range()` for date pattern `(None, Some(day))`
+   - **Location**: Date parsing logic when month is missing but day is present
+   - **Impact**: Will panic if this edge case is encountered
+   - **Recommendation**: Implement proper handling or return an error for invalid date patterns
+   - **Code**: `(None, Some(_)) => todo!(),`
+
+3. **Empty Partition Directory Cleanup** (`db_manager.rs:437`):
+   - ⚠️ **Issue**: Partition directories are created but not cleaned up if insert fails
+   - **Location**: `fs::create_dir_all(&partition_dir).ok()` creates directory even if subsequent write fails
+   - **Impact**: Empty partition directories can cause "Invalid partitioning found on disk" errors (see Issue #135)
+   - **Recommendation**: Clean up empty partition directories on insert failure, or validate directory has files before querying
+
+4. **Path Validation**:
+   - ⚠️ **Issue**: No explicit validation of database/table names for path traversal attacks
+   - **Location**: Database and table names are used directly in file paths
+   - **Impact**: Potential security risk if user input contains `../` or other path components
+   - **Recommendation**: Add validation to reject names containing path separators, `..`, or other dangerous characters
+   - **Note**: Current implementation uses these values in `format!()` which may be safe, but explicit validation is recommended
+
+5. **Error Message Consistency**:
+   - ⚠️ **Issue**: Some functions return `Result<Value, String>` while others use `TimonError`
+   - **Location**: Public API functions in `mod.rs` convert errors to strings
+   - **Impact**: Loss of structured error information at API boundary
+   - **Recommendation**: Consider standardizing error types across all public APIs
+
+6. **Metadata Cache Invalidation**:
+   - ✅ **Good**: Metadata cache is properly invalidated after writes (`save_metadata()` calls `invalidate_cache()`)
+   - **Note**: Cache uses infinite TTL with manual invalidation, which is appropriate for this use case
+
+7. **File Lock Map Growth**:
+   - ⚠️ **Issue**: `FILE_LOCKS` HashMap grows indefinitely as new file paths are encountered
+   - **Location**: `get_file_locks()` static mutex map
+   - **Impact**: Memory usage grows over time, though likely minimal for typical use cases
+   - **Recommendation**: Consider implementing LRU cache or periodic cleanup for unused locks (low priority)
+
+8. **Timestamp Calculation Edge Cases**:
+   - ✅ **Good**: `rounded_timestamp()` handles various interval sizes correctly
+   - **Note**: Uses `expect()` for timestamp conversion which could panic on invalid timestamps, but this is acceptable given the context
+
+### Code Quality Observations
+
+- **Positive**: Comprehensive error handling with `TimonError` system
+- **Positive**: Good use of atomic operations for file writes
+- **Positive**: Proper use of `Arc` and `Mutex` for thread safety
+- **Positive**: Metadata caching with proper invalidation
+- **Positive**: Schema validation and type coercion handling
+
+### Recommendations Summary
+
+**High Priority:**
+1. Handle mutex poisoning gracefully in `atomic_file_insert()`
+2. Implement or document the `todo!()` case in date filtering
+3. Add path validation for database/table names
+
+**Medium Priority:**
+4. Clean up empty partition directories on insert failure
+5. Consider standardizing error types in public API
+
+**Low Priority:**
+6. Monitor file lock map growth (likely not an issue in practice)
+7. Add more comprehensive logging for debugging race conditions
+
+Overall, Timon is a well-designed library that effectively leverages DataFusion for time-series data management, with a clean API and good error handling. The library implements robust concurrency controls with atomic file writes and file-level locking. The main areas for improvement are in query path resolution (merging default and group paths), documentation, handling edge cases around data synchronization between paths, and addressing the mutex poisoning and incomplete edge case handling issues identified above.
