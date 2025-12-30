@@ -1,9 +1,14 @@
 use super::super::super::timon_engine::db_manager::{DataFusionOutput, DatabaseManager};
+use chrono;
+use chrono::Datelike;
 use serde_json::json;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
 
@@ -1472,14 +1477,15 @@ fn test_create_database_metadata_save_error() {
   let storage_path = temp_dir.to_str().unwrap();
   let mut db_manager = DatabaseManager::new(storage_path, 30, "test_user");
 
-  // Make metadata read-only
-  let metadata_path = format!("{}/metadata.json", storage_path);
-  fs::set_permissions(&metadata_path, fs::Permissions::from_mode(0o444)).unwrap();
+  // Make the storage directory read-only so that the rename operation in save_metadata fails
+  // On Linux, fs::rename can overwrite a read-only file, but it cannot rename if the directory is read-only
+  fs::set_permissions(storage_path, fs::Permissions::from_mode(0o555)).unwrap();
 
   let result = db_manager.create_database("test_db");
   assert!(result.is_err());
 
-  fs::set_permissions(&metadata_path, fs::Permissions::from_mode(0o644)).unwrap();
+  // Restore permissions for cleanup
+  fs::set_permissions(storage_path, fs::Permissions::from_mode(0o755)).unwrap();
   cleanup_temp_dir(temp_dir);
 }
 
@@ -2089,6 +2095,788 @@ fn test_update_metadata_path_updates() {
   fs::create_dir_all(&new_storage).unwrap();
   let result = db_manager.update_metadata(&new_storage);
   let _ = result;
+
+  cleanup_temp_dir(temp_dir);
+}
+
+// ============================================================================
+// Atomic Operations and Concurrent Insert Tests
+// ============================================================================
+
+#[test]
+fn test_atomic_file_insert_basic() {
+  let temp_dir = create_temp_dir();
+  let storage_path = temp_dir.to_str().unwrap();
+  let mut db_manager = DatabaseManager::new(storage_path, 43200, "test_user");
+
+  // Create database and table with unique field
+  db_manager.create_database("test_db").unwrap();
+  let schema = json!({
+    "date": {"type": "int", "required": true, "unique": true, "datetime": true},
+    "value": {"type": "int", "required": true}
+  });
+  db_manager.create_table("test_db", "test_table", &schema.to_string()).unwrap();
+
+  // Insert initial records
+  let data1 = json!([
+    {"date": "2025.12.01 10:00:00", "value": 100},
+    {"date": "2025.12.01 10:01:00", "value": 200}
+  ]);
+  assert!(db_manager.insert("test_db", "test_table", &data1.to_string()).is_ok());
+
+  // Update existing record (same date, different value)
+  let data2 = json!([
+    {"date": "2025.12.01 10:00:00", "value": 150} // Update first record
+  ]);
+  assert!(db_manager.insert("test_db", "test_table", &data2.to_string()).is_ok());
+
+  // Insert new record
+  let data3 = json!([
+    {"date": "2025.12.01 10:02:00", "value": 300}
+  ]);
+  assert!(db_manager.insert("test_db", "test_table", &data3.to_string()).is_ok());
+
+  // Query and verify
+  let rt = Runtime::new().unwrap();
+  let result = rt
+    .block_on(db_manager.query("test_db", "SELECT * FROM test_table ORDER BY date", None, true, None))
+    .unwrap();
+
+  match result {
+    DataFusionOutput::Json(json_result) => {
+      let records = json_result.as_array().unwrap();
+      assert_eq!(records.len(), 3, "Should have 3 records total");
+
+      // Verify first record was updated
+      assert_eq!(records[0]["value"], 150, "First record should be updated to 150");
+      assert_eq!(records[1]["value"], 200, "Second record should remain 200");
+      assert_eq!(records[2]["value"], 300, "Third record should be 300");
+    }
+    _ => panic!("Expected JSON output"),
+  }
+
+  cleanup_temp_dir(temp_dir);
+}
+
+#[test]
+fn test_concurrent_inserts_same_partition() {
+  let temp_dir = create_temp_dir();
+  let storage_path = temp_dir.to_str().unwrap();
+  let mut db_manager = DatabaseManager::new(storage_path, 43200, "test_user");
+
+  // Create database and table
+  db_manager.create_database("test_db").unwrap();
+  let schema = json!({
+    "date": {"type": "int", "required": true, "unique": true, "datetime": true},
+    "value": {"type": "int", "required": true},
+    "thread_id": {"type": "int", "required": true}
+  });
+  db_manager.create_table("test_db", "test_table", &schema.to_string()).unwrap();
+
+  // Spawn 10 threads, each inserting 50 records
+  let num_threads = 10;
+  let records_per_thread = 50;
+  let base_timestamp = chrono::Utc::now().timestamp();
+  let handles = (0..num_threads)
+    .map(|thread_id| {
+      let storage_path = storage_path.to_string();
+      thread::spawn(move || {
+        let mut db_manager = DatabaseManager::new(&storage_path, 43200, "test_user");
+        let mut records = Vec::new();
+
+        for i in 0..records_per_thread {
+          let offset_seconds = (thread_id * records_per_thread + i) as i64;
+          let record_timestamp = base_timestamp + offset_seconds;
+          let record_date = chrono::DateTime::<chrono::Utc>::from_timestamp(record_timestamp, 0)
+            .unwrap()
+            .format("%Y.%m.%d %H:%M:%S")
+            .to_string();
+
+          records.push(json!({
+            "date": record_date,
+            "value": thread_id * 1000 + i,
+            "thread_id": thread_id
+          }));
+        }
+
+        let json_data = serde_json::to_string(&records).unwrap();
+        match db_manager.insert("test_db", "test_table", &json_data) {
+          Ok(_) => Ok(()),
+          Err(e) => Err(format!("{}", e)),
+        }
+      })
+    })
+    .collect::<Vec<_>>();
+
+  // Wait for all threads
+  let mut errors = Vec::new();
+  for handle in handles {
+    match handle.join() {
+      Ok(Ok(_)) => {}
+      Ok(Err(e)) => errors.push(e.to_string()),
+      Err(e) => errors.push(format!("Thread panicked: {:?}", e)),
+    }
+  }
+
+  assert!(errors.is_empty(), "No errors should occur: {:?}", errors);
+
+  // Small delay to ensure all writes are flushed
+  thread::sleep(Duration::from_millis(300));
+
+  // Query and verify all records
+  let rt = Runtime::new().unwrap();
+  let result = rt
+    .block_on(db_manager.query("test_db", "SELECT * FROM test_table", None, true, None))
+    .unwrap();
+
+  match result {
+    DataFusionOutput::Json(json_result) => {
+      let records = json_result.as_array().unwrap();
+      let expected_count = num_threads * records_per_thread;
+      assert_eq!(
+        records.len(),
+        expected_count,
+        "Should have {} records, got {}",
+        expected_count,
+        records.len()
+      );
+
+      // Verify no duplicates
+      let mut seen_dates = std::collections::HashSet::new();
+      for record in records {
+        let date = record["date"].as_i64().unwrap();
+        assert!(seen_dates.insert(date), "Duplicate date found: {}", date);
+      }
+    }
+    _ => panic!("Expected JSON output"),
+  }
+
+  cleanup_temp_dir(temp_dir);
+}
+
+#[test]
+fn test_concurrent_updates_same_record() {
+  let temp_dir = create_temp_dir();
+  let storage_path = temp_dir.to_str().unwrap();
+  let mut db_manager = DatabaseManager::new(storage_path, 43200, "test_user");
+
+  // Create database and table with unique field
+  db_manager.create_database("test_db").unwrap();
+  let schema = json!({
+    "date": {"type": "int", "required": true, "unique": true, "datetime": true},
+    "value": {"type": "int", "required": true},
+    "updated_by": {"type": "int", "required": true}
+  });
+  db_manager.create_table("test_db", "test_table", &schema.to_string()).unwrap();
+
+  // Insert initial record with a fixed date
+  let fixed_date = "2025.12.01 10:00:00";
+  let initial_data = json!([
+    {"date": fixed_date, "value": 0, "updated_by": 0}
+  ]);
+  assert!(db_manager.insert("test_db", "test_table", &initial_data.to_string()).is_ok());
+
+  // Small delay to ensure table is registered
+  thread::sleep(Duration::from_millis(100));
+
+  // Spawn 10 threads that all update the same record using the exact same date
+  let num_threads = 10;
+  let handles = (0..num_threads)
+    .map(|thread_id| {
+      let storage_path = storage_path.to_string();
+      let fixed_date = fixed_date.to_string();
+      thread::spawn(move || {
+        let mut db_manager = DatabaseManager::new(&storage_path, 43200, "test_user");
+
+        let data = json!([
+          {"date": fixed_date, "value": thread_id + 1, "updated_by": thread_id}
+        ]);
+
+        let json_data = serde_json::to_string(&data).unwrap();
+        match db_manager.insert("test_db", "test_table", &json_data) {
+          Ok(_) => Ok(()),
+          Err(e) => Err(format!("{}", e)),
+        }
+      })
+    })
+    .collect::<Vec<_>>();
+
+  // Wait for all threads
+  for handle in handles {
+    assert!(handle.join().unwrap().is_ok());
+  }
+
+  thread::sleep(Duration::from_millis(300));
+
+  // Query and verify only one record exists
+  let rt = Runtime::new().unwrap();
+  let result = rt
+    .block_on(db_manager.query("test_db", "SELECT * FROM test_table", None, true, None))
+    .unwrap();
+
+  match result {
+    DataFusionOutput::Json(json_result) => {
+      let records = json_result.as_array().unwrap();
+      assert_eq!(records.len(), 1, "Should have exactly 1 record, got {}", records.len());
+
+      let record = &records[0];
+      let value = record["value"].as_i64().unwrap();
+      let updated_by = record["updated_by"].as_i64().unwrap();
+
+      // Verify the value is one of the valid updates (1-10)
+      assert!(
+        value >= 1 && value <= num_threads as i64,
+        "Value should be between 1 and {}, got {}",
+        num_threads,
+        value
+      );
+      assert!(
+        updated_by >= 0 && updated_by < num_threads as i64,
+        "updated_by should be between 0 and {}, got {}",
+        num_threads - 1,
+        updated_by
+      );
+    }
+    _ => panic!("Expected JSON output"),
+  }
+
+  cleanup_temp_dir(temp_dir);
+}
+
+#[test]
+fn test_mixed_insert_update_concurrent() {
+  let temp_dir = create_temp_dir();
+  let storage_path = temp_dir.to_str().unwrap();
+  let mut db_manager = DatabaseManager::new(storage_path, 43200, "test_user");
+
+  // Create database and table
+  db_manager.create_database("test_db").unwrap();
+  let schema = json!({
+    "date": {"type": "int", "required": true, "unique": true, "datetime": true},
+    "value": {"type": "int", "required": true},
+    "operation": {"type": "string", "required": true}
+  });
+  db_manager.create_table("test_db", "test_table", &schema.to_string()).unwrap();
+
+  // Insert some initial records with fixed dates
+  let initial_date1 = "2025.12.01 10:00:00";
+  let initial_date2 = "2025.12.01 10:01:00";
+  let initial_data = json!([
+    {"date": initial_date1, "value": 100, "operation": "initial"},
+    {"date": initial_date2, "value": 200, "operation": "initial"}
+  ]);
+  assert!(db_manager.insert("test_db", "test_table", &initial_data.to_string()).is_ok());
+
+  // Small delay to ensure table is registered
+  thread::sleep(Duration::from_millis(100));
+
+  let base_timestamp = chrono::Utc::now().timestamp();
+  let num_insert_threads = 5;
+  let num_update_threads = 5;
+
+  // Threads that insert new records
+  let insert_handles = (0..num_insert_threads)
+    .map(|thread_id| {
+      let storage_path = storage_path.to_string();
+      thread::spawn(move || {
+        let mut db_manager = DatabaseManager::new(&storage_path, 43200, "test_user");
+        let record_date = chrono::DateTime::<chrono::Utc>::from_timestamp(base_timestamp + 100 + thread_id as i64, 0)
+          .unwrap()
+          .format("%Y.%m.%d %H:%M:%S")
+          .to_string();
+
+        let data = json!([
+          {"date": record_date, "value": thread_id + 1000, "operation": "insert"}
+        ]);
+        let json_data = serde_json::to_string(&data).unwrap();
+        match db_manager.insert("test_db", "test_table", &json_data) {
+          Ok(_) => Ok(()),
+          Err(e) => Err(format!("{}", e)),
+        }
+      })
+    })
+    .collect::<Vec<_>>();
+
+  // Threads that update existing records using exact initial dates
+  let update_handles = (0..num_update_threads)
+    .map(|thread_id| {
+      let storage_path = storage_path.to_string();
+      let update_date = if thread_id % 2 == 0 { initial_date1 } else { initial_date2 };
+      thread::spawn(move || {
+        let mut db_manager = DatabaseManager::new(&storage_path, 43200, "test_user");
+
+        let data = json!([
+          {"date": update_date, "value": thread_id + 2000, "operation": "update"}
+        ]);
+        let json_data = serde_json::to_string(&data).unwrap();
+        match db_manager.insert("test_db", "test_table", &json_data) {
+          Ok(_) => Ok(()),
+          Err(e) => Err(format!("{}", e)),
+        }
+      })
+    })
+    .collect::<Vec<_>>();
+
+  // Wait for all threads
+  for handle in insert_handles.into_iter().chain(update_handles) {
+    assert!(handle.join().unwrap().is_ok());
+  }
+
+  thread::sleep(Duration::from_millis(300));
+
+  // Query and verify
+  let rt = Runtime::new().unwrap();
+  let result = rt
+    .block_on(db_manager.query("test_db", "SELECT * FROM test_table", None, true, None))
+    .unwrap();
+
+  match result {
+    DataFusionOutput::Json(json_result) => {
+      let records = json_result.as_array().unwrap();
+      // Should have: 2 initial + 5 new inserts = 7 unique records
+      // (2 initial records were updated, so they still count as 2)
+      assert_eq!(
+        records.len(),
+        7,
+        "Should have 7 records (2 initial + 5 new inserts), got {}",
+        records.len()
+      );
+
+      // Verify no duplicates
+      let mut seen_dates = HashSet::new();
+      for record in records {
+        let date = record["date"].as_i64().unwrap();
+        assert!(seen_dates.insert(date), "Duplicate date found: {}", date);
+      }
+    }
+    _ => panic!("Expected JSON output"),
+  }
+
+  cleanup_temp_dir(temp_dir);
+}
+
+#[test]
+fn test_metadata_atomic_write() {
+  let temp_dir = create_temp_dir();
+  let storage_path = temp_dir.to_str().unwrap();
+  let mut db_manager = DatabaseManager::new(storage_path, 43200, "test_user");
+
+  // Create database and table
+  db_manager.create_database("test_db").unwrap();
+  let schema = json!({
+    "id": {"type": "int", "required": true}
+  });
+  db_manager.create_table("test_db", "test_table", &schema.to_string()).unwrap();
+
+  // Small delay to ensure metadata is persisted
+  thread::sleep(Duration::from_millis(100));
+
+  // Immediately spawn threads that try to read metadata
+  let num_threads = 10;
+  let storage_path = storage_path.to_string();
+  let handles = (0..num_threads)
+    .map(|_| {
+      let storage_path = storage_path.clone();
+      thread::spawn(move || {
+        let mut db_manager = DatabaseManager::new(&storage_path, 43200, "test_user");
+        // Try to list tables - should succeed
+        db_manager.list_tables("test_db")
+      })
+    })
+    .collect::<Vec<_>>();
+
+  // All threads should succeed
+  for handle in handles {
+    let result = handle.join().unwrap();
+    assert!(result.is_ok(), "Thread should see metadata: {:?}", result);
+    let tables = result.unwrap();
+    assert!(tables.contains(&"test_table".to_string()), "Should see test_table");
+  }
+
+  cleanup_temp_dir(temp_dir);
+}
+
+#[test]
+fn test_metadata_read_retry() {
+  let temp_dir = create_temp_dir();
+  let storage_path = temp_dir.to_str().unwrap();
+  let mut db_manager = DatabaseManager::new(storage_path, 43200, "test_user");
+
+  // Create database
+  db_manager.create_database("test_db").unwrap();
+
+  // Spawn threads that read metadata while we're creating tables
+  let storage_path = storage_path.to_string();
+  let handles = (0..5)
+    .map(|i| {
+      let storage_path = storage_path.clone();
+      thread::spawn(move || {
+        thread::sleep(Duration::from_millis(i * 10)); // Stagger reads
+        let mut db_manager = DatabaseManager::new(&storage_path, 43200, "test_user");
+        db_manager.list_databases()
+      })
+    })
+    .collect::<Vec<_>>();
+
+  // Create tables while threads are reading
+  for i in 0..5 {
+    let schema = json!({
+      "id": {"type": "int", "required": true}
+    });
+    let result = db_manager.create_table("test_db", &format!("table_{}", i), &schema.to_string());
+    // Ignore errors if table already exists or database is being accessed
+    if result.is_err() {
+      // Continue anyway - the test is about metadata visibility
+    }
+    thread::sleep(Duration::from_millis(5));
+  }
+
+  // All threads should eventually see consistent metadata
+  for handle in handles {
+    let result = handle.join().unwrap();
+    assert!(result.is_ok(), "Thread should read metadata successfully");
+    let databases = result.unwrap();
+    assert!(databases.contains(&"test_db".to_string()));
+  }
+
+  cleanup_temp_dir(temp_dir);
+}
+
+#[test]
+fn test_partition_isolation() {
+  let temp_dir = create_temp_dir();
+  let storage_path = temp_dir.to_str().unwrap();
+  let mut db_manager = DatabaseManager::new(storage_path, 43200, "test_user");
+
+  // Create database and table
+  db_manager.create_database("test_db").unwrap();
+  let schema = json!({
+    "date": {"type": "int", "required": true, "unique": true, "datetime": true},
+    "value": {"type": "int", "required": true},
+    "partition": {"type": "string", "required": true}
+  });
+  db_manager.create_table("test_db", "test_table", &schema.to_string()).unwrap();
+
+  // Small delay to ensure table is registered
+  thread::sleep(Duration::from_millis(100));
+
+  // Spawn threads that insert to different partitions
+  let num_partitions = 5;
+  let records_per_partition = 20;
+  let base_timestamp = chrono::Utc::now().timestamp();
+  let handles = (0..num_partitions)
+    .map(|partition_id| {
+      let storage_path = storage_path.to_string();
+      thread::spawn(move || {
+        let mut db_manager = DatabaseManager::new(&storage_path, 43200, "test_user");
+        let mut records = Vec::new();
+
+        // Use different months to ensure different partitions
+        // For monthly partitioning (43200 minutes), we need dates in different months
+        // Use a base date and add months for each partition
+        let base_dt = chrono::DateTime::<chrono::Utc>::from_timestamp(base_timestamp, 0).unwrap();
+        let base_year = base_dt.year();
+        let base_month = base_dt.month();
+
+        for i in 0..records_per_partition {
+          // Calculate target month (wrapping around if needed)
+          let target_month = ((base_month as i32 + partition_id as i32 - 1) % 12) + 1;
+          let target_year = base_year + ((base_month as u32 + partition_id as u32 - 1) / 12) as i32;
+
+          // Create date string directly
+          let record_date = format!(
+            "{:04}.{:02}.{:02} {:02}:00:00",
+            target_year,
+            target_month,
+            1 + (i % 28) as u32, // Use day 1-28 to avoid month boundary issues
+            10 + (i % 12) as u32
+          );
+
+          records.push(json!({
+            "date": record_date,
+            "value": partition_id * 1000 + i,
+            "partition": format!("partition_{}", partition_id)
+          }));
+        }
+
+        let json_data = serde_json::to_string(&records).unwrap();
+        match db_manager.insert("test_db", "test_table", &json_data) {
+          Ok(_) => Ok(()),
+          Err(e) => Err(format!("{}", e)),
+        }
+      })
+    })
+    .collect::<Vec<_>>();
+
+  // Wait for all threads
+  for handle in handles {
+    assert!(handle.join().unwrap().is_ok());
+  }
+
+  thread::sleep(Duration::from_millis(300));
+
+  // Query and verify all records
+  let rt = Runtime::new().unwrap();
+  let result = rt
+    .block_on(db_manager.query("test_db", "SELECT * FROM test_table", None, true, None))
+    .unwrap();
+
+  match result {
+    DataFusionOutput::Json(json_result) => {
+      let records = json_result.as_array().unwrap();
+      let expected_count = num_partitions * records_per_partition;
+      assert_eq!(
+        records.len(),
+        expected_count,
+        "Should have {} records, got {}",
+        expected_count,
+        records.len()
+      );
+
+      // Verify records are in correct partitions
+      let mut partition_counts = HashMap::new();
+      for record in records {
+        let partition = record["partition"].as_str().unwrap();
+        *partition_counts.entry(partition.to_string()).or_insert(0) += 1;
+      }
+
+      for partition_id in 0..num_partitions {
+        let partition_name = format!("partition_{}", partition_id);
+        assert_eq!(
+          partition_counts.get(&partition_name),
+          Some(&records_per_partition),
+          "Partition {} should have {} records",
+          partition_name,
+          records_per_partition
+        );
+      }
+    }
+    _ => panic!("Expected JSON output"),
+  }
+
+  cleanup_temp_dir(temp_dir);
+}
+
+#[test]
+fn test_file_write_atomicity() {
+  let temp_dir = create_temp_dir();
+  let storage_path = temp_dir.to_str().unwrap();
+  let mut db_manager = DatabaseManager::new(storage_path, 43200, "test_user");
+
+  // Create database and table
+  db_manager.create_database("test_db").unwrap();
+  let schema = json!({
+    "date": {"type": "int", "required": true, "unique": true, "datetime": true},
+    "value": {"type": "int", "required": true}
+  });
+  db_manager.create_table("test_db", "test_table", &schema.to_string()).unwrap();
+
+  // Insert records and immediately query
+  let num_inserts = 10;
+  for i in 0..num_inserts {
+    let data = json!([
+      {"date": format!("2025.12.01 {:02}:00:00", 10 + i), "value": i}
+    ]);
+    assert!(db_manager.insert("test_db", "test_table", &data.to_string()).is_ok());
+
+    // Immediately query - should never see partial writes
+    let rt = Runtime::new().unwrap();
+    let result = rt
+      .block_on(db_manager.query("test_db", "SELECT * FROM test_table", None, true, None))
+      .unwrap();
+
+    match result {
+      DataFusionOutput::Json(json_result) => {
+        let records = json_result.as_array().unwrap();
+        // Should see i+1 records (all complete)
+        assert_eq!(
+          records.len(),
+          i + 1,
+          "After {} inserts, should have {} records, got {}",
+          i + 1,
+          i + 1,
+          records.len()
+        );
+
+        // Verify all records are valid (no corruption)
+        for record in records {
+          assert!(record["date"].is_number(), "Date should be a number");
+          assert!(record["value"].is_number(), "Value should be a number");
+        }
+      }
+      _ => panic!("Expected JSON output"),
+    }
+  }
+
+  cleanup_temp_dir(temp_dir);
+}
+
+#[test]
+fn test_mutex_locking_prevents_race_conditions() {
+  let temp_dir = create_temp_dir();
+  let storage_path = temp_dir.to_str().unwrap();
+  let mut db_manager = DatabaseManager::new(storage_path, 43200, "test_user");
+
+  // Create database and table
+  db_manager.create_database("test_db").unwrap();
+  let schema = json!({
+    "date": {"type": "int", "required": true, "unique": true, "datetime": true},
+    "value": {"type": "int", "required": true},
+    "thread_id": {"type": "int", "required": true}
+  });
+  db_manager.create_table("test_db", "test_table", &schema.to_string()).unwrap();
+
+  // Spawn many threads that all write to the same file
+  let num_threads = 20;
+  let records_per_thread = 10;
+  let base_timestamp = chrono::Utc::now().timestamp();
+  let success_count = Arc::new(Mutex::new(0));
+  let handles = (0..num_threads)
+    .map(|thread_id| {
+      let storage_path = storage_path.to_string();
+      let success_count = Arc::clone(&success_count);
+      thread::spawn(move || {
+        let mut db_manager = DatabaseManager::new(&storage_path, 43200, "test_user");
+        let mut records = Vec::new();
+
+        for i in 0..records_per_thread {
+          let offset_seconds = (thread_id * records_per_thread + i) as i64;
+          let record_timestamp = base_timestamp + offset_seconds;
+          let record_date = chrono::DateTime::<chrono::Utc>::from_timestamp(record_timestamp, 0)
+            .unwrap()
+            .format("%Y.%m.%d %H:%M:%S")
+            .to_string();
+
+          records.push(json!({
+            "date": record_date,
+            "value": thread_id * 1000 + i,
+            "thread_id": thread_id
+          }));
+        }
+
+        let json_data = serde_json::to_string(&records).unwrap();
+        match db_manager.insert("test_db", "test_table", &json_data) {
+          Ok(_) => {
+            let mut count = success_count.lock().unwrap();
+            *count += 1;
+          }
+          Err(_) => {}
+        }
+      })
+    })
+    .collect::<Vec<_>>();
+
+  // Wait for all threads
+  for handle in handles {
+    handle.join().unwrap();
+  }
+
+  thread::sleep(Duration::from_millis(500));
+
+  // Verify all threads succeeded
+  let final_count = *success_count.lock().unwrap();
+  assert_eq!(
+    final_count, num_threads,
+    "All {} threads should succeed, but only {} succeeded",
+    num_threads, final_count
+  );
+
+  // Query and verify all records
+  let rt = Runtime::new().unwrap();
+  let result = rt
+    .block_on(db_manager.query("test_db", "SELECT * FROM test_table", None, true, None))
+    .unwrap();
+
+  match result {
+    DataFusionOutput::Json(json_result) => {
+      let records = json_result.as_array().unwrap();
+      let expected_count = num_threads * records_per_thread;
+      assert_eq!(
+        records.len(),
+        expected_count,
+        "Should have {} records, got {}",
+        expected_count,
+        records.len()
+      );
+
+      // Verify no duplicates
+      let mut seen_dates = HashSet::new();
+      for record in records {
+        let date = record["date"].as_i64().unwrap();
+        assert!(seen_dates.insert(date), "Duplicate date found: {}", date);
+      }
+    }
+    _ => panic!("Expected JSON output"),
+  }
+
+  cleanup_temp_dir(temp_dir);
+}
+
+#[test]
+fn test_atomic_operation_error_handling() {
+  let temp_dir = create_temp_dir();
+  let storage_path = temp_dir.to_str().unwrap();
+  let mut db_manager = DatabaseManager::new(storage_path, 43200, "test_user");
+
+  // Create database and table
+  db_manager.create_database("test_db").unwrap();
+  let schema = json!({
+    "date": {"type": "int", "required": true, "unique": true, "datetime": true},
+    "value": {"type": "int", "required": true}
+  });
+  db_manager.create_table("test_db", "test_table", &schema.to_string()).unwrap();
+
+  // Insert a valid record first to ensure table is registered
+  let valid_data = json!([
+    {"date": "2025.12.01 10:00:00", "value": 50}
+  ]);
+  assert!(db_manager.insert("test_db", "test_table", &valid_data.to_string()).is_ok());
+
+  // Small delay to ensure table registration
+  thread::sleep(Duration::from_millis(100));
+
+  // Test with invalid data (should fail gracefully)
+  let invalid_data = json!([
+    {"date": "invalid_date", "value": 100} // Invalid date format
+  ]);
+  let result = db_manager.insert("test_db", "test_table", &invalid_data.to_string());
+  assert!(result.is_err(), "Should fail with invalid date format");
+
+  // Verify database is still in valid state
+  thread::sleep(Duration::from_millis(100));
+  let rt = Runtime::new().unwrap();
+  let result = rt
+    .block_on(db_manager.query("test_db", "SELECT * FROM test_table", None, true, None))
+    .unwrap();
+
+  match result {
+    DataFusionOutput::Json(json_result) => {
+      let records = json_result.as_array().unwrap();
+      assert_eq!(records.len(), 1, "Should have 1 record (the one inserted before the error)");
+    }
+    _ => panic!("Expected JSON output"),
+  }
+
+  // Test with valid data after error (should work)
+  let valid_data2 = json!([
+    {"date": "2025.12.01 10:01:00", "value": 100}
+  ]);
+  assert!(db_manager.insert("test_db", "test_table", &valid_data2.to_string()).is_ok());
+
+  // Verify record was inserted
+  thread::sleep(Duration::from_millis(100));
+  let rt = Runtime::new().unwrap();
+  let result = rt
+    .block_on(db_manager.query("test_db", "SELECT * FROM test_table", None, true, None))
+    .unwrap();
+
+  match result {
+    DataFusionOutput::Json(json_result) => {
+      let records = json_result.as_array().unwrap();
+      assert_eq!(records.len(), 2, "Should have 2 records after valid insert");
+    }
+    _ => panic!("Expected JSON output"),
+  }
 
   cleanup_temp_dir(temp_dir);
 }
