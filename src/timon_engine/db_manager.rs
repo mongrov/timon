@@ -750,12 +750,16 @@ impl DatabaseManager {
 
     // Get or create a mutex for this file path
     let file_mutex = {
-      let mut locks = get_file_locks().lock().unwrap();
+      let mut locks = get_file_locks()
+        .lock()
+        .map_err(|e| format!("Failed to acquire file locks mutex (poisoned): {}", e))?;
       locks.entry(file_path_str.clone()).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
     };
 
     // Acquire the mutex (this will block until available)
-    let _guard = file_mutex.lock().unwrap();
+    let _guard = file_mutex
+      .lock()
+      .map_err(|e| format!("Failed to acquire file mutex for {} (poisoned): {}", file_path_str, e))?;
 
     // Now that we have the lock, read the latest data from the file (if it exists)
     let mut existing_records: Vec<Value> = if file_path.exists() {
