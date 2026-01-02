@@ -522,7 +522,8 @@ pub fn filter_files_by_date_range(files: Vec<String>, start_date: &str, end_date
               (Some(m), Some(d)) => NaiveDate::from_ymd_opt(year, m, d),
               (Some(m), None) => NaiveDate::from_ymd_opt(year, m, 1),
               (None, None) => NaiveDate::from_ymd_opt(year, 1, 1),
-              (None, Some(_)) => todo!(),
+              // Invalid pattern: day without month should not occur with current regex, handle gracefully by excluding the file
+              (None, Some(_)) => None,
             };
 
             if let Some(file_date) = file_date {

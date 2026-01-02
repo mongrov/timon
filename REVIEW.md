@@ -317,24 +317,6 @@ Documentation could be improved:
 
 ### Potential Issues Identified
 
-1. **Mutex Poisoning Risk** (`db_manager.rs:753, 758`):
-   - ⚠️ **Issue**: `unwrap()` on mutex locks can panic if mutex is poisoned (thread panicked while holding lock)
-   - **Location**: `atomic_file_insert()` function
-   - **Impact**: Could cause entire insert operation to fail if a previous thread panicked
-   - **Recommendation**: Use `lock().map_err()` or `lock().unwrap_or_else()` to handle poisoned mutexes gracefully
-   - **Code**: 
-     ```rust
-     let mut locks = get_file_locks().lock().unwrap(); // Line 753
-     let _guard = file_mutex.lock().unwrap(); // Line 758
-     ```
-
-2. **Incomplete Edge Case Handling** (`helpers.rs:525`):
-   - ⚠️ **Issue**: `todo!()` macro in `filter_files_by_date_range()` for date pattern `(None, Some(day))`
-   - **Location**: Date parsing logic when month is missing but day is present
-   - **Impact**: Will panic if this edge case is encountered
-   - **Recommendation**: Implement proper handling or return an error for invalid date patterns
-   - **Code**: `(None, Some(_)) => todo!(),`
-
 3. **Empty Partition Directory Cleanup** (`db_manager.rs:437`):
    - ⚠️ **Issue**: Partition directories are created but not cleaned up if insert fails
    - **Location**: `fs::create_dir_all(&partition_dir).ok()` creates directory even if subsequent write fails

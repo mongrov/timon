@@ -1552,12 +1552,23 @@ fn test_rounded_timestamp_all_intervals() {
 #[test]
 fn test_filter_files_by_date_range_none_day_case() {
   // Test filter_files_by_date_range with (None, Some(_)) case (line 525)
-  // This case is marked as todo!() in the code, so we test what we can
-  // The regex pattern doesn't match this case, so we test with valid dates
+  // This case is now handled gracefully by returning None (file is excluded)
+  // The regex pattern makes this case impossible to reach naturally, but the code handles it properly
+  // Test with valid dates to ensure the function works correctly
   let files = vec!["data_2023-01-15.parquet".to_string(), "data_2023-12-31.parquet".to_string()];
 
   let filtered = filter_files_by_date_range(files, "2023-01-01", "2023-12-31").unwrap();
   assert!(filtered.len() >= 2);
+
+  // Test that the function handles various date patterns correctly
+  let files_with_different_formats = vec![
+    "data_2023.parquet".to_string(),       // Year only
+    "data_2023-01.parquet".to_string(),    // Year and month
+    "data_2023-01-15.parquet".to_string(), // Full date
+  ];
+
+  let filtered_all = filter_files_by_date_range(files_with_different_formats, "2023-01-01", "2023-12-31").unwrap();
+  assert_eq!(filtered_all.len(), 3); // All should be included
 }
 
 #[test]
@@ -1812,7 +1823,3 @@ fn test_convert_batch_schema_missing_column_line633() {
 //   - json_to_arrow only creates supported types (Int64, Float64, Boolean, Utf8)
 //   - This line is only reachable with external schemas that specify unsupported types
 //
-// Line 525: todo!() case for (None, Some(_)) pattern in filter_files_by_date_range
-//   - The regex pattern makes this case impossible: (?P<year>\d{4})(?:-(?P<month>\d{2})(?:-(?P<day>\d{2}))?)?
-//   - Day group is nested inside month group, so month=None and day=Some is unreachable
-//   - This is a truly unreachable code path with the current regex
