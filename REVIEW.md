@@ -308,7 +308,7 @@ Documentation could be improved:
      - **Potential Solutions**: Merge both files or query both paths with duplicate removal
    
    - ⚠️ **Issue #135**: Insert-Query Race Condition
-     - **Problem**: Queries may read parquet files while inserts are writing them, causing "Invalid partitioning found on disk" errors
+     - **Problem**: Queries may read parquet files while inserts are writing them, causing "Corrupt Footer", "Out of Range of File", and "Protocol Error" errors
      - **Impact**: DataFusion can encounter incomplete or corrupted files during query execution
      - **Status**: Marked as "wontfix" - see [GitHub Issue #135](https://github.com/mongrov/timon/issues/135)
      - **Note**: Atomic temp file strategy IS implemented (`parquet_file_writer_locked`) for write-write safety, but insert-query race condition remains
@@ -316,19 +316,6 @@ Documentation could be improved:
 ## 7. Additional Code Review Findings
 
 ### Potential Issues Identified
-
-3. **Empty Partition Directory Cleanup** (`db_manager.rs:437`):
-   - ⚠️ **Issue**: Partition directories are created but not cleaned up if insert fails
-   - **Location**: `fs::create_dir_all(&partition_dir).ok()` creates directory even if subsequent write fails
-   - **Impact**: Empty partition directories can cause "Invalid partitioning found on disk" errors (see Issue #135)
-   - **Recommendation**: Clean up empty partition directories on insert failure, or validate directory has files before querying
-
-4. **Path Validation**:
-   - ⚠️ **Issue**: No explicit validation of database/table names for path traversal attacks
-   - **Location**: Database and table names are used directly in file paths
-   - **Impact**: Potential security risk if user input contains `../` or other path components
-   - **Recommendation**: Add validation to reject names containing path separators, `..`, or other dangerous characters
-   - **Note**: Current implementation uses these values in `format!()` which may be safe, but explicit validation is recommended
 
 5. **Error Message Consistency**:
    - ⚠️ **Issue**: Some functions return `Result<Value, String>` while others use `TimonError`
@@ -363,7 +350,7 @@ Documentation could be improved:
 **High Priority:**
 1. Handle mutex poisoning gracefully in `atomic_file_insert()`
 2. Implement or document the `todo!()` case in date filtering
-3. Add path validation for database/table names
+3. Add path validation for database/table names for path traversal attacks
 
 **Medium Priority:**
 4. Clean up empty partition directories on insert failure

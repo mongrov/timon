@@ -15,6 +15,7 @@ use datafusion::parquet::file::properties::WriterProperties;
 use datafusion::parquet::file::reader::{FileReader, SerializedFileReader};
 use datafusion::prelude::*;
 use fs2::FileExt;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -25,6 +26,22 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use std::{fmt, fs};
 use tokio::io::Result as TokioResult;
+
+/// Type of name being validated (Database or Table)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NameType {
+  Database,
+  Table,
+}
+
+impl fmt::Display for NameType {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      NameType::Database => write!(f, "Database"),
+      NameType::Table => write!(f, "Table"),
+    }
+  }
+}
 
 // Global mutex map for file-level locking (process-wide, works across threads)
 fn get_file_locks() -> &'static Mutex<HashMap<String, Arc<Mutex<()>>>> {
@@ -168,7 +185,32 @@ impl DatabaseManager {
     db_manager
   }
 
+  /// Validates database or table name to prevent path traversal attacks
+  /// Only allows alphanumeric characters and underscores (A-Z, a-z, 0-9, _)
+  fn validate_name(name: &str, name_type: NameType) -> Result<(), DataFusionError> {
+    // Check for empty names
+    if name.is_empty() {
+      return Err(DataFusionError::Plan(format!("{} name cannot be empty", name_type)));
+    }
+
+    // Use static regex to ensure name contains only alphanumeric characters and underscores (A-Z, a-z, 0-9, _)
+    static VALID_PATTERN: OnceLock<Regex> = OnceLock::new();
+    let valid_pattern = VALID_PATTERN.get_or_init(|| Regex::new(r#"^[a-zA-Z0-9_]+$"#).expect("Invalid regex pattern in validate_name"));
+
+    if !valid_pattern.is_match(name) {
+      return Err(DataFusionError::Plan(format!(
+        "{} name '{}' is not valid. Only alphanumeric characters and underscores (A-Z, a-z, 0-9, _) are allowed",
+        name_type, name
+      )));
+    }
+
+    Ok(())
+  }
+
   pub fn create_database(&mut self, db_name: &str) -> Result<(), DataFusionError> {
+    // Validate database name to prevent path traversal attacks
+    Self::validate_name(db_name, NameType::Database)?;
+
     // Reload the metadata to ensure it's up to date
     self.metadata = self
       .get_metadata_cached()
@@ -197,6 +239,10 @@ impl DatabaseManager {
   }
 
   pub fn create_table(&mut self, db_name: &str, table_name: &str, schema_json: &str) -> Result<String, Box<dyn Error>> {
+    // Validate database and table names to prevent path traversal attacks
+    Self::validate_name(db_name, NameType::Database).map_err(|e| e.to_string())?;
+    Self::validate_name(table_name, NameType::Table).map_err(|e| e.to_string())?;
+
     // Reload the metadata to ensure it's up to date
     self.metadata = self
       .get_metadata_cached()
@@ -271,6 +317,9 @@ impl DatabaseManager {
   }
 
   pub fn list_tables(&mut self, db_name: &str) -> Result<Vec<String>, DataFusionError> {
+    // Validate database name to prevent path traversal attacks
+    Self::validate_name(db_name, NameType::Database)?;
+
     // Reload the metadata to ensure it's up to date
     self.metadata = self
       .get_metadata_cached()
@@ -287,6 +336,9 @@ impl DatabaseManager {
   }
 
   pub fn delete_database(&mut self, db_name: &str) -> Result<(), DataFusionError> {
+    // Validate database name to prevent path traversal attacks
+    Self::validate_name(db_name, NameType::Database)?;
+
     // Reload the metadata to ensure it's up to date
     self.metadata = self
       .get_metadata_cached()
@@ -309,6 +361,10 @@ impl DatabaseManager {
   }
 
   pub fn delete_table(&mut self, db_name: &str, table_name: &str) -> Result<(), DataFusionError> {
+    // Validate database and table names to prevent path traversal attacks
+    Self::validate_name(db_name, NameType::Database)?;
+    Self::validate_name(table_name, NameType::Table)?;
+
     // Reload the metadata to ensure it's up to date
     // If metadata file doesn't exist (file not found), that's OK - table might not exist either
     // But if metadata file exists but is corrupted, that's an error
@@ -356,6 +412,10 @@ impl DatabaseManager {
   }
 
   pub fn insert(&mut self, db_name: &str, table_name: &str, json_data: &str) -> Result<Vec<Value>, Box<dyn Error>> {
+    // Validate database and table names to prevent path traversal attacks
+    Self::validate_name(db_name, NameType::Database).map_err(|e| e.to_string())?;
+    Self::validate_name(table_name, NameType::Table).map_err(|e| e.to_string())?;
+
     // Reload metadata
     self.metadata = self.get_metadata_cached()?;
 
@@ -462,9 +522,17 @@ impl DatabaseManager {
     is_json_format: bool,
     limit_partitions: Option<usize>,
   ) -> DataFusionResult<DataFusionOutput> {
+    // Validate database name to prevent path traversal attacks
+    Self::validate_name(db_name, NameType::Database)?;
+
     // Extract table names and CTE names from the AST
     let (mut table_names, cte_names) =
       extract_table_names_and_ctes(&sql_query).map_err(|e| DataFusionError::Execution(format!("Failed to extract table names: {}", e)))?;
+
+    // Validate all table names to prevent path traversal attacks
+    for table_name in &table_names {
+      Self::validate_name(table_name, NameType::Table)?;
+    }
     // Remove CTE names from table names (CTEs are not real tables)
     table_names.retain(|name| !cte_names.contains(name));
 
@@ -673,6 +741,10 @@ impl DatabaseManager {
 
   // Resolve the effective directory path for a logical table, preferring group/user path when provided
   fn resolve_table_dir(&self, db_name: &str, table_name: &str, username: Option<&str>) -> Result<String, Box<dyn Error>> {
+    // Validate database and table names to prevent path traversal attacks
+    Self::validate_name(db_name, NameType::Database).map_err(|e| e.to_string())?;
+    Self::validate_name(table_name, NameType::Table).map_err(|e| e.to_string())?;
+
     // Reload metadata to ensure it's up-to-date
     let metadata = self.get_metadata_cached()?;
 
@@ -908,6 +980,10 @@ impl DatabaseManager {
   }
 
   pub fn build_files_list(&self, db_name: &str, table_name: &str, username: Option<&str>) -> Result<Vec<String>, Box<dyn Error>> {
+    // Validate database and table names to prevent path traversal attacks
+    Self::validate_name(db_name, NameType::Database).map_err(|e| e.to_string())?;
+    Self::validate_name(table_name, NameType::Table).map_err(|e| e.to_string())?;
+
     // Reload metadata to ensure it's up-to-date
     let metadata = self
       .get_metadata_cached()
@@ -1006,6 +1082,10 @@ impl DatabaseManager {
   }
 
   pub fn get_table_schema(&self, db_name: &str, table_name: &str) -> Result<serde_json::Value, Box<dyn Error>> {
+    // Validate database and table names to prevent path traversal attacks
+    Self::validate_name(db_name, NameType::Database).map_err(|e| e.to_string())?;
+    Self::validate_name(table_name, NameType::Table).map_err(|e| e.to_string())?;
+
     // Reload metadata to ensure it's up-to-date
     let metadata = self.get_metadata_cached().map_err(|e| format!("Failed to reload metadata: {}", e))?;
     // Look up the schema from the metadata
@@ -1299,6 +1379,11 @@ impl DatabaseManager {
   }
 
   pub fn get_table_path(&self, db_name: &str, table_name: &str) -> Option<String> {
+    // Validate database and table names to prevent path traversal attacks
+    // Return None if validation fails (matching the function's return type)
+    if Self::validate_name(db_name, NameType::Database).is_err() || Self::validate_name(table_name, NameType::Table).is_err() {
+      return None;
+    }
     self.metadata.databases.get(db_name)?.tables.get(table_name)?.path.clone().into()
   }
 }
