@@ -662,7 +662,7 @@ async fn test_cloud_operations_with_username_mismatch() {
   let result = cloud_sink_parquet("test_db", "test_table").await;
   assert!(result.is_ok() || result.is_err()); // Handle both cases
   if let Err(err) = result {
-    assert!(err.contains("Username mismatch") || err.contains("CloudStorageManager is not initialized"));
+    assert!(err.message.contains("Username mismatch") || err.message.contains("CloudStorageManager is not initialized"));
   }
 }
 
@@ -1358,8 +1358,8 @@ fn test_list_databases_error_path_lines158_165() {
     // Should return an error
     if result.is_err() {
       // Error path was hit - lines 158-165
-      let error_msg = result.unwrap_err();
-      assert!(!error_msg.is_empty());
+      let error = result.unwrap_err();
+      assert!(!error.message.is_empty());
     } else {
       // If it doesn't fail, the metadata might have been reloaded
       // Try again after a short delay

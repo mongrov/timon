@@ -4,6 +4,7 @@ pub mod timon_engine;
 // cbindgen:ignore
 #[cfg(target_os = "android")]
 pub mod android {
+  use crate::timon_engine::errors::TimonError;
   use crate::timon_engine::{
     cloud_fetch_parquet, cloud_fetch_parquet_batch, cloud_sink_parquet, cloud_sync_parquet, create_database, create_table, delete_database,
     delete_table, init_bucket, init_timon, insert, list_databases, list_tables, query,
@@ -575,6 +576,7 @@ pub mod android {
 
 #[cfg(target_os = "ios")]
 pub mod ios {
+  use crate::timon_engine::errors::TimonError;
   use crate::timon_engine::{
     cloud_fetch_parquet, cloud_fetch_parquet_batch, cloud_sink_parquet, cloud_sync_parquet, create_database, create_table, delete_database,
     delete_table, init_bucket, init_timon, insert, list_databases, list_tables, query,

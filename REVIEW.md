@@ -317,12 +317,6 @@ Documentation could be improved:
 
 ### Potential Issues Identified
 
-5. **Error Message Consistency**:
-   - ⚠️ **Issue**: Some functions return `Result<Value, String>` while others use `TimonError`
-   - **Location**: Public API functions in `mod.rs` convert errors to strings
-   - **Impact**: Loss of structured error information at API boundary
-   - **Recommendation**: Consider standardizing error types across all public APIs
-
 6. **Metadata Cache Invalidation**:
    - ✅ **Good**: Metadata cache is properly invalidated after writes (`save_metadata()` calls `invalidate_cache()`)
    - **Note**: Cache uses infinite TTL with manual invalidation, which is appropriate for this use case
@@ -347,12 +341,12 @@ Documentation could be improved:
 
 ### Recommendations Summary
 
-**High Priority:**
+**High Priority: (have been covered at this point)**
 1. Handle mutex poisoning gracefully in `atomic_file_insert()`
 2. Implement or document the `todo!()` case in date filtering
 3. Add path validation for database/table names for path traversal attacks
 
-**Medium Priority:**
+**Medium Priority: (have been covered at this point)**
 4. Clean up empty partition directories on insert failure
 5. Consider standardizing error types in public API
 

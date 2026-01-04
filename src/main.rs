@@ -641,7 +641,7 @@ async fn test_s3_sync() {
   let cloud_fetch_parquet_result = cloud_fetch_parquet(USERNAME, DATABASE_NAME, TABLE_NAME, fetch_range.clone()).await;
   println!("{}", cloud_fetch_parquet_result.unwrap());
 
-  let cloud_sink_parquet_result: Result<serde_json::Value, String> = cloud_sink_parquet(DATABASE_NAME, TABLE_NAME).await;
+  let cloud_sink_parquet_result = cloud_sink_parquet(DATABASE_NAME, TABLE_NAME).await;
   println!("{}", cloud_sink_parquet_result.unwrap());
 
   let cloud_sync_parquet_result = cloud_sync_parquet(DATABASE_NAME, TABLE_NAME, fetch_range.clone(), None);
