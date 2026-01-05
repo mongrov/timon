@@ -43,10 +43,28 @@ impl fmt::Display for NameType {
   }
 }
 
+// Structure to track file locks with their last access time
+struct FileLockEntry {
+  lock: Arc<Mutex<()>>,
+  last_accessed: Instant,
+}
+
 // Global mutex map for file-level locking (process-wide, works across threads)
-fn get_file_locks() -> &'static Mutex<HashMap<String, Arc<Mutex<()>>>> {
-  static FILE_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+// Tracks last access time to enable cleanup of unused locks
+fn get_file_locks() -> &'static Mutex<HashMap<String, FileLockEntry>> {
+  static FILE_LOCKS: OnceLock<Mutex<HashMap<String, FileLockEntry>>> = OnceLock::new();
   FILE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+// Cleanup unused locks that haven't been accessed in the last 60 minutes
+// This prevents the HashMap from growing indefinitely
+const LOCK_CLEANUP_INTERVAL: Duration = Duration::from_secs(3600); // 60 minutes
+const LOCK_CLEANUP_THRESHOLD: Duration = Duration::from_secs(3600); // Remove locks unused for 60 minutes
+
+fn cleanup_unused_locks(locks: &mut HashMap<String, FileLockEntry>) {
+  let now = Instant::now();
+  // Remove locks that haven't been accessed recently
+  locks.retain(|_path, entry| now.duration_since(entry.last_accessed) < LOCK_CLEANUP_THRESHOLD);
 }
 
 pub enum DataFusionOutput {
@@ -820,12 +838,29 @@ impl DatabaseManager {
     // Use process-wide mutex for this file path (works reliably across threads in same process)
     let file_path_str = file_path.to_string_lossy().to_string();
 
-    // Get or create a mutex for this file path
+    // Get or create a mutex for this file path, and update last access time
     let file_mutex = {
+      let now = Instant::now();
       let mut locks = get_file_locks()
         .lock()
         .map_err(|e| format!("Failed to acquire file locks mutex (poisoned): {}", e))?;
-      locks.entry(file_path_str.clone()).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+
+      // Periodically cleanup unused locks (every LOCK_CLEANUP_INTERVAL)
+      static LAST_CLEANUP: OnceLock<Mutex<Instant>> = OnceLock::new();
+      let last_cleanup = LAST_CLEANUP.get_or_init(|| Mutex::new(Instant::now()));
+      if let Ok(mut last) = last_cleanup.lock() {
+        if now.duration_since(*last) >= LOCK_CLEANUP_INTERVAL {
+          cleanup_unused_locks(&mut locks);
+          *last = now;
+        }
+      }
+
+      let entry = locks.entry(file_path_str.clone()).or_insert_with(|| FileLockEntry {
+        lock: Arc::new(Mutex::new(())),
+        last_accessed: now,
+      });
+      entry.last_accessed = now;
+      entry.lock.clone()
     };
 
     // Acquire the mutex (this will block until available)
