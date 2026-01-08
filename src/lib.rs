@@ -14,7 +14,11 @@ pub mod android {
   use jni::NativeMethod;
   use std::collections::HashMap;
   use std::ffi::c_void;
+  use std::sync::LazyLock;
   use tokio::runtime::Runtime;
+
+  // Shared runtime instance for all JNI calls to avoid creating multiple runtimes
+  static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| Runtime::new().expect("Failed to create tokio runtime for JNI interface"));
 
   // ******************************** File Storage ********************************
   #[no_mangle]
@@ -229,10 +233,7 @@ pub mod android {
     let rust_limit_partitions = if limit_partitions > 0 { Some(limit_partitions as usize) } else { None };
 
     // Call the async query function
-    match Runtime::new()
-      .unwrap()
-      .block_on(query(&rust_db_name, &rust_sql_query, rust_username.as_deref(), rust_limit_partitions))
-    {
+    match RUNTIME.block_on(query(&rust_db_name, &rust_sql_query, rust_username.as_deref(), rust_limit_partitions)) {
       Ok(result) => {
         let json_string = result.to_string();
         let output = env.new_string(json_string).expect("Couldn't create success string!");
@@ -308,7 +309,7 @@ pub mod android {
       Some(env.get_string(&username).expect("Couldn't get username java string!").into())
     };
 
-    match Runtime::new().unwrap().block_on(cloud_sync_parquet(
+    match RUNTIME.block_on(cloud_sync_parquet(
       &rust_db_name,
       &rust_table_name,
       rust_date_range,
@@ -332,7 +333,7 @@ pub mod android {
     let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
     let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
 
-    match Runtime::new().unwrap().block_on(cloud_sink_parquet(&rust_db_name, &rust_table_name)) {
+    match RUNTIME.block_on(cloud_sink_parquet(&rust_db_name, &rust_table_name)) {
       Ok(result) => {
         let json_string = result.to_string();
         let output = env.new_string(json_string).expect("Couldn't create success string!");
@@ -365,10 +366,7 @@ pub mod android {
     rust_date_range.insert("start_date", &rust_start);
     rust_date_range.insert("end_date", &rust_end);
 
-    match Runtime::new()
-      .unwrap()
-      .block_on(cloud_fetch_parquet(&rust_username, &rust_db_name, &rust_table_name, rust_date_range))
-    {
+    match RUNTIME.block_on(cloud_fetch_parquet(&rust_username, &rust_db_name, &rust_table_name, rust_date_range)) {
       Ok(result) => {
         let json_string = result.to_string();
         let output = env.new_string(json_string).expect("Couldn't create success string!");
@@ -444,7 +442,7 @@ pub mod android {
     let db_names_refs: Vec<&str> = rust_db_names.iter().map(|s| s.as_str()).collect();
     let table_names_refs: Vec<&str> = rust_table_names.iter().map(|s| s.as_str()).collect();
 
-    match Runtime::new().unwrap().block_on(cloud_fetch_parquet_batch(
+    match RUNTIME.block_on(cloud_fetch_parquet_batch(
       &usernames_refs,
       &db_names_refs,
       &table_names_refs,
@@ -582,7 +580,11 @@ pub mod ios {
   use libc::c_char;
   use std::collections::HashMap;
   use std::ffi::{CStr, CString};
+  use std::sync::LazyLock;
   use tokio::runtime::Runtime;
+
+  // Shared runtime instance for all iOS calls to avoid creating multiple runtimes
+  static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| Runtime::new().expect("Failed to create tokio runtime for iOS interface"));
 
   // Helper function to convert C strings to Rust strings
   unsafe fn c_str_to_string(c_str: *const c_char) -> Result<String, String> {
@@ -786,10 +788,7 @@ pub mod ios {
           // Convert limit_partitions: if -1 or 0, use None; otherwise use Some(value)
           let rust_limit_partitions = if limit_partitions > 0 { Some(limit_partitions as usize) } else { None };
 
-          match Runtime::new()
-            .unwrap()
-            .block_on(query(&rust_db_name, &rust_sql_query, rust_username.as_deref(), rust_limit_partitions))
-          {
+          match RUNTIME.block_on(query(&rust_db_name, &rust_sql_query, rust_username.as_deref(), rust_limit_partitions)) {
             Ok(result) => {
               let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "[]".to_string());
               string_to_c_str(json_string)
@@ -892,7 +891,7 @@ pub mod ios {
           date_range_map.insert("start_date", start_date.as_str());
           date_range_map.insert("end_date", end_date.as_str());
 
-          match Runtime::new().unwrap().block_on(cloud_sync_parquet(
+          match RUNTIME.block_on(cloud_sync_parquet(
             &rust_db_name,
             &rust_table_name,
             date_range_map,
@@ -923,7 +922,7 @@ pub mod ios {
   pub extern "C" fn nativeCloudSinkParquet(db_name: *const c_char, table_name: *const c_char) -> *mut c_char {
     unsafe {
       match (c_str_to_string(db_name), c_str_to_string(table_name)) {
-        (Ok(rust_db_name), Ok(rust_table_name)) => match Runtime::new().unwrap().block_on(cloud_sink_parquet(&rust_db_name, &rust_table_name)) {
+        (Ok(rust_db_name), Ok(rust_table_name)) => match RUNTIME.block_on(cloud_sink_parquet(&rust_db_name, &rust_table_name)) {
           Ok(result) => {
             let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
             string_to_c_str(json_string)
@@ -982,10 +981,7 @@ pub mod ios {
           date_range_map.insert("start_date", start_date.as_str());
           date_range_map.insert("end_date", end_date.as_str());
 
-          match Runtime::new()
-            .unwrap()
-            .block_on(cloud_fetch_parquet(&rust_username, &rust_db_name, &rust_table_name, date_range_map))
-          {
+          match RUNTIME.block_on(cloud_fetch_parquet(&rust_username, &rust_db_name, &rust_table_name, date_range_map)) {
             Ok(result) => {
               let json_string = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
               string_to_c_str(json_string)
@@ -1087,7 +1083,7 @@ pub mod ios {
           let db_names_refs: Vec<&str> = rust_db_names.iter().map(|s| s.as_str()).collect();
           let table_names_refs: Vec<&str> = rust_table_names.iter().map(|s| s.as_str()).collect();
 
-          match Runtime::new().unwrap().block_on(cloud_fetch_parquet_batch(
+          match RUNTIME.block_on(cloud_fetch_parquet_batch(
             &usernames_refs,
             &db_names_refs,
             &table_names_refs,

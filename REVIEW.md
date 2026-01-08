@@ -308,5 +308,371 @@ Documentation could be improved:
      - **Status**: Marked as "wontfix" - see [GitHub Issue #135](https://github.com/mongrov/timon/issues/135)
      - **Note**: Atomic temp file strategy IS implemented (`parquet_file_writer_locked`) for write-write safety, but insert-query race condition remains
 
+## 7. Additional Issues & Concerns Identified
 
-Overall, Timon is a well-designed library that effectively leverages DataFusion for time-series data management, with a clean API and good error handling. The library implements robust concurrency controls with atomic file writes and file-level locking. The main areas for improvement are in query path resolution (merging default and group paths), documentation, handling edge cases around data synchronization between paths.
+### Error Handling & Panic Safety
+
+⚠️ **Issue: Excessive use of `unwrap()` and `expect()` in production code** (VALID ISSUE - medium priority)
+- **Location**: Found 1046+ instances across the codebase
+- **Risk**: Can cause panics in production, especially in:
+  - `lib.rs`: JNI interface functions use `expect()` for string conversions (lines 29-265)
+  - `db_manager.rs`: Metadata operations, cache access, and file operations
+  - `main.rs`: Test code, but patterns may leak into production
+- **Impact**: 
+  - Panics in JNI layer can crash Android/iOS applications
+  - Panics during file operations can leave system in inconsistent state
+  - Panics during metadata operations can corrupt metadata
+- **Recommendation**: 
+  - Replace `unwrap()`/`expect()` with proper error handling in production paths
+  - Use `?` operator for error propagation
+  - Add fallback behavior for critical operations
+  - Consider using `unwrap_or_else()` with logging for non-critical paths
+
+⚠️ **Issue: Silent error handling with `.ok()`** (VALID ISSUE, but some errors are intentionally suppressed - medium priority)
+- **Location**: `db_manager.rs:515` - `fs::create_dir_all(&partition_dir).ok()`
+- **Problem**: 
+  - Directory creation failures are silently ignored
+  - Multiple other locations use `.ok()` to ignore errors (see grep results)
+  - `db_manager.rs:1328, 1337` - `sync_all().ok()` ignores sync failures
+  - `helpers.rs:516-518` - Optional parsing with `.ok()` may hide validation issues
+- **Impact**: 
+  - Failed directory creation can lead to file write failures later
+  - Empty partition directories can cause DataFusion validation errors
+  - Difficult to debug issues when errors are swallowed
+  - Sync failures can lead to data loss if system crashes
+- **Recommendation**: 
+  - Log directory creation failures
+  - Return errors instead of silently ignoring them
+  - Clean up empty partition directories on failure
+  - Log sync failures (even if non-fatal)
+  - Consider using `unwrap_or_else()` with logging for non-critical paths
+
+### Resource Management & Memory Leaks
+
+⚠️ **Issue: DatabaseManager instances never cleaned up** (This won't be a problem when we consider the number of usernames(5-10 usernames for family sharing) each app will have - low priority)
+- **Location**: `mod.rs:37` - `static DATABASE_MANAGERS: LazyLock<Arc<Mutex<HashMap<String, DatabaseManager>>>>`
+- **Problem**: 
+  - DatabaseManager instances are stored in a static HashMap
+  - No mechanism to remove unused managers
+  - Each manager holds a `SessionContext` and metadata cache
+  - HashMap grows indefinitely as new usernames are accessed
+  - Auto-creation of managers for new usernames (lines 66-79) accelerates growth
+  - No TTL or access tracking for managers
+- **Impact**: 
+  - Memory usage grows over time
+  - SessionContext instances accumulate (each holds query execution state)
+  - Potential memory leak in long-running applications
+  - Can grow unbounded in multi-user scenarios
+- **Recommendation**: 
+  - Implement LRU cache with TTL for DatabaseManager instances
+  - Add cleanup mechanism for unused managers (e.g., remove after 1 hour of inactivity)
+  - Track last access time for each manager
+  - Consider weak references or periodic cleanup task
+  - Add configurable maximum number of managers
+
+⚠️ **Issue: File lock cleanup may not be sufficient** (I considered the number of files acquiring locks and lock size and that won't be an issue)
+- **Location**: `db_manager.rs:54-68` - File lock cleanup logic
+- **Problem**: 
+  - Locks are cleaned up after 60 minutes of inactivity
+  - If many unique file paths are accessed, HashMap can grow large
+  - Cleanup only happens during lock acquisition, not proactively
+- **Impact**: 
+  - Memory usage can grow if many unique files are accessed
+  - Locks for deleted files may persist until cleanup
+- **Recommendation**: 
+  - Add periodic background cleanup task
+  - Verify file existence before keeping lock entry
+  - Consider reducing cleanup threshold or making it configurable
+
+⚠️ **Issue: Temporary files may not be cleaned up on error** (VALID ISSUE, but less likely to have orphaned files - low priority)
+- **Location**: `db_manager.rs:964-1012` - `parquet_file_writer_locked`
+- **Problem**: 
+  - Temp files are created with unique timestamps
+  - If process crashes between temp file creation and rename, temp files remain
+  - No cleanup mechanism for orphaned temp files
+  - Temp file cleanup only happens if rename succeeds (line 1012: `let _ = fs::remove_file(&temp_path)`)
+  - If process crashes before rename, temp file remains indefinitely
+- **Impact**: 
+  - Disk space can be consumed by orphaned temp files
+  - Temp files accumulate over time
+  - No startup cleanup of old temp files
+- **Recommendation**: 
+  - Add startup cleanup of old temp files (scan for `*.tmp` files older than threshold)
+  - Use file locking or atomic operations to prevent orphaned files
+  - Consider using system temp directory with automatic cleanup
+  - Add periodic background task to clean up orphaned temp files
+
+⚠️ **Issue: Metadata temporary files may not be cleaned up** (VALID ISSUE, but less likely to cause any errors - low priority)
+- **Location**: `db_manager.rs:1315-1344` - `save_metadata()`
+- **Problem**: 
+  - Metadata writes use temp file pattern: `metadata.json.tmp` (line 1318)
+  - Temp file is renamed atomically (line 1332)
+  - If process crashes between write and rename, `metadata.json.tmp` remains
+  - No cleanup mechanism for orphaned metadata temp files
+- **Impact**: 
+  - Orphaned `metadata.json.tmp` files can accumulate
+  - May cause confusion during debugging
+  - Could potentially be read instead of actual metadata if error handling is incorrect
+- **Recommendation**: 
+  - Add startup cleanup of `metadata.json.tmp` files
+  - Verify temp file age before using (reject files older than threshold)
+  - Add explicit cleanup after successful rename
+
+### Security Concerns
+
+🔴 **Issue: Hardcoded default credentials in cloud storage** (NOT A VALID ISSUE)
+- **Location**: `cloud_sync.rs:177-181`
+- **Problem**: 
+  ```rust
+  let bucket_endpoint = bucket_endpoint.unwrap_or("http://localhost:9000").to_owned();
+  let bucket_name = bucket_name.unwrap_or("timon").to_owned();
+  let access_key_id = access_key_id.unwrap_or("ahmed").to_owned();
+  let secret_access_key = secret_access_key.unwrap_or("ahmed1234").to_owned();
+  ```
+- **Impact**: 
+  - Default credentials are hardcoded in source code
+  - If credentials are not provided, insecure defaults are used
+  - Credentials may be logged or exposed in error messages
+- **Recommendation**: 
+  - Remove hardcoded defaults
+  - Require explicit credential provision
+  - Return error if credentials are missing
+  - Never log credentials in error messages or debug output
+
+⚠️ **Issue: Credentials passed through JNI interface** (NEED TO LEARN MORE ABOUT "secure memory handling for sensitive data")
+- **Location**: `lib.rs:261-265` - JNI functions receive credentials as strings
+- **Problem**: 
+  - Credentials are passed as Java strings through JNI
+  - Strings may remain in memory longer than necessary
+  - No secure memory handling for sensitive data
+- **Impact**: 
+  - Credentials may be exposed in memory dumps
+  - Credentials may be logged by JNI layer
+- **Recommendation**: 
+  - Clear credential strings from memory after use
+  - Use secure string handling if available
+  - Avoid logging credential values
+
+### Code Quality & Robustness
+
+⚠️ **Issue: Metadata cache with infinite TTL** (NOT SURE HOW "metadata can get modified externally in our use cases")
+- **Location**: `db_manager.rs:195` - `cache_ttl: Duration::MAX`
+- **Problem**: 
+  - Metadata cache never expires automatically
+  - Cache is only invalidated on writes
+  - If metadata is modified externally, cache becomes stale
+- **Impact**: 
+  - Stale metadata can cause incorrect behavior
+  - External metadata changes may not be reflected
+- **Recommendation**: 
+  - Add configurable TTL for metadata cache
+  - Implement cache invalidation on file modification time changes
+  - Consider using file watchers for metadata changes
+
+⚠️ **Issue: No validation of written parquet files** (VALID ISSUE, BUT MOST LIKELY WILL NOT HAPPEN - medium priority)
+- **Location**: `db_manager.rs:924-931` - File write verification
+- **Problem**: 
+  - Only checks file size (non-zero) (line 928-930)
+  - Does not validate parquet file structure
+  - Does not verify file is readable
+  - No verification that file can be parsed by DataFusion
+- **Impact**: 
+  - Corrupted parquet files may be written
+  - Errors only discovered during query time
+  - Difficult to debug write failures
+  - Can cause "Invalid partitioning" errors during queries
+- **Recommendation**: 
+  - Add parquet file validation after write
+  - Verify file can be read back using `SerializedFileReader`
+  - Check parquet footer integrity
+  - Validate schema matches expected schema
+  - Consider using DataFusion's file validation utilities
+
+⚠️ **Issue: Error handling in metadata operations** (VALID ISSUE, Less likely to happen - medium priority)
+- **Location**: `db_manager.rs:367, 412` - `save_metadata().map_err(|e| e.to_string()).unwrap()`
+- **Problem**: 
+  - Metadata save failures are converted to strings and unwrapped
+  - Panics if metadata save fails
+  - No retry logic for transient failures
+  - Error information is lost when converting to string
+- **Impact**: 
+  - Panics can leave system in inconsistent state
+  - Metadata corruption can cause data loss
+  - Difficult to debug metadata save failures
+- **Recommendation**: 
+  - Properly handle metadata save errors (return `Result` instead of panicking)
+  - Add retry logic for transient failures (similar to `read_metadata()` retry logic)
+  - Implement metadata backup/restore mechanism
+  - Preserve original error information instead of converting to string
+
+### Performance & Scalability
+
+⚠️ **Issue: No limits on concurrent operations** (Not a valid issue in our use cases - low priority)
+- **Location**: Throughout codebase
+- **Problem**: 
+  - No rate limiting on inserts
+  - No limit on concurrent queries
+  - No limit on file operations
+- **Impact**: 
+  - Resource exhaustion under high load
+  - Potential DoS vulnerability
+  - Unpredictable performance degradation
+- **Recommendation**: 
+  - Add configurable limits on concurrent operations
+  - Implement backpressure mechanisms
+  - Add rate limiting for API calls
+
+⚠️ **Issue: Synchronous file operations in async context** (VALID ISSUE - medium priority)
+- **Location**: `db_manager.rs:1203-1253` - `read_metadata()` uses blocking I/O
+- **Problem**: 
+  - Metadata reads use blocking `fs::read_to_string()`
+  - Called from async contexts
+  - Can block async runtime
+- **Impact**: 
+  - Blocks async runtime threads
+  - Reduces concurrency
+  - Can cause deadlocks in high-load scenarios
+- **Recommendation**: 
+  - Use `tokio::fs` for async file operations
+  - Or use `spawn_blocking` for blocking operations
+  - Ensure all I/O in async paths is non-blocking
+
+⚠️ **Issue: Multiple Runtime instances created in JNI/iOS interfaces** (VALID ISSUE - medium priority)
+- **Location**: `lib.rs:232, 311, 335, 368, 447, 789, 895, 926, 985, 1090` - Multiple `Runtime::new().unwrap()` calls
+- **Problem**: 
+  - Each JNI/iOS function call creates a new `tokio::Runtime` instance
+  - Creating multiple runtimes is expensive and can cause issues
+  - No reuse of existing runtime
+  - Runtime creation can fail but uses `unwrap()` (panics in production)
+- **Impact**: 
+  - Performance overhead from creating runtimes repeatedly
+  - Potential resource exhaustion if many calls happen quickly
+  - Panics if runtime creation fails (should be rare but possible)
+  - Each runtime spawns its own thread pool
+- **Recommendation**: 
+  - Use a shared static `LazyLock<Runtime>` for JNI/iOS interfaces
+  - Reuse the same runtime instance across all calls
+  - Handle runtime creation errors gracefully instead of panicking
+  - Consider using `Handle::current()` if already in async context
+
+### Documentation & Maintainability
+
+⚠️ **Issue: Missing function documentation**
+- **Location**: Many functions lack `///` documentation comments
+- **Problem**: 
+  - Public API functions lack documentation
+  - Internal functions lack explanations
+  - Complex logic lacks inline comments
+- **Impact**: 
+  - Difficult for new developers to understand
+  - Hard to maintain and modify
+  - API usage unclear without reading source
+- **Recommendation**: 
+  - Add comprehensive doc comments to all public functions
+  - Document error conditions and return values
+  - Add examples for complex operations
+  - Document thread-safety guarantees
+
+⚠️ **Issue: Magic numbers and constants**
+- **Location**: Various locations (e.g., `db_manager.rs:61-62` - lock cleanup intervals)
+- **Problem**: 
+  - Hardcoded values without explanation
+  - Magic numbers in calculations
+  - No configuration options
+- **Impact**: 
+  - Difficult to tune for different use cases
+  - Unclear why specific values were chosen
+- **Recommendation**: 
+  - Extract constants with descriptive names
+  - Add comments explaining value choices
+  - Make configurable where appropriate
+
+## 8. Priority Recommendations
+
+### High Priority (Security & Stability)
+1. **Remove hardcoded credentials** - Security risk
+2. **Replace `unwrap()`/`expect()` in production paths** - Stability risk
+3. **Fix silent error handling** - Data integrity risk
+4. **Add parquet file validation** - Data integrity risk
+
+### Medium Priority (Performance & Resource Management)
+1. **Implement DatabaseManager cleanup** - Memory leak prevention
+2. **Reuse Runtime instances in JNI/iOS** - Performance improvement, resource efficiency
+3. **Add limits on concurrent operations** - Resource protection
+4. **Use async file operations** - Performance improvement
+5. **Improve temp file cleanup** - Disk space management (both parquet and metadata temp files)
+
+### Low Priority (Code Quality & Documentation)
+1. **Add comprehensive documentation** - Maintainability
+2. **Extract magic numbers** - Code clarity
+3. **Add metadata cache TTL** - Correctness
+4. **Improve error messages** - Debugging
+
+## 9. Additional Issues Identified (2024 Review Update)
+
+### Resource Management & Efficiency
+
+⚠️ **Issue: Inefficient Runtime creation in foreign interfaces**
+- **Location**: `lib.rs` - Multiple `Runtime::new().unwrap()` calls in JNI and iOS interfaces
+- **Details**: 
+  - 30+ instances of `Runtime::new()` across the codebase
+  - Each JNI/iOS call creates a new runtime instance
+  - Test code also creates multiple runtimes unnecessarily
+- **Impact**: 
+  - Performance overhead from repeated runtime creation
+  - Resource waste (each runtime spawns thread pool)
+  - Potential thread pool exhaustion under high load
+- **Recommendation**: 
+  - Use shared static runtime for JNI/iOS interfaces
+  - Reuse existing runtime when possible
+  - Consider using `Handle::current()` if already in async context
+
+### File System & Cleanup
+
+⚠️ **Issue: Orphaned temporary files from metadata operations**
+- **Location**: `db_manager.rs:1318` - Metadata temp file `metadata.json.tmp`
+- **Details**: 
+  - Metadata writes use temp file + rename pattern
+  - If process crashes between write and rename, temp file remains
+  - No startup cleanup of orphaned metadata temp files
+- **Impact**: 
+  - Accumulation of orphaned temp files
+  - Potential confusion during debugging
+- **Recommendation**: 
+  - Add startup cleanup of `*.tmp` files in storage directory
+  - Verify temp file age before using (reject stale files)
+
+### Error Handling Improvements
+
+⚠️ **Issue: Inconsistent error handling patterns**
+- **Location**: Throughout codebase
+- **Details**: 
+  - Mix of `unwrap()`, `expect()`, `.ok()`, and proper error handling
+  - Some critical paths use `unwrap()` (e.g., `db_manager.rs:635` - `record_batches_to_json().unwrap()`)
+  - Error information sometimes lost when converting to strings
+- **Impact**: 
+  - Inconsistent error reporting
+  - Some errors cause panics, others are silently ignored
+  - Difficult to debug production issues
+- **Recommendation**: 
+  - Standardize error handling approach
+  - Replace all `unwrap()`/`expect()` in production paths
+  - Preserve error context when converting errors
+
+### Concurrency & Thread Safety
+
+⚠️ **Issue: Potential deadlock in metadata cache access**
+- **Location**: `db_manager.rs:1256-1301` - `get_metadata_cached()`
+- **Details**: 
+  - Uses `RwLock` for cache with read/write locks
+  - Multiple lock acquisitions in same function
+  - Lock ordering could cause issues if called from multiple threads
+- **Impact**: 
+  - Potential deadlocks if locks are acquired in different order
+  - Reduced concurrency due to lock contention
+- **Recommendation**: 
+  - Review lock ordering
+  - Consider using `Arc<Mutex<>>` for simpler locking model
+  - Add deadlock detection in tests
+
+Overall, Timon is a well-designed library that effectively leverages DataFusion for time-series data management, with a clean API and good error handling. The library implements robust concurrency controls with atomic file writes and file-level locking. The main areas for improvement are in query path resolution (merging default and group paths), documentation, handling edge cases around data synchronization between paths, addressing the security and stability concerns identified above, and improving resource management (Runtime reuse, temp file cleanup, DatabaseManager lifecycle management).
