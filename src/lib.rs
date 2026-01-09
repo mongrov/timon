@@ -18,7 +18,28 @@ pub mod android {
   use tokio::runtime::Runtime;
 
   // Shared runtime instance for all JNI calls to avoid creating multiple runtimes
-  static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| Runtime::new().expect("Failed to create tokio runtime for JNI interface"));
+  static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
+    Runtime::new().unwrap_or_else(|e| {
+      eprintln!("CRITICAL: Failed to create tokio runtime for JNI interface: {:?}", e);
+      std::process::abort(); // Abort if runtime creation fails - this is a critical system error
+    })
+  });
+
+  // Helper function to safely convert JString to Rust String
+  fn jstring_to_rust_string(env: &mut JNIEnv, j_string: &JString) -> Result<String, String> {
+    env
+      .get_string(j_string)
+      .map(|jstr| jstr.into())
+      .map_err(|e| format!("Failed to convert Java String to Rust String: {:?}", e))
+  }
+
+  // Helper function to safely create a JString from Rust String
+  fn rust_string_to_jstring(env: &mut JNIEnv, rust_string: &str) -> Result<jstring, String> {
+    env
+      .new_string(rust_string)
+      .map(|jstr| jstr.into_raw())
+      .map_err(|e| format!("Failed to create Java String from Rust String: {:?}", e))
+  }
 
   // ******************************** File Storage ********************************
   #[no_mangle]
@@ -30,158 +51,269 @@ pub mod android {
     username: JString,
   ) -> jstring {
     // Convert `storage_path` from Java `String` to Rust `String`
-    let rust_storage_path: String = env.get_string(&storage_path).expect("Couldn't get java string!").into();
+    let rust_storage_path = match jstring_to_rust_string(&mut env, &storage_path) {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error converting storage_path: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
     // Convert `bucket_interval` from Java `int` to Rust `u32`
     let rust_bucket_interval: u32 = bucket_interval as u32;
-    let rust_username: String = env.get_string(&username).expect("Couldn't get java string!").into();
+    let rust_username = match jstring_to_rust_string(&mut env, &username) {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error converting username: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
 
     match init_timon(&rust_storage_path, rust_bucket_interval, &rust_username) {
       Ok(result) => {
         let json_string = result.to_string();
-        let output = env.new_string(json_string).expect("Couldn't create success string!");
-        output.into_raw()
+        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
+          eprintln!("Error creating success string: {}", e);
+          std::ptr::null_mut()
+        })
       }
       Err(err) => {
         let err_message = format!("Failed to initialize Timon: {:?}", err);
-        let output = env.new_string(err_message).expect("Couldn't create error string!");
-        output.into_raw()
+        rust_string_to_jstring(&mut env, &err_message).unwrap_or_else(|e| {
+          eprintln!("Error creating error string: {}", e);
+          std::ptr::null_mut()
+        })
       }
     }
   }
 
   #[no_mangle]
   pub unsafe extern "C" fn nativeCreateDatabase(mut env: JNIEnv, _class: JClass, db_name: JString) -> jstring {
-    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
+    let rust_db_name = match jstring_to_rust_string(&mut env, &db_name) {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error converting db_name: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
 
     match create_database(&rust_db_name) {
       Ok(result) => {
         let json_string = result.to_string();
-        let output = env.new_string(json_string).expect("Couldn't create success string!");
-        output.into_raw()
+        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
+          eprintln!("Error creating success string: {}", e);
+          std::ptr::null_mut()
+        })
       }
       Err(err) => {
         let err_message = format!("Failed to create database: {:?}", err);
-        let output = env.new_string(err_message).expect("Couldn't create error string!");
-        output.into_raw()
+        rust_string_to_jstring(&mut env, &err_message).unwrap_or_else(|e| {
+          eprintln!("Error creating error string: {}", e);
+          std::ptr::null_mut()
+        })
       }
     }
   }
 
   #[no_mangle]
   pub unsafe extern "C" fn nativeCreateTable(mut env: JNIEnv, _class: JClass, db_name: JString, table_name: JString, schema: JString) -> jstring {
-    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
-    let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
-    let rust_schema: String = env.get_string(&schema).expect("Couldn't get java string!").into();
+    let rust_db_name = match jstring_to_rust_string(&mut env, &db_name) {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error converting db_name: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
+    let rust_table_name = match jstring_to_rust_string(&mut env, &table_name) {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error converting table_name: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
+    let rust_schema = match jstring_to_rust_string(&mut env, &schema) {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error converting schema: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
 
     match create_table(&rust_db_name, &rust_table_name, &rust_schema) {
       Ok(result) => {
         let json_string = result.to_string();
-        let output = env.new_string(json_string).expect("Couldn't create success string!");
-        output.into_raw()
+        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
+          eprintln!("Error creating success string: {}", e);
+          std::ptr::null_mut()
+        })
       }
       Err(err) => {
         let err_message = format!("Failed to create table: {:?}", err);
-        let output = env.new_string(err_message).expect("Couldn't create error string!");
-        output.into_raw()
+        rust_string_to_jstring(&mut env, &err_message).unwrap_or_else(|e| {
+          eprintln!("Error creating error string: {}", e);
+          std::ptr::null_mut()
+        })
       }
     }
   }
 
   #[no_mangle]
-  pub unsafe extern "C" fn nativeListDatabases(env: JNIEnv, _class: JClass) -> jstring {
+  pub unsafe extern "C" fn nativeListDatabases(mut env: JNIEnv, _class: JClass) -> jstring {
     match list_databases() {
       Ok(result) => {
         let json_string = result.to_string();
-        let output = env.new_string(json_string).expect("Couldn't create success string!");
-        output.into_raw()
+        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
+          eprintln!("Error creating success string: {}", e);
+          std::ptr::null_mut()
+        })
       }
       Err(err) => {
         let err_message = format!("Failed to list databases: {:?}", err);
-        let output = env.new_string(err_message).expect("Couldn't create error string!");
-        output.into_raw()
+        rust_string_to_jstring(&mut env, &err_message).unwrap_or_else(|e| {
+          eprintln!("Error creating error string: {}", e);
+          std::ptr::null_mut()
+        })
       }
     }
   }
 
   #[no_mangle]
   pub unsafe extern "C" fn nativeListTables(mut env: JNIEnv, _class: JClass, db_name: JString) -> jstring {
-    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
+    let rust_db_name = match jstring_to_rust_string(&mut env, &db_name) {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error converting db_name: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
 
     match list_tables(&rust_db_name) {
       Ok(result) => {
         let json_string = result.to_string();
-        let output = env.new_string(json_string).expect("Couldn't create success string!");
-        output.into_raw()
+        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
+          eprintln!("Error creating success string: {}", e);
+          std::ptr::null_mut()
+        })
       }
       Err(err) => {
         let err_message = format!("Failed to list tables: {:?}", err);
-        let output = env.new_string(err_message).expect("Couldn't create error string!");
-        output.into_raw()
+        rust_string_to_jstring(&mut env, &err_message).unwrap_or_else(|e| {
+          eprintln!("Error creating error string: {}", e);
+          std::ptr::null_mut()
+        })
       }
     }
   }
 
   #[no_mangle]
   pub unsafe extern "C" fn nativeDeleteDatabase(mut env: JNIEnv, _class: JClass, db_name: JString) -> jstring {
-    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
+    let rust_db_name = match jstring_to_rust_string(&mut env, &db_name) {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error converting db_name: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
 
     match delete_database(&rust_db_name) {
       Ok(result) => {
         let json_string = result.to_string();
-        let output = env.new_string(json_string).expect("Couldn't create success string!");
-        output.into_raw()
+        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
+          eprintln!("Error creating success string: {}", e);
+          std::ptr::null_mut()
+        })
       }
       Err(err) => {
         let err_message = format!("Failed to delete database: {:?}", err);
-        let output = env.new_string(err_message).expect("Couldn't create error string!");
-        output.into_raw()
+        rust_string_to_jstring(&mut env, &err_message).unwrap_or_else(|e| {
+          eprintln!("Error creating error string: {}", e);
+          std::ptr::null_mut()
+        })
       }
     }
   }
 
   #[no_mangle]
   pub unsafe extern "C" fn nativeDeleteTable(mut env: JNIEnv, _class: JClass, db_name: JString, table_name: JString) -> jstring {
-    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
-    let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
+    let rust_db_name = match jstring_to_rust_string(&mut env, &db_name) {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error converting db_name: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
+    let rust_table_name = match jstring_to_rust_string(&mut env, &table_name) {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error converting table_name: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
 
     match delete_table(&rust_db_name, &rust_table_name) {
       Ok(result) => {
         let json_string = result.to_string();
-        let output = env.new_string(json_string).expect("Couldn't create success string!");
-        output.into_raw()
+        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
+          eprintln!("Error creating success string: {}", e);
+          std::ptr::null_mut()
+        })
       }
       Err(err) => {
         let err_message = format!("Failed to delete table: {:?}", err);
-        let output = env.new_string(err_message).expect("Couldn't create error string!");
-        output.into_raw()
+        rust_string_to_jstring(&mut env, &err_message).unwrap_or_else(|e| {
+          eprintln!("Error creating error string: {}", e);
+          std::ptr::null_mut()
+        })
       }
     }
   }
 
   #[no_mangle]
   pub unsafe extern "C" fn nativeInsert(mut env: JNIEnv, _class: JClass, db_name: JString, table_name: JString, json_data: JString) -> jstring {
-    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
-    let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
-    let rust_json_data: String = env.get_string(&json_data).expect("Couldn't get java string!").into();
+    let rust_db_name = match jstring_to_rust_string(&mut env, &db_name) {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error converting db_name: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
+    let rust_table_name = match jstring_to_rust_string(&mut env, &table_name) {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error converting table_name: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
+    let rust_json_data = match jstring_to_rust_string(&mut env, &json_data) {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error converting json_data: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
 
     match insert(&rust_db_name, &rust_table_name, &rust_json_data) {
       Ok(result) => {
         let json_string = result.to_string();
-        let output = env.new_string(json_string).expect("Couldn't create success string!");
-        output.into_raw()
+        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
+          eprintln!("Error creating success string: {}", e);
+          std::ptr::null_mut()
+        })
       }
       Err(e) => {
-        let error_message = env
-          .new_string(format!("Error writing JSON data to Parquet file: {:?}", e))
-          .expect("Couldn't create java string!");
-        error_message.into_raw()
+        let error_message = format!("Error writing JSON data to Parquet file: {:?}", e);
+        rust_string_to_jstring(&mut env, &error_message).unwrap_or_else(|e| {
+          eprintln!("Error creating error string: {}", e);
+          std::ptr::null_mut()
+        })
       }
     }
   }
 
-  fn get_date_range_value(env: &mut JNIEnv, date_range: &JObject, key: &str) -> String {
+  fn get_date_range_value(env: &mut JNIEnv, date_range: &JObject, key: &str) -> Result<String, String> {
     // Create the key as a `JString`
-    let j_key: JString = env.new_string(key).expect("Couldn't create key string");
+    let j_key: JString = env
+      .new_string(key)
+      .map_err(|e| format!("Failed to create key string '{}': {:?}", key, e))?;
 
     // Convert the JString to JObject
     let j_key_obj: JObject = j_key.into();
@@ -198,17 +330,17 @@ pub mod android {
         method_sig,
         &[JValue::from(&j_key_obj)], // Pass reference to JObject here
       )
-      .expect("Failed to call get method")
+      .map_err(|e| format!("Failed to call get method on date_range map: {:?}", e))?
       .l() // Get the returned JObject (which should be a String)
-      .expect("Invalid value returned from get method");
+      .map_err(|e| format!("Invalid value returned from get method for key '{}': {:?}", key, e))?;
 
     // Convert the result to a Rust string
     let rust_value: String = env
       .get_string(&JString::from(j_value))
-      .expect("Failed to convert Java String to Rust String")
+      .map_err(|e| format!("Failed to convert Java String to Rust String for key '{}': {:?}", key, e))?
       .into();
 
-    rust_value
+    Ok(rust_value)
   }
 
   #[no_mangle]
@@ -221,12 +353,30 @@ pub mod android {
     limit_partitions: jint,
   ) -> jstring {
     // Convert Java strings to Rust strings
-    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get db_name java string!").into();
-    let rust_sql_query: String = env.get_string(&sql_query).expect("Couldn't get sql_query java string!").into();
+    let rust_db_name = match jstring_to_rust_string(&mut env, &db_name) {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error converting db_name: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
+    let rust_sql_query = match jstring_to_rust_string(&mut env, &sql_query) {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error converting sql_query: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
     let rust_username: Option<String> = if username.is_null() {
       None
     } else {
-      Some(env.get_string(&username).expect("Couldn't get username java string!").into())
+      match jstring_to_rust_string(&mut env, &username) {
+        Ok(s) => Some(s),
+        Err(e) => {
+          eprintln!("Error converting username: {}", e);
+          return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        }
+      }
     };
 
     // Convert limit_partitions: if -1 or 0, use None; otherwise use Some(value)
@@ -236,14 +386,17 @@ pub mod android {
     match RUNTIME.block_on(query(&rust_db_name, &rust_sql_query, rust_username.as_deref(), rust_limit_partitions)) {
       Ok(result) => {
         let json_string = result.to_string();
-        let output = env.new_string(json_string).expect("Couldn't create success string!");
-        output.into_raw()
+        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
+          eprintln!("Error creating success string: {}", e);
+          std::ptr::null_mut()
+        })
       }
       Err(e) => {
-        let error_message = env
-          .new_string(format!("Error querying Parquet files: {:?}", e))
-          .expect("Couldn't create java string!");
-        error_message.into_raw()
+        let error_message = format!("Error querying Parquet files: {:?}", e);
+        rust_string_to_jstring(&mut env, &error_message).unwrap_or_else(|e| {
+          eprintln!("Error creating error string: {}", e);
+          std::ptr::null_mut()
+        })
       }
     }
   }
@@ -259,11 +412,41 @@ pub mod android {
     secret_access_key: JString,
     bucket_region: JString,
   ) -> jstring {
-    let rust_bucket_endpoint: String = env.get_string(&bucket_endpoint).expect("Couldn't get java string!").into();
-    let rust_bucket_name: String = env.get_string(&bucket_name).expect("Couldn't get java string!").into();
-    let rust_access_key_id: String = env.get_string(&access_key_id).expect("Couldn't get java string!").into();
-    let rust_secret_access_key: String = env.get_string(&secret_access_key).expect("Couldn't get java string!").into();
-    let rust_bucket_region: String = env.get_string(&bucket_region).expect("Couldn't get java string!").into();
+    let rust_bucket_endpoint = match jstring_to_rust_string(&mut env, &bucket_endpoint) {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error converting bucket_endpoint: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
+    let rust_bucket_name = match jstring_to_rust_string(&mut env, &bucket_name) {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error converting bucket_name: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
+    let rust_access_key_id = match jstring_to_rust_string(&mut env, &access_key_id) {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error converting access_key_id: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
+    let rust_secret_access_key = match jstring_to_rust_string(&mut env, &secret_access_key) {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error converting secret_access_key: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
+    let rust_bucket_region = match jstring_to_rust_string(&mut env, &bucket_region) {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error converting bucket_region: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
 
     match init_bucket(
       &rust_bucket_endpoint,
@@ -274,13 +457,17 @@ pub mod android {
     ) {
       Ok(result) => {
         let json_string = result.to_string();
-        let output = env.new_string(json_string).expect("Couldn't create success string!");
-        output.into_raw()
+        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
+          eprintln!("Error creating success string: {}", e);
+          std::ptr::null_mut()
+        })
       }
       Err(err) => {
         let err_message = format!("Failed to initialize S3 bucket: {:?}", err);
-        let output = env.new_string(err_message).expect("Couldn't create error string!");
-        output.into_raw()
+        rust_string_to_jstring(&mut env, &err_message).unwrap_or_else(|e| {
+          eprintln!("Error creating error string: {}", e);
+          std::ptr::null_mut()
+        })
       }
     }
   }
@@ -294,19 +481,49 @@ pub mod android {
     date_range: JObject,
     username: JString,
   ) -> jstring {
-    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
-    let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
+    let rust_db_name = match jstring_to_rust_string(&mut env, &db_name) {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error converting db_name: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
+    let rust_table_name = match jstring_to_rust_string(&mut env, &table_name) {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error converting table_name: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
 
     let mut rust_date_range: HashMap<&str, &str> = HashMap::new();
-    let rust_start = get_date_range_value(&mut env, &date_range, "start");
-    let rust_end = get_date_range_value(&mut env, &date_range, "end");
+    let rust_start = match get_date_range_value(&mut env, &date_range, "start") {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error getting start date: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
+    let rust_end = match get_date_range_value(&mut env, &date_range, "end") {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error getting end date: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
     rust_date_range.insert("start_date", &rust_start);
     rust_date_range.insert("end_date", &rust_end);
 
     let rust_username: Option<String> = if username.is_null() {
       None
     } else {
-      Some(env.get_string(&username).expect("Couldn't get username java string!").into())
+      match jstring_to_rust_string(&mut env, &username) {
+        Ok(s) => Some(s),
+        Err(e) => {
+          eprintln!("Error converting username: {}", e);
+          return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        }
+      }
     };
 
     match RUNTIME.block_on(cloud_sync_parquet(
@@ -317,32 +534,52 @@ pub mod android {
     )) {
       Ok(result) => {
         let json_string = result.to_string();
-        let output = env.new_string(json_string).expect("Couldn't create success string!");
-        output.into_raw()
+        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
+          eprintln!("Error creating success string: {}", e);
+          std::ptr::null_mut()
+        })
       }
       Err(err) => {
         let err_message = format!("Failed fetch s3 parquet files: {:?}", err);
-        let output = env.new_string(err_message).expect("Couldn't create error string!");
-        output.into_raw()
+        rust_string_to_jstring(&mut env, &err_message).unwrap_or_else(|e| {
+          eprintln!("Error creating error string: {}", e);
+          std::ptr::null_mut()
+        })
       }
     }
   }
 
   #[no_mangle]
   pub unsafe extern "C" fn nativeCloudSinkParquet(mut env: JNIEnv, _class: JClass, db_name: JString, table_name: JString) -> jstring {
-    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
-    let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
+    let rust_db_name = match jstring_to_rust_string(&mut env, &db_name) {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error converting db_name: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
+    let rust_table_name = match jstring_to_rust_string(&mut env, &table_name) {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error converting table_name: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
 
     match RUNTIME.block_on(cloud_sink_parquet(&rust_db_name, &rust_table_name)) {
       Ok(result) => {
         let json_string = result.to_string();
-        let output = env.new_string(json_string).expect("Couldn't create success string!");
-        output.into_raw()
+        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
+          eprintln!("Error creating success string: {}", e);
+          std::ptr::null_mut()
+        })
       }
       Err(err) => {
         let err_message = format!("Failed sink parquet files: {:?}", err);
-        let output = env.new_string(err_message).expect("Couldn't create error string!");
-        output.into_raw()
+        rust_string_to_jstring(&mut env, &err_message).unwrap_or_else(|e| {
+          eprintln!("Error creating error string: {}", e);
+          std::ptr::null_mut()
+        })
       }
     }
   }
@@ -356,26 +593,60 @@ pub mod android {
     table_name: JString,
     date_range: JObject,
   ) -> jstring {
-    let rust_username: String = env.get_string(&username).expect("Couldn't get java string!").into();
-    let rust_db_name: String = env.get_string(&db_name).expect("Couldn't get java string!").into();
-    let rust_table_name: String = env.get_string(&table_name).expect("Couldn't get java string!").into();
+    let rust_username = match jstring_to_rust_string(&mut env, &username) {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error converting username: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
+    let rust_db_name = match jstring_to_rust_string(&mut env, &db_name) {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error converting db_name: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
+    let rust_table_name = match jstring_to_rust_string(&mut env, &table_name) {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error converting table_name: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
 
     let mut rust_date_range: HashMap<&str, &str> = HashMap::new();
-    let rust_start = get_date_range_value(&mut env, &date_range, "start");
-    let rust_end = get_date_range_value(&mut env, &date_range, "end");
+    let rust_start = match get_date_range_value(&mut env, &date_range, "start") {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error getting start date: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
+    let rust_end = match get_date_range_value(&mut env, &date_range, "end") {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error getting end date: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
     rust_date_range.insert("start_date", &rust_start);
     rust_date_range.insert("end_date", &rust_end);
 
     match RUNTIME.block_on(cloud_fetch_parquet(&rust_username, &rust_db_name, &rust_table_name, rust_date_range)) {
       Ok(result) => {
         let json_string = result.to_string();
-        let output = env.new_string(json_string).expect("Couldn't create success string!");
-        output.into_raw()
+        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
+          eprintln!("Error creating success string: {}", e);
+          std::ptr::null_mut()
+        })
       }
       Err(err) => {
         let err_message = format!("Failed fetch s3 parquet files: {:?}", err);
-        let output = env.new_string(err_message).expect("Couldn't create error string!");
-        output.into_raw()
+        rust_string_to_jstring(&mut env, &err_message).unwrap_or_else(|e| {
+          eprintln!("Error creating error string: {}", e);
+          std::ptr::null_mut()
+        })
       }
     }
   }
@@ -396,44 +667,122 @@ pub mod android {
 
     // Convert usernames array
     let usernames_array: jni::objects::JObjectArray = usernames.into();
-    let usernames_length = env.get_array_length(&usernames_array).expect("Failed to get usernames array length");
+    let usernames_length = match env.get_array_length(&usernames_array) {
+      Ok(len) => len,
+      Err(e) => {
+        eprintln!("Error getting usernames array length: {:?}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "Failed to get usernames array length: {:?}"}}"#, e))
+          .unwrap_or(std::ptr::null_mut());
+      }
+    };
     for i in 0..usernames_length {
-      let element = env
-        .get_object_array_element(&usernames_array, i)
-        .expect("Failed to get usernames array element");
+      let element = match env.get_object_array_element(&usernames_array, i) {
+        Ok(elem) => elem,
+        Err(e) => {
+          eprintln!("Error getting usernames array element at index {}: {:?}", i, e);
+          return rust_string_to_jstring(
+            &mut env,
+            &format!(r#"{{"error": "Failed to get usernames array element at index {}: {:?}"}}"#, i, e),
+          )
+          .unwrap_or(std::ptr::null_mut());
+        }
+      };
       let j_string: JString = element.into();
-      let rust_string: String = env.get_string(&j_string).expect("Failed to convert Java String to Rust String").into();
+      let rust_string = match jstring_to_rust_string(&mut env, &j_string) {
+        Ok(s) => s,
+        Err(e) => {
+          eprintln!("Error converting username at index {}: {}", i, e);
+          return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "Failed to convert username at index {}: {}"}}"#, i, e))
+            .unwrap_or(std::ptr::null_mut());
+        }
+      };
       rust_usernames.push(rust_string);
     }
 
     // Convert db_names array
     let db_names_array: jni::objects::JObjectArray = db_names.into();
-    let db_names_length = env.get_array_length(&db_names_array).expect("Failed to get db_names array length");
+    let db_names_length = match env.get_array_length(&db_names_array) {
+      Ok(len) => len,
+      Err(e) => {
+        eprintln!("Error getting db_names array length: {:?}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "Failed to get db_names array length: {:?}"}}"#, e))
+          .unwrap_or(std::ptr::null_mut());
+      }
+    };
     for i in 0..db_names_length {
-      let element = env
-        .get_object_array_element(&db_names_array, i)
-        .expect("Failed to get db_names array element");
+      let element = match env.get_object_array_element(&db_names_array, i) {
+        Ok(elem) => elem,
+        Err(e) => {
+          eprintln!("Error getting db_names array element at index {}: {:?}", i, e);
+          return rust_string_to_jstring(
+            &mut env,
+            &format!(r#"{{"error": "Failed to get db_names array element at index {}: {:?}"}}"#, i, e),
+          )
+          .unwrap_or(std::ptr::null_mut());
+        }
+      };
       let j_string: JString = element.into();
-      let rust_string: String = env.get_string(&j_string).expect("Failed to convert Java String to Rust String").into();
+      let rust_string = match jstring_to_rust_string(&mut env, &j_string) {
+        Ok(s) => s,
+        Err(e) => {
+          eprintln!("Error converting db_name at index {}: {}", i, e);
+          return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "Failed to convert db_name at index {}: {}"}}"#, i, e))
+            .unwrap_or(std::ptr::null_mut());
+        }
+      };
       rust_db_names.push(rust_string);
     }
 
     // Convert table_names array
     let table_names_array: jni::objects::JObjectArray = table_names.into();
-    let table_names_length = env.get_array_length(&table_names_array).expect("Failed to get table_names array length");
+    let table_names_length = match env.get_array_length(&table_names_array) {
+      Ok(len) => len,
+      Err(e) => {
+        eprintln!("Error getting table_names array length: {:?}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "Failed to get table_names array length: {:?}"}}"#, e))
+          .unwrap_or(std::ptr::null_mut());
+      }
+    };
     for i in 0..table_names_length {
-      let element = env
-        .get_object_array_element(&table_names_array, i)
-        .expect("Failed to get table_names array element");
+      let element = match env.get_object_array_element(&table_names_array, i) {
+        Ok(elem) => elem,
+        Err(e) => {
+          eprintln!("Error getting table_names array element at index {}: {:?}", i, e);
+          return rust_string_to_jstring(
+            &mut env,
+            &format!(r#"{{"error": "Failed to get table_names array element at index {}: {:?}"}}"#, i, e),
+          )
+          .unwrap_or(std::ptr::null_mut());
+        }
+      };
       let j_string: JString = element.into();
-      let rust_string: String = env.get_string(&j_string).expect("Failed to convert Java String to Rust String").into();
+      let rust_string = match jstring_to_rust_string(&mut env, &j_string) {
+        Ok(s) => s,
+        Err(e) => {
+          eprintln!("Error converting table_name at index {}: {}", i, e);
+          return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "Failed to convert table_name at index {}: {}"}}"#, i, e))
+            .unwrap_or(std::ptr::null_mut());
+        }
+      };
       rust_table_names.push(rust_string);
     }
 
     // Convert date_range
     let mut rust_date_range: HashMap<&str, &str> = HashMap::new();
-    let rust_start = get_date_range_value(&mut env, &date_range, "start");
-    let rust_end = get_date_range_value(&mut env, &date_range, "end");
+    let rust_start = match get_date_range_value(&mut env, &date_range, "start") {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error getting start date: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
+    let rust_end = match get_date_range_value(&mut env, &date_range, "end") {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Error getting end date: {}", e);
+        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+      }
+    };
     rust_date_range.insert("start_date", &rust_start);
     rust_date_range.insert("end_date", &rust_end);
 
@@ -450,48 +799,97 @@ pub mod android {
     )) {
       Ok(result) => {
         let json_string = result.to_string();
-        let output = env.new_string(json_string).expect("Couldn't create success string!");
-        output.into_raw()
+        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
+          eprintln!("Error creating success string: {}", e);
+          std::ptr::null_mut()
+        })
       }
       Err(err) => {
         let err_message = format!("Failed to batch fetch s3 parquet files: {:?}", err);
-        let output = env.new_string(err_message).expect("Couldn't create error string!");
-        output.into_raw()
+        rust_string_to_jstring(&mut env, &err_message).unwrap_or_else(|e| {
+          eprintln!("Error creating error string: {}", e);
+          std::ptr::null_mut()
+        })
       }
     }
   }
 
   #[no_mangle]
   pub extern "C" fn JNI_OnLoad(vm: jni::JavaVM, _reserved: *mut std::ffi::c_void) -> jni::sys::jint {
-    let mut env = vm.get_env().expect("Failed to get JNIEnv");
+    let mut env = match vm.get_env() {
+      Ok(e) => e,
+      Err(e) => {
+        eprintln!("CRITICAL: Failed to get JNIEnv: {:?}", e);
+        return jni::sys::JNI_ERR;
+      }
+    };
 
     // Get the Application Context
-    let activity_thread = env.find_class("android/app/ActivityThread").expect("Failed to find ActivityThread");
-    let current_activity_thread = env
-      .call_static_method(activity_thread, "currentActivityThread", "()Landroid/app/ActivityThread;", &[])
-      .expect("Failed to get currentActivityThread")
-      .l()
-      .expect("Failed to convert to object");
-    let app_context = env
-      .call_method(current_activity_thread, "getApplication", "()Landroid/app/Application;", &[])
-      .expect("Failed to get Application context")
-      .l()
-      .expect("Failed to convert to object");
+    let activity_thread = match env.find_class("android/app/ActivityThread") {
+      Ok(c) => c,
+      Err(e) => {
+        eprintln!("CRITICAL: Failed to find ActivityThread: {:?}", e);
+        return jni::sys::JNI_ERR;
+      }
+    };
+    let current_activity_thread = match env.call_static_method(activity_thread, "currentActivityThread", "()Landroid/app/ActivityThread;", &[]) {
+      Ok(result) => match result.l() {
+        Ok(obj) => obj,
+        Err(e) => {
+          eprintln!("CRITICAL: Failed to convert currentActivityThread to object: {:?}", e);
+          return jni::sys::JNI_ERR;
+        }
+      },
+      Err(e) => {
+        eprintln!("CRITICAL: Failed to get currentActivityThread: {:?}", e);
+        return jni::sys::JNI_ERR;
+      }
+    };
+    let app_context = match env.call_method(current_activity_thread, "getApplication", "()Landroid/app/Application;", &[]) {
+      Ok(result) => match result.l() {
+        Ok(obj) => obj,
+        Err(e) => {
+          eprintln!("CRITICAL: Failed to convert Application context to object: {:?}", e);
+          return jni::sys::JNI_ERR;
+        }
+      },
+      Err(e) => {
+        eprintln!("CRITICAL: Failed to get Application context: {:?}", e);
+        return jni::sys::JNI_ERR;
+      }
+    };
 
     // Get the Package Name
-    let package_name = env
-      .call_method(app_context, "getPackageName", "()Ljava/lang/String;", &[])
-      .expect("Failed to get package name")
-      .l()
-      .expect("Failed to convert to object");
-    let package_name: String = env
-      .get_string(&JString::from(package_name))
-      .expect("Failed to convert package name to Rust string")
-      .into();
+    let package_name_obj = match env.call_method(app_context, "getPackageName", "()Ljava/lang/String;", &[]) {
+      Ok(result) => match result.l() {
+        Ok(obj) => obj,
+        Err(e) => {
+          eprintln!("CRITICAL: Failed to convert package name to object: {:?}", e);
+          return jni::sys::JNI_ERR;
+        }
+      },
+      Err(e) => {
+        eprintln!("CRITICAL: Failed to get package name: {:?}", e);
+        return jni::sys::JNI_ERR;
+      }
+    };
+    let package_name: String = match env.get_string(&JString::from(package_name_obj)) {
+      Ok(jstr) => jstr.into(),
+      Err(e) => {
+        eprintln!("CRITICAL: Failed to convert package name to Rust string: {:?}", e);
+        return jni::sys::JNI_ERR;
+      }
+    };
 
     // Construct the Dynamic Class Name
     let class_name = format!("{}/TimonModule", package_name.replace(".", "/"));
-    let class = env.find_class(&class_name).expect(&format!("Failed to find class: {}", class_name));
+    let class = match env.find_class(&class_name) {
+      Ok(c) => c,
+      Err(e) => {
+        eprintln!("CRITICAL: Failed to find class '{}': {:?}", class_name, e);
+        return jni::sys::JNI_ERR;
+      }
+    };
 
     let methods = [
       NativeMethod {
@@ -566,8 +964,13 @@ pub mod android {
       },
     ];
 
-    env.register_native_methods(class, &methods).expect("Failed to register native methods");
-    jni::sys::JNI_VERSION_1_8
+    match env.register_native_methods(class, &methods) {
+      Ok(_) => jni::sys::JNI_VERSION_1_8,
+      Err(e) => {
+        eprintln!("CRITICAL: Failed to register native methods: {:?}", e);
+        jni::sys::JNI_ERR
+      }
+    }
   }
 }
 
@@ -584,7 +987,12 @@ pub mod ios {
   use tokio::runtime::Runtime;
 
   // Shared runtime instance for all iOS calls to avoid creating multiple runtimes
-  static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| Runtime::new().expect("Failed to create tokio runtime for iOS interface"));
+  static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
+    Runtime::new().unwrap_or_else(|e| {
+      eprintln!("CRITICAL: Failed to create tokio runtime for iOS interface: {:?}", e);
+      std::process::abort(); // Abort if runtime creation fails - this is a critical system error
+    })
+  });
 
   // Helper function to convert C strings to Rust strings
   unsafe fn c_str_to_string(c_str: *const c_char) -> Result<String, String> {

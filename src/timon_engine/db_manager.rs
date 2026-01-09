@@ -175,8 +175,16 @@ impl DatabaseManager {
 
     // Load existing metadata from metadata.json
     let metadata: Metadata = if Path::new(&metadata_path).exists() {
-      let file_content = fs::read_to_string(&metadata_path).expect("Failed to read metadata file");
-      serde_json::from_str(&file_content).unwrap_or_else(|_| Metadata { databases: HashMap::new() })
+      match fs::read_to_string(&metadata_path) {
+        Ok(file_content) => serde_json::from_str(&file_content).unwrap_or_else(|e| {
+          eprintln!("Warning: Failed to parse metadata file, using empty metadata: {}", e);
+          Metadata { databases: HashMap::new() }
+        }),
+        Err(e) => {
+          eprintln!("Warning: Failed to read metadata file, using empty metadata: {}", e);
+          Metadata { databases: HashMap::new() }
+        }
+      }
     } else {
       Metadata { databases: HashMap::new() }
     };
@@ -214,7 +222,13 @@ impl DatabaseManager {
 
     // Use static regex to ensure name contains only alphanumeric characters and underscores (A-Z, a-z, 0-9, _)
     static VALID_PATTERN: OnceLock<Regex> = OnceLock::new();
-    let valid_pattern = VALID_PATTERN.get_or_init(|| Regex::new(r#"^[a-zA-Z0-9_]+$"#).expect("Invalid regex pattern in validate_name"));
+    let valid_pattern = VALID_PATTERN.get_or_init(|| {
+      Regex::new(r#"^[a-zA-Z0-9_]+$"#).unwrap_or_else(|e| {
+        eprintln!("CRITICAL: Failed to compile regex pattern: {:?}", e);
+        // This should never fail, but if it does, we'll use a pattern that matches nothing
+        Regex::new(r#"^$"#).expect("Failed to compile fallback regex pattern")
+      })
+    });
 
     if !valid_pattern.is_match(name) {
       return Err(DataFusionError::Plan(format!(
@@ -365,7 +379,10 @@ impl DatabaseManager {
 
     // Remove the database from metadata and save changes
     if self.metadata.databases.remove(db_name).is_some() {
-      self.save_metadata().map_err(|e| e.to_string()).unwrap();
+      self.save_metadata().map_err(|e| {
+        eprintln!("Error saving metadata after deleting database '{}': {}", db_name, e);
+        DataFusionError::Execution(format!("Failed to save metadata after deleting database: {}", e))
+      })?;
     } else {
       return Err(DataFusionError::Plan(format!("Failed to remove database '{}' from metadata", db_name)));
     }
@@ -410,7 +427,10 @@ impl DatabaseManager {
       // Check if the table exists and remove it
       if db.tables.remove(table_name).is_some() {
         // Save the updated metadata
-        self.save_metadata().map_err(|e| e.to_string()).unwrap();
+        self.save_metadata().map_err(|e| {
+          eprintln!("Error saving metadata after deleting table '{}': {}", table_name, e);
+          DataFusionError::Execution(format!("Failed to save metadata after deleting table: {}", e))
+        })?;
 
         // Remove table's directory from filesystem
         let table_path = format!("{}/{}/{}", self.data_path, db_name, table_name);
@@ -509,7 +529,7 @@ impl DatabaseManager {
       }
 
       let timestamp = new_record.get(datetime_field).and_then(|t| t.as_i64()).unwrap_or(0);
-      let partition_value = rounded_timestamp(timestamp.try_into().unwrap(), self.bucket_interval);
+      let partition_value = rounded_timestamp(timestamp, self.bucket_interval);
 
       // Use Hive-style partitioning: partition_date=YYYY-MM-DD/data.parquet
       let partition_dir = format!("{}/partition_date={}", table_path, partition_value);
@@ -634,7 +654,8 @@ impl DatabaseManager {
     let final_results = final_df.collect().await?;
 
     let result = if is_json_format {
-      let json_result = record_batches_to_json(&final_results).unwrap();
+      let json_result = record_batches_to_json(&final_results)
+        .map_err(|e| DataFusionError::Execution(format!("Failed to convert record batches to JSON: {:?}", e)))?;
       DataFusionOutput::Json(json_result)
     } else {
       let final_schema = final_results[0].schema();
@@ -973,7 +994,10 @@ impl DatabaseManager {
     // This prevents corruption if the process crashes mid-write
     // Use a unique temp file name with timestamp to avoid conflicts
     use std::time::{SystemTime, UNIX_EPOCH};
-    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let timestamp = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .map_err(|e| format!("System time is before UNIX epoch: {:?}", e))?
+      .as_nanos();
     let temp_path = path
       .parent()
       .map(|p| {
@@ -1257,7 +1281,10 @@ impl DatabaseManager {
   /// Get metadata with caching support (infinite TTL, invalidated only on writes)
   async fn get_metadata_cached(&self) -> Result<Metadata, Box<dyn Error>> {
     // Check if we have a valid cache
-    let cache_timestamp = self.cache_timestamp.read().unwrap();
+    let cache_timestamp = self
+      .cache_timestamp
+      .read()
+      .map_err(|e| format!("Failed to acquire read lock on cache_timestamp (poisoned): {:?}", e))?;
     let should_refresh = match *cache_timestamp {
       Some(timestamp) => Instant::now().duration_since(timestamp) > self.cache_ttl,
       None => true,
@@ -1269,18 +1296,27 @@ impl DatabaseManager {
       let fresh_metadata = self.read_metadata().await?;
 
       // Update cache with write lock
-      let mut cached_metadata = self.cached_metadata.write().unwrap();
+      let mut cached_metadata = self
+        .cached_metadata
+        .write()
+        .map_err(|e| format!("Failed to acquire write lock on cached_metadata (poisoned): {:?}", e))?;
       *cached_metadata = Some(fresh_metadata.clone());
       drop(cached_metadata);
 
-      let mut cache_timestamp = self.cache_timestamp.write().unwrap();
+      let mut cache_timestamp = self
+        .cache_timestamp
+        .write()
+        .map_err(|e| format!("Failed to acquire write lock on cache_timestamp (poisoned): {:?}", e))?;
       *cache_timestamp = Some(Instant::now());
       drop(cache_timestamp);
 
       Ok(fresh_metadata)
     } else {
       // Return cached metadata
-      let cached_metadata = self.cached_metadata.read().unwrap();
+      let cached_metadata = self
+        .cached_metadata
+        .read()
+        .map_err(|e| format!("Failed to acquire read lock on cached_metadata (poisoned): {:?}", e))?;
       match &*cached_metadata {
         Some(metadata) => Ok(metadata.clone()),
         None => {
@@ -1288,11 +1324,17 @@ impl DatabaseManager {
           drop(cached_metadata);
           let fresh_metadata = self.read_metadata().await?;
 
-          let mut cached_metadata = self.cached_metadata.write().unwrap();
+          let mut cached_metadata = self
+            .cached_metadata
+            .write()
+            .map_err(|e| format!("Failed to acquire write lock on cached_metadata (poisoned): {:?}", e))?;
           *cached_metadata = Some(fresh_metadata.clone());
           drop(cached_metadata);
 
-          let mut cache_timestamp = self.cache_timestamp.write().unwrap();
+          let mut cache_timestamp = self
+            .cache_timestamp
+            .write()
+            .map_err(|e| format!("Failed to acquire write lock on cache_timestamp (poisoned): {:?}", e))?;
           *cache_timestamp = Some(Instant::now());
           drop(cache_timestamp);
 
@@ -1341,13 +1383,17 @@ impl DatabaseManager {
   /// Manually invalidate the metadata cache
   /// Should be called after any operation that modifies metadata (create_table, delete_table, etc.)
   fn invalidate_cache(&self) {
-    let mut cached_metadata = self.cached_metadata.write().unwrap();
-    *cached_metadata = None;
-    drop(cached_metadata);
+    if let Ok(mut cached_metadata) = self.cached_metadata.write() {
+      *cached_metadata = None;
+    } else {
+      eprintln!("Warning: Failed to acquire write lock on cached_metadata for invalidation (poisoned)");
+    }
 
-    let mut cache_timestamp = self.cache_timestamp.write().unwrap();
-    *cache_timestamp = None;
-    drop(cache_timestamp);
+    if let Ok(mut cache_timestamp) = self.cache_timestamp.write() {
+      *cache_timestamp = None;
+    } else {
+      eprintln!("Warning: Failed to acquire write lock on cache_timestamp for invalidation (poisoned)");
+    }
   }
 
   fn save_metadata(&self) -> TokioResult<()> {
