@@ -513,6 +513,8 @@ pub fn filter_files_by_date_range(files: Vec<String>, start_date: &str, end_date
     .filter(|file| {
       if let Some(date_str) = file.split('/').last() {
         if let Some(caps) = regx.captures(date_str) {
+          // Parse date components - .ok() is intentional here: invalid date formats
+          // should be skipped (return false) rather than causing the filter to fail
           let year = caps["year"].parse::<i32>().ok();
           let month = caps.name("month").map(|m| m.as_str().parse::<u32>().ok()).flatten();
           let day = caps.name("day").map(|d| d.as_str().parse::<u32>().ok()).flatten();

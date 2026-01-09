@@ -533,7 +533,11 @@ impl DatabaseManager {
 
       // Use Hive-style partitioning: partition_date=YYYY-MM-DD/data.parquet
       let partition_dir = format!("{}/partition_date={}", table_path, partition_value);
-      fs::create_dir_all(&partition_dir).ok(); // Create partition directory if it doesn't exist
+      // Create partition directory if it doesn't exist
+      if let Err(e) = fs::create_dir_all(&partition_dir) {
+        eprintln!("Error creating partition directory '{}': {}", partition_dir, e);
+        return Err(format!("Failed to create partition directory '{}': {}", partition_dir, e).into());
+      }
       let target_file = format!("{}/data.parquet", partition_dir);
 
       records_by_file.entry(target_file).or_insert_with(Vec::new).push(new_record);
@@ -1409,7 +1413,17 @@ impl DatabaseManager {
 
     // Sync to ensure data is written to disk
     if let Ok(temp_file) = fs::File::open(&temp_path) {
-      temp_file.sync_all().ok();
+      temp_file.sync_all().map_err(|e| {
+        std::io::Error::new(
+          std::io::ErrorKind::Other,
+          format!("Failed to sync temporary metadata file '{}': {}", temp_path, e),
+        )
+      })?;
+    } else {
+      return Err(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        format!("Failed to open temporary metadata file '{}' for syncing", temp_path),
+      ));
     }
 
     // Atomically rename temp file to final location
@@ -1418,7 +1432,17 @@ impl DatabaseManager {
     // Sync the parent directory to ensure rename is persisted
     if let Some(parent) = Path::new(&self.metadata_path).parent() {
       if let Ok(parent_file) = fs::File::open(parent) {
-        parent_file.sync_all().ok();
+        parent_file.sync_all().map_err(|e| {
+          std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Failed to sync parent directory for metadata file '{}': {}", self.metadata_path, e),
+          )
+        })?;
+      } else {
+        return Err(std::io::Error::new(
+          std::io::ErrorKind::Other,
+          format!("Failed to open parent directory for syncing metadata file '{}'", self.metadata_path),
+        ));
       }
     }
 
