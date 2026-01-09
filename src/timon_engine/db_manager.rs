@@ -15,6 +15,7 @@ use datafusion::parquet::file::properties::WriterProperties;
 use datafusion::parquet::file::reader::{FileReader, SerializedFileReader};
 use datafusion::prelude::*;
 use fs2::FileExt;
+use futures::executor;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -231,7 +232,7 @@ impl DatabaseManager {
 
     // Reload the metadata to ensure it's up to date
     self.metadata = self
-      .get_metadata_cached()
+      .get_metadata_cached_sync()
       .map_err(|e| DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))?;
 
     let db_data_path = format!("{}/{}", self.data_path, db_name);
@@ -263,7 +264,7 @@ impl DatabaseManager {
 
     // Reload the metadata to ensure it's up to date
     self.metadata = self
-      .get_metadata_cached()
+      .get_metadata_cached_sync()
       .map_err(|e| DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))?;
 
     // Parse the schema JSON
@@ -314,7 +315,7 @@ impl DatabaseManager {
   pub fn list_databases(&mut self) -> Result<Vec<String>, DataFusionError> {
     // Reload the metadata to ensure it's up to date
     self.metadata = self
-      .get_metadata_cached()
+      .get_metadata_cached_sync()
       .map_err(|e| DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))?;
 
     // Attempt to read metadata file and handle potential errors
@@ -340,7 +341,7 @@ impl DatabaseManager {
 
     // Reload the metadata to ensure it's up to date
     self.metadata = self
-      .get_metadata_cached()
+      .get_metadata_cached_sync()
       .map_err(|e| DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))?;
 
     // Check if the database exists in the metadata
@@ -359,7 +360,7 @@ impl DatabaseManager {
 
     // Reload the metadata to ensure it's up to date
     self.metadata = self
-      .get_metadata_cached()
+      .get_metadata_cached_sync()
       .map_err(|e| DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))?;
 
     // Remove the database from metadata and save changes
@@ -386,7 +387,7 @@ impl DatabaseManager {
     // Reload the metadata to ensure it's up to date
     // If metadata file doesn't exist (file not found), that's OK - table might not exist either
     // But if metadata file exists but is corrupted, that's an error
-    match self.get_metadata_cached() {
+    match self.get_metadata_cached_sync() {
       Ok(metadata) => {
         self.metadata = metadata;
       }
@@ -435,7 +436,7 @@ impl DatabaseManager {
     Self::validate_name(table_name, NameType::Table).map_err(|e| e.to_string())?;
 
     // Reload metadata
-    self.metadata = self.get_metadata_cached()?;
+    self.metadata = self.get_metadata_cached_sync()?;
 
     let mut new_json_values: Vec<Value> = serde_json::from_str(json_data)?;
     let table_path = self
@@ -557,6 +558,7 @@ impl DatabaseManager {
     // Load metadata
     let metadata = self
       .get_metadata_cached()
+      .await
       .map_err(|e| DataFusionError::Execution(format!("Failed to read metadata: {}", e)))?;
 
     // Validate that all tables exist before attempting registration
@@ -764,7 +766,7 @@ impl DatabaseManager {
     Self::validate_name(table_name, NameType::Table).map_err(|e| e.to_string())?;
 
     // Reload metadata to ensure it's up-to-date
-    let metadata = self.get_metadata_cached()?;
+    let metadata = self.get_metadata_cached_sync()?;
 
     let database = metadata
       .databases
@@ -1021,7 +1023,7 @@ impl DatabaseManager {
 
     // Reload metadata to ensure it's up-to-date
     let metadata = self
-      .get_metadata_cached()
+      .get_metadata_cached_sync()
       .map_err(|e| DataFusionError::Execution(format!("Failed to reload metadata: {}", e)))?;
 
     // Validate if the database exists
@@ -1122,7 +1124,7 @@ impl DatabaseManager {
     Self::validate_name(table_name, NameType::Table).map_err(|e| e.to_string())?;
 
     // Reload metadata to ensure it's up-to-date
-    let metadata = self.get_metadata_cached().map_err(|e| format!("Failed to reload metadata: {}", e))?;
+    let metadata = self.get_metadata_cached_sync().map_err(|e| format!("Failed to reload metadata: {}", e))?;
     // Look up the schema from the metadata
     let database = metadata.databases.get(db_name).ok_or("Database not found")?;
     let table = database.tables.get(table_name).ok_or("Table not found")?;
@@ -1200,13 +1202,13 @@ impl DatabaseManager {
     Ok(())
   }
 
-  fn read_metadata(&self) -> Result<Metadata, Box<dyn Error>> {
+  async fn read_metadata(&self) -> Result<Metadata, Box<dyn Error>> {
     // Retry logic to handle cases where metadata is being written
     let max_retries = 10;
     let retry_delay = Duration::from_millis(50);
 
     for attempt in 0..max_retries {
-      match fs::read_to_string(&self.metadata_path) {
+      match tokio::fs::read_to_string(&self.metadata_path).await {
         Ok(metadata_contents) => {
           if metadata_contents.trim().is_empty() {
             // If the metadata file is empty, return a default Metadata object
@@ -1221,7 +1223,7 @@ impl DatabaseManager {
               // Check if it's a JSON parse error (not just a corrupted file)
               if attempt < max_retries - 1 {
                 // Wait and retry - file might be partially written
-                std::thread::sleep(retry_delay);
+                tokio::time::sleep(retry_delay).await;
                 continue;
               } else {
                 // Last attempt failed - return the error
@@ -1239,7 +1241,7 @@ impl DatabaseManager {
 
           // Other error - retry if we have attempts left
           if attempt < max_retries - 1 {
-            std::thread::sleep(retry_delay);
+            tokio::time::sleep(retry_delay).await;
             continue;
           } else {
             return Err(format!("Failed to read metadata after {} attempts: {}", max_retries, e).into());
@@ -1253,7 +1255,7 @@ impl DatabaseManager {
   }
 
   /// Get metadata with caching support (infinite TTL, invalidated only on writes)
-  fn get_metadata_cached(&self) -> Result<Metadata, Box<dyn Error>> {
+  async fn get_metadata_cached(&self) -> Result<Metadata, Box<dyn Error>> {
     // Check if we have a valid cache
     let cache_timestamp = self.cache_timestamp.read().unwrap();
     let should_refresh = match *cache_timestamp {
@@ -1264,7 +1266,7 @@ impl DatabaseManager {
 
     if should_refresh {
       // Cache expired or doesn't exist, refresh it
-      let fresh_metadata = self.read_metadata()?;
+      let fresh_metadata = self.read_metadata().await?;
 
       // Update cache with write lock
       let mut cached_metadata = self.cached_metadata.write().unwrap();
@@ -1284,7 +1286,7 @@ impl DatabaseManager {
         None => {
           // Shouldn't happen, but handle gracefully
           drop(cached_metadata);
-          let fresh_metadata = self.read_metadata()?;
+          let fresh_metadata = self.read_metadata().await?;
 
           let mut cached_metadata = self.cached_metadata.write().unwrap();
           *cached_metadata = Some(fresh_metadata.clone());
@@ -1296,6 +1298,42 @@ impl DatabaseManager {
 
           Ok(fresh_metadata)
         }
+      }
+    }
+  }
+
+  /// Get metadata with caching support (sync version for use in non-async contexts)
+  /// This function blocks on the async version, handling both sync and async callers
+  fn get_metadata_cached_sync(&self) -> Result<Metadata, Box<dyn Error>> {
+    // Check if we're already in an async context
+    match tokio::runtime::Handle::try_current() {
+      Ok(handle) => {
+        // We're in an async context - use spawn_blocking to avoid deadlocks
+        // This moves execution to a blocking thread where we can safely create a runtime
+        let self_clone = self.clone();
+        let join_handle = handle.spawn_blocking(move || {
+          // Create a new runtime in the blocking thread
+          let rt = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(e) => return Err(format!("Failed to create tokio runtime: {}", e)),
+          };
+          match rt.block_on(self_clone.get_metadata_cached()) {
+            Ok(metadata) => Ok(metadata),
+            Err(e) => Err(format!("Failed to get metadata: {}", e)),
+          }
+        });
+
+        // Use futures::executor::block_on to wait for the join handle without creating another runtime
+        // This is safe because we're blocking on a JoinHandle, not creating a new runtime
+        match executor::block_on(join_handle) {
+          Ok(result) => result.map_err(|e| e.into()),
+          Err(e) => Err(format!("Failed to join blocking task: {}", e).into()),
+        }
+      }
+      Err(_) => {
+        // We're not in an async context - safe to create a new runtime
+        let rt = tokio::runtime::Runtime::new().map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
+        rt.block_on(self.get_metadata_cached())
       }
     }
   }
@@ -1398,7 +1436,7 @@ impl DatabaseManager {
     // Rest of the update_metadata implementation...
     let new_data_path = storage_path.to_string() + "/data";
     let mut metadata = self
-      .get_metadata_cached()
+      .get_metadata_cached_sync()
       .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to read metadata: {}", e)))?;
 
     for (db_name, db) in metadata.databases.iter_mut() {

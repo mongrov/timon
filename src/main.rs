@@ -981,7 +981,7 @@ async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
     // Query activity details
     let start_time = Instant::now();
     let activity_details_query = format!(r#"SELECT * FROM activitydetails"#);
-    let activity_details_result = query(DATABASE_NAME, &activity_details_query, Some(username), None).await?;
+    let activity_details_result = query(DATABASE_NAME, &activity_details_query, None, None).await?;
     let duration = start_time.elapsed();
     println!(
       "Activity details {} (Time taken: {:.3} seconds)",
@@ -992,7 +992,7 @@ async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
     // Query SPO2 readings
     let start_time = Instant::now();
     let spo2_query = format!(r#"SELECT * FROM spo2"#);
-    let spo2_result = query(DATABASE_NAME, &spo2_query, Some(username), None).await?;
+    let spo2_result = query(DATABASE_NAME, &spo2_query, None, None).await?;
     let duration = start_time.elapsed();
     println!(
       "SPO2 readings {} (Time taken: {:.3} seconds)",
@@ -1003,7 +1003,7 @@ async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
     // Query heart rate readings
     let start_time = Instant::now();
     let hr_query = format!(r#"SELECT * FROM heartrate"#);
-    let hr_result = query(DATABASE_NAME, &hr_query, Some(username), None).await?;
+    let hr_result = query(DATABASE_NAME, &hr_query, None, None).await?;
     let duration = start_time.elapsed();
     println!(
       "Heart rate readings {} (Time taken: {:.3} seconds)",
@@ -1014,7 +1014,7 @@ async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
     // Query HRV readings
     let start_time = Instant::now();
     let hrv_query = format!(r#"SELECT * FROM hrv_table"#);
-    let hrv_result = query(DATABASE_NAME, &hrv_query, Some(username), None).await?;
+    let hrv_result = query(DATABASE_NAME, &hrv_query, None, None).await?;
     let duration = start_time.elapsed();
     println!(
       "HRV readings {} (Time taken: {:.3} seconds)",
@@ -1025,7 +1025,7 @@ async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
     // Query temperature readings
     let start_time = Instant::now();
     let temp_query = format!(r#"SELECT * FROM temperature_readings"#);
-    let temp_result = query(DATABASE_NAME, &temp_query, Some(username), None).await?;
+    let temp_result = query(DATABASE_NAME, &temp_query, None, None).await?;
     let duration = start_time.elapsed();
     println!(
       "Temperature readings {} (Time taken: {:.3} seconds)",
@@ -1039,7 +1039,7 @@ async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
     // Query for average heart rate
     let start_time = Instant::now();
     let avg_hr_query = format!(r#"SELECT * FROM heartrate"#);
-    let avg_hr_result = query(DATABASE_NAME, &avg_hr_query, Some(username), None).await?;
+    let avg_hr_result = query(DATABASE_NAME, &avg_hr_query, None, None).await?;
     let duration = start_time.elapsed();
     println!(
       "Average heart rate {} (Time taken: {:.3} seconds)",
@@ -1050,7 +1050,7 @@ async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
     // Query for max SPO2
     let start_time = Instant::now();
     let max_spo2_query = format!(r#"SELECT * FROM spo2"#);
-    let max_spo2_result = query(DATABASE_NAME, &max_spo2_query, Some(username), None).await?;
+    let max_spo2_result = query(DATABASE_NAME, &max_spo2_query, None, None).await?;
     let duration = start_time.elapsed();
     println!(
       "Max SPO2: {} (Time taken: {:.3} seconds)",
@@ -1061,7 +1061,7 @@ async fn test_ziva_ring_query() -> Result<(), Box<dyn std::error::Error>> {
     // Query for stress levels over time
     let start_time = Instant::now();
     let stress_query = format!(r#"SELECT * FROM hrv_table"#);
-    let stress_result = query(DATABASE_NAME, &stress_query, Some(username), None).await?;
+    let stress_result = query(DATABASE_NAME, &stress_query, None, None).await?;
     let duration = start_time.elapsed();
     println!(
       "Stress levels over time: {} (Time taken: {:.3} seconds)",
@@ -1084,7 +1084,7 @@ async fn test_ziva_join_query() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Testing JOIN query for user: {} ===", username);
     let start_time = Instant::now();
     let sql_query = "SELECT * FROM activitydetails JOIN spo2 ON to_char(to_timestamp(activitydetails.date), 'YYYY-MM-DD') = to_char(to_timestamp(spo2.date), 'YYYY-MM-DD') LIMIT 100";
-    let result = query(DATABASE_NAME, sql_query, Some(username), None).await?;
+    let result = query(DATABASE_NAME, sql_query, None, None).await?;
     let duration = start_time.elapsed();
     println!("Query time: {:.3} seconds", duration.as_secs_f64());
     println!("JOIN Query Result: {} status: {}", result["json_value"], result["status"]);
@@ -1170,7 +1170,7 @@ async fn test_ziva_range_selction_query() -> Result<(), Box<dyn std::error::Erro
     println!("\n=== Testing range selection query for user: {} ===", username);
     let start_time = Instant::now();
     const QUERY_2: &str = "SELECT COUNT(*) AS total FROM activitydetails WHERE partition_date BETWEEN '2025-08-27' AND '2025-09-20'";
-    let result = query(DATABASE_NAME, QUERY_2, Some(username), None).await?;
+    let result = query(DATABASE_NAME, QUERY_2, None, None).await?;
     let duration = start_time.elapsed();
     println!(
       "Range Selection Result: {} status: {} (Time taken: {:.3} seconds)",
@@ -1249,7 +1249,7 @@ async fn test_sleep_queries() -> Result<(), Box<dyn std::error::Error>> {
         start_ts, end_ts, start_ts, end_ts
       );
 
-      let last_night_result = query("zivaring", &last_night_query, Some(username), None).await?;
+      let last_night_result = query("zivaring", &last_night_query, None, None).await?;
       let duration = start_time.elapsed();
       println!("(Query time: {:.3} seconds)", duration.as_secs_f64());
       // println!("Last night's sleep data: {}", last_night_result["json_value"]);
@@ -1302,7 +1302,7 @@ async fn test_sleep_queries() -> Result<(), Box<dyn std::error::Error>> {
         date_label, start_ts, end_ts
       );
 
-      let day_result = query("zivaring", &day_consistency_query, Some(username), None).await?;
+      let day_result = query("zivaring", &day_consistency_query, None, None).await?;
       let day_duration = day_start_time.elapsed();
       println!(
         "day_result {} status: {} (Time: {:.3}s) \n",
@@ -1589,7 +1589,7 @@ async fn test_hrv_queries() -> Result<(), Box<dyn std::error::Error>> {
   CROSS JOIN hrv_recovery_score hrs;
   "#;
 
-    let hrv_score_result = query("zivaring", rhr_hrv_query, Some(username), None).await?;
+    let hrv_score_result = query("zivaring", rhr_hrv_query, None, None).await?;
     let duration = start_time.elapsed();
     println!(
       "Resting Heart Rate Result: {} status: {} (Time taken: {:.3} seconds)",
@@ -1815,7 +1815,7 @@ async fn test_rhr_queries() -> Result<(), Box<dyn std::error::Error>> {
   FROM date_params dp
   CROSS JOIN rhr_analysis ra;
   "#;
-    let rhr_score_result = query("zivaring", rhr_sql_query, Some(username), None).await?;
+    let rhr_score_result = query("zivaring", rhr_sql_query, None, None).await?;
     let duration = start_time.elapsed();
     println!(
       "Resting Heart Rate Result: {} status: {} (Time taken: {:.3} seconds)",
@@ -2525,7 +2525,7 @@ async fn test_vitality_queries() -> Result<(), Box<dyn std::error::Error>> {
   FROM vitality_calculation;
   "#;
 
-    let vitality_result = query("zivaring", vitality_sql_query, Some(username), None).await?;
+    let vitality_result = query("zivaring", vitality_sql_query, None, None).await?;
     let duration = start_time.elapsed();
     println!(
       "vitality Result: {} status: {} (Time taken: {:.3} seconds)",
@@ -2571,7 +2571,7 @@ async fn ziva_app_queries() -> Result<(), Box<dyn std::error::Error>> {
     ORDER BY day, hour;
   "#;
 
-    let result_x = query("zivaring", &query_x, Some(username), None).await?;
+    let result_x = query("zivaring", &query_x, None, None).await?;
     let duration = start_time.elapsed();
     println!(
       "result_x: {} status: {} (Time taken: {:.3} seconds)",
