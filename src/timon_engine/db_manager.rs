@@ -209,7 +209,76 @@ impl DatabaseManager {
       eprintln!("Error updating metadata: {}", e);
     }
 
+    // Clean up orphaned temp files on startup
+    db_manager.cleanup_orphaned_temp_files();
+
     db_manager
+  }
+
+  /// Clean up orphaned temporary files that may have been left behind
+  /// from previous crashes or interrupted writes. Removes .tmp files older than 1 hour.
+  fn cleanup_orphaned_temp_files(&self) {
+    let cleanup_threshold = Duration::from_secs(3600); // 1 hour
+    let data_path = Path::new(&self.data_path);
+
+    if !data_path.exists() {
+      return;
+    }
+
+    // Recursively walk through the data directory to find all .tmp files
+    fn walk_and_cleanup(dir: &Path, threshold: Duration) -> usize {
+      use std::time::SystemTime;
+      let mut cleaned_count = 0;
+
+      match fs::read_dir(dir) {
+        Ok(entries) => {
+          for entry in entries.flatten() {
+            let path = entry.path();
+
+            if path.is_dir() {
+              // Recursively clean subdirectories
+              cleaned_count += walk_and_cleanup(&path, threshold);
+            } else if path.is_file() {
+              // Check if it's a .tmp file
+              if let Some(ext) = path.extension() {
+                if ext == "tmp" {
+                  // Check file modification time
+                  match fs::metadata(&path) {
+                    Ok(metadata) => {
+                      if let Ok(modified) = metadata.modified() {
+                        if let Ok(age) = SystemTime::now().duration_since(modified) {
+                          if age > threshold {
+                            // File is older than threshold, safe to remove
+                            if let Err(e) = fs::remove_file(&path) {
+                              eprintln!("Warning: Failed to remove orphaned temp file {:?}: {}", path, e);
+                            } else {
+                              cleaned_count += 1;
+                            }
+                          }
+                        }
+                      }
+                    }
+                    Err(e) => {
+                      eprintln!("Warning: Failed to get metadata for {:?}: {}", path, e);
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        Err(e) => {
+          eprintln!("Warning: Failed to read directory {:?}: {}", dir, e);
+        }
+      }
+
+      cleaned_count
+    }
+
+    let cleaned = walk_and_cleanup(data_path, cleanup_threshold);
+    if cleaned > 0 {
+      eprintln!("Cleaned up {} orphaned temporary file(s) on startup", cleaned);
+    }
   }
 
   /// Validates database or table name to prevent path traversal attacks
@@ -1013,23 +1082,48 @@ impl DatabaseManager {
       })
       .unwrap_or_else(|| path.with_file_name(format!("data.parquet.{}.tmp", timestamp)));
 
-    // Write to temporary file (lock is already held by caller)
-    let temp_file = fs::File::create(&temp_path)?;
-    let props = WriterProperties::builder().build();
-    let mut writer = ArrowWriter::try_new(&temp_file, Arc::new(schema.clone()), Some(props))?;
-    let combined_batch = RecordBatch::try_new(Arc::new(schema), array)?;
-    writer.write(&combined_batch)?;
-    writer.close()?;
+    // Helper function to clean up temp file on error
+    let cleanup_temp = |temp_path: &Path| {
+      if temp_path.exists() {
+        if let Err(e) = fs::remove_file(temp_path) {
+          eprintln!("Warning: Failed to clean up temp file {:?}: {}", temp_path, e);
+        }
+      }
+    };
 
-    // Flush and sync to ensure data is written to disk
-    temp_file.sync_all()?;
-    drop(temp_file);
+    // Write to temporary file (lock is already held by caller)
+    // Use a match to ensure cleanup on error
+    let write_result = (|| -> Result<(), Box<dyn Error>> {
+      let temp_file = fs::File::create(&temp_path)?;
+      let props = WriterProperties::builder().build();
+      let mut writer = ArrowWriter::try_new(&temp_file, Arc::new(schema.clone()), Some(props))?;
+      let combined_batch = RecordBatch::try_new(Arc::new(schema), array)?;
+      writer.write(&combined_batch)?;
+      writer.close()?;
+
+      // Flush and sync to ensure data is written to disk
+      temp_file.sync_all()?;
+      drop(temp_file);
+      Ok(())
+    })();
+
+    // If write failed, clean up temp file and return error
+    if let Err(e) = write_result {
+      cleanup_temp(&temp_path);
+      return Err(e);
+    }
 
     // Atomically rename temporary file to final location
     // This is an atomic operation on most filesystems
     // IMPORTANT: We must hold the lock until AFTER the rename completes
     // to ensure no other thread can overwrite our file
-    fs::rename(&temp_path, path)?;
+    let rename_result = fs::rename(&temp_path, path);
+
+    // If rename failed, clean up temp file
+    if let Err(e) = rename_result {
+      cleanup_temp(&temp_path);
+      return Err(Box::new(e));
+    }
 
     // Sync the parent directory to ensure the rename is persisted to disk
     if let Some(parent) = path.parent() {
@@ -1039,7 +1133,7 @@ impl DatabaseManager {
     }
 
     // Clean up temp file if it still exists (shouldn't happen after successful rename)
-    let _ = fs::remove_file(&temp_path);
+    cleanup_temp(&temp_path);
 
     Ok(format!("Data was successfully written to '{}'", path.to_string_lossy()))
   }
