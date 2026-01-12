@@ -102,13 +102,8 @@ struct Database {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Table {
-  path: String,                         // Path to the table
-  schema: serde_json::Value,            // Placeholder for your schema structure (optional)
-  last_sync_time: Option<String>,       // ISO 8601 timestamp of last successful sync
-  last_sync_type: Option<String>,       // "sync" or "sink" to indicate sync type
-  last_sync_operation: Option<String>,  // ISO 8601 timestamp of last sync operation
-  last_sink_operation: Option<String>,  // ISO 8601 timestamp of last sink operation
-  last_fetch_operation: Option<String>, // ISO 8601 timestamp of last fetch operation
+  path: String,              // Path to the table
+  schema: serde_json::Value, // Placeholder for your schema structure (optional)
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -379,15 +374,7 @@ impl DatabaseManager {
     fs::create_dir_all(&table_path)?;
 
     // Store the schema for future validation during inserts
-    let table = Table {
-      schema,
-      path: table_path,
-      last_sync_time: None,
-      last_sync_type: None,
-      last_sync_operation: None,
-      last_sink_operation: None,
-      last_fetch_operation: None,
-    };
+    let table = Table { schema, path: table_path };
     database.tables.insert(table_name.to_string(), table);
 
     // Persist the metadata to disk (e.g., in a metadata.json or similar)
@@ -1589,12 +1576,65 @@ impl DatabaseManager {
   }
 
   fn save_metadata(&self) -> TokioResult<()> {
+    // Retry logic to handle transient failures (similar to read_metadata)
+    let max_retries = 5;
+    let retry_delay = Duration::from_millis(100);
+
+    for attempt in 0..max_retries {
+      match self.save_metadata_attempt() {
+        Ok(()) => return Ok(()),
+        Err(e) => {
+          // Check if this is a transient error that might succeed on retry
+          let is_transient = matches!(
+            e.kind(),
+            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted
+          );
+
+          if is_transient && attempt < max_retries - 1 {
+            eprintln!(
+              "Transient error saving metadata (attempt {}/{}): {}. Retrying...",
+              attempt + 1,
+              max_retries,
+              e
+            );
+            std::thread::sleep(retry_delay);
+            continue;
+          } else {
+            // Last attempt or non-transient error - return the error
+            if attempt == max_retries - 1 {
+              eprintln!("Failed to save metadata after {} attempts: {}", max_retries, e);
+            }
+            return Err(e);
+          }
+        }
+      }
+    }
+
+    // Should never reach here, but return error as fallback
+    Err(std::io::Error::new(
+      std::io::ErrorKind::Other,
+      "Failed to save metadata after all retry attempts",
+    ))
+  }
+
+  /// Internal method that performs a single save attempt
+  /// This is separated to allow retry logic in the public method
+  fn save_metadata_attempt(&self) -> TokioResult<()> {
+    // Create backup of existing metadata file before writing (if it exists)
+    if Path::new(&self.metadata_path).exists() {
+      if let Err(e) = self.create_metadata_backup() {
+        eprintln!("Warning: Failed to create metadata backup: {}. Continuing with save...", e);
+        // Don't fail the save operation if backup fails, but log the warning
+      }
+    }
+
     // Use atomic write: write to temp file, then rename
     // This ensures metadata file is never in a partially-written state
     let temp_path = format!("{}.tmp", self.metadata_path);
 
     // Serialize the metadata structure
-    let json = serde_json::to_string(&self.metadata)?;
+    let json = serde_json::to_string(&self.metadata)
+      .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to serialize metadata to JSON: {}", e)))?;
 
     // Write to temporary file
     fs::write(&temp_path, json)?;
@@ -1636,6 +1676,81 @@ impl DatabaseManager {
 
     // Invalidate cache after saving metadata
     self.invalidate_cache();
+    Ok(())
+  }
+
+  /// Create a backup of the current metadata file
+  /// Keeps only the last MAX_BACKUPS backups to prevent disk space issues
+  fn create_metadata_backup(&self) -> Result<(), Box<dyn Error>> {
+    const MAX_BACKUPS: usize = 5;
+
+    if !Path::new(&self.metadata_path).exists() {
+      return Ok(()); // Nothing to backup
+    }
+
+    // Generate backup filename with timestamp
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let timestamp = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .map_err(|e| format!("System time is before UNIX epoch: {:?}", e))?
+      .as_secs();
+
+    let backup_dir = format!("{}.backups", self.metadata_path);
+    fs::create_dir_all(&backup_dir)?;
+
+    let backup_path = format!("{}/metadata.{}.json", backup_dir, timestamp);
+
+    // Copy current metadata file to backup location
+    fs::copy(&self.metadata_path, &backup_path)?;
+
+    // Clean up old backups, keeping only the last MAX_BACKUPS
+    self.cleanup_old_backups(&backup_dir, MAX_BACKUPS)?;
+
+    Ok(())
+  }
+
+  /// Clean up old backup files, keeping only the last N backups
+  fn cleanup_old_backups(&self, backup_dir: &str, max_backups: usize) -> Result<(), Box<dyn Error>> {
+    use std::time::SystemTime;
+
+    let backup_path = Path::new(backup_dir);
+    if !backup_path.exists() {
+      return Ok(());
+    }
+
+    // Collect all backup files with their modification times
+    let mut backups: Vec<(SystemTime, String)> = Vec::new();
+
+    for entry in fs::read_dir(backup_path)? {
+      let entry = entry?;
+      let path = entry.path();
+
+      if path.is_file() {
+        if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+          if file_name.starts_with("metadata.") && file_name.ends_with(".json") {
+            if let Ok(metadata) = fs::metadata(&path) {
+              if let Ok(modified) = metadata.modified() {
+                backups.push((modified, path.to_string_lossy().to_string()));
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Sort by modification time (oldest first)
+    backups.sort_by_key(|(time, _)| *time);
+
+    // Remove oldest backups if we exceed the limit
+    if backups.len() > max_backups {
+      let to_remove = backups.len() - max_backups;
+      for (_, path) in backups.iter().take(to_remove) {
+        if let Err(e) = fs::remove_file(path) {
+          eprintln!("Warning: Failed to remove old backup file '{}': {}", path, e);
+        }
+      }
+    }
+
     Ok(())
   }
 
