@@ -10,6 +10,7 @@ use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl};
 use datafusion::datasource::MemTable;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
+use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::parquet::file::properties::WriterProperties;
 use datafusion::parquet::file::reader::{FileReader, SerializedFileReader};
@@ -1020,15 +1021,97 @@ impl DatabaseManager {
     Self::parquet_file_writer_locked(file_path, schema, arrays)
       .map_err(|e| format!("Failed to write parquet file '{}': {}", file_path.display(), e))?;
 
-    // Verify the file was written and has content
-    let file_size = fs::metadata(file_path).map(|m| m.len()).unwrap_or(0);
-    if file_size == 0 {
-      return Err(format!("File '{}' was created but is empty (0 bytes)", file_path.display()).into());
+    // Lock is released when _guard is dropped here
+    Ok(())
+  }
+
+  /// Validate a parquet file by attempting to read it and verify its structure
+  /// Returns the schema from the file if validation succeeds
+  fn validate_parquet_file(file_path: &Path, expected_schema: Option<&Schema>) -> Result<Schema, Box<dyn Error>> {
+    // Open and create arrow reader - this will fail if file is corrupted or not a valid parquet file
+    let file = fs::File::open(file_path).map_err(|e| format!("Failed to open parquet file '{}' for validation: {}", file_path.display(), e))?;
+
+    // Build the reader - this validates the parquet file structure and footer integrity
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
+      format!(
+        "Failed to create parquet reader for '{}': file may be corrupted or invalid parquet format: {}",
+        file_path.display(),
+        e
+      )
+    })?;
+
+    // Get the schema from the parquet file
+    let actual_schema = builder.schema().as_ref().clone();
+
+    // Verify the file has at least one row group
+    let metadata = builder.metadata();
+    if metadata.num_row_groups() == 0 {
+      return Err(format!("Parquet file '{}' has no row groups", file_path.display()).into());
     }
 
-    // Lock is released when _guard is dropped here
+    // Try to read at least one record batch to ensure the file is readable
+    let mut reader = builder
+      .build()
+      .map_err(|e| format!("Failed to build parquet reader for '{}': {}", file_path.display(), e))?;
 
-    Ok(())
+    // Read the first batch to validate data can be read
+    match reader.next() {
+      Some(Ok(_batch)) => {
+        // File is readable, continue with schema validation
+      }
+      Some(Err(e)) => {
+        return Err(format!("Failed to read data from parquet file '{}': {}", file_path.display(), e).into());
+      }
+      None => {
+        // Empty file is acceptable, but we've validated the structure
+      }
+    }
+
+    // If expected schema is provided, validate it matches
+    if let Some(expected) = expected_schema {
+      // Compare field count
+      if actual_schema.fields().len() != expected.fields().len() {
+        return Err(
+          format!(
+            "Schema mismatch in parquet file '{}': expected {} fields, got {}",
+            file_path.display(),
+            expected.fields().len(),
+            actual_schema.fields().len()
+          )
+          .into(),
+        );
+      }
+
+      // Compare field names and types
+      for (expected_field, actual_field) in expected.fields().iter().zip(actual_schema.fields().iter()) {
+        if expected_field.name() != actual_field.name() {
+          return Err(
+            format!(
+              "Schema field name mismatch in parquet file '{}': expected '{}', got '{}'",
+              file_path.display(),
+              expected_field.name(),
+              actual_field.name()
+            )
+            .into(),
+          );
+        }
+
+        if expected_field.data_type() != actual_field.data_type() {
+          return Err(
+            format!(
+              "Schema field type mismatch in parquet file '{}' for field '{}': expected {:?}, got {:?}",
+              file_path.display(),
+              expected_field.name(),
+              expected_field.data_type(),
+              actual_field.data_type()
+            )
+            .into(),
+          );
+        }
+      }
+    }
+
+    Ok(actual_schema)
   }
 
   /// Read parquet file (static version for use in atomic operations)
@@ -1058,6 +1141,9 @@ impl DatabaseManager {
   /// Write parquet file (internal version that assumes lock is already held)
   /// This version doesn't acquire a lock - it should only be called from atomic_file_insert
   fn parquet_file_writer_locked(path: &Path, schema: Schema, array: Vec<Arc<dyn Array>>) -> Result<String, Box<dyn Error>> {
+    // Clone schema for validation after write (schema will be moved during write)
+    let schema_for_validation = schema.clone();
+
     // Ensure parent directory exists
     if let Some(parent) = path.parent() {
       fs::create_dir_all(parent)?;
@@ -1131,6 +1217,14 @@ impl DatabaseManager {
         let _ = parent_file.sync_all();
       }
     }
+
+    // Validate the written parquet file
+    // This ensures the file is readable, has valid parquet structure, and schema matches
+    Self::validate_parquet_file(path, Some(&schema_for_validation)).map_err(|e| {
+      // If validation fails, try to clean up the corrupted file
+      cleanup_temp(path);
+      format!("Parquet file validation failed after write: {}", e)
+    })?;
 
     // Clean up temp file if it still exists (shouldn't happen after successful rename)
     cleanup_temp(&temp_path);

@@ -402,7 +402,11 @@ Documentation could be improved:
   - Consider using system temp directory with automatic cleanup
   - Add periodic background task to clean up orphaned temp files
 
-⚠️ **Issue: Metadata temporary files may not be cleaned up** (VALID ISSUE, but less likely to cause any errors - low priority)
+⚠️ **Issue: Metadata temporary files may not be cleaned up** (Keeping metadata.json.tmp files is fine because:
+1) they're small (JSON metadata), so disk usage is negligible;
+2) they're useful for debugging crashes between write and rename;
+3) the code always reads metadata.json, never metadata.json.tmp, so there's no risk of reading stale data;
+4) the atomic rename pattern ensures metadata.json is either complete or missing, so temp files are harmless leftovers. The original concern about cleanup is not a valid issue in this case)
 - **Location**: `db_manager.rs:1315-1344` - `save_metadata()`
 - **Problem**: 
   - Metadata writes use temp file pattern: `metadata.json.tmp` (line 1318)
@@ -439,19 +443,63 @@ Documentation could be improved:
   - Return error if credentials are missing
   - Never log credentials in error messages or debug output
 
-⚠️ **Issue: Credentials passed through JNI interface** (NEED TO LEARN MORE ABOUT "secure memory handling for sensitive data")
-- **Location**: `lib.rs:261-265` - JNI functions receive credentials as strings
+⚠️ **Issue: Credentials passed through JNI interface** 
+- **Location**: 
+  - `lib.rs:406-456` - `nativeInitBucket` (JNI/Android) receives credentials as `JString` parameters
+  - `lib.rs:1220-1242` - `nativeInitBucket` (C interface) receives credentials as `*const c_char` parameters
 - **Problem**: 
-  - Credentials are passed as Java strings through JNI
-  - Strings may remain in memory longer than necessary
-  - No secure memory handling for sensitive data
+  - Credentials (`access_key_id`, `secret_access_key`) are passed as Java strings through JNI
+  - Java strings are immutable and may remain in memory until garbage collected (unpredictable timing)
+  - Rust strings created from JNI are heap-allocated and remain in memory until dropped
+  - Credentials are stored in `CloudStorageManager` which keeps them in the `AmazonS3` client (likely stored internally)
+  - No explicit memory clearing/zeroization of credentials after use
+  - Credentials persist in memory for the lifetime of the application or until the S3 client is dropped
 - **Impact**: 
-  - Credentials may be exposed in memory dumps
-  - Credentials may be logged by JNI layer
-- **Recommendation**: 
-  - Clear credential strings from memory after use
-  - Use secure string handling if available
-  - Avoid logging credential values
+  - **Memory dumps**: Credentials may be exposed in memory dumps (core dumps, crash reports, debugging)
+  - **Swap files**: If system uses swap, credentials may be written to disk
+  - **Process inspection**: Other processes with appropriate permissions could read memory
+  - **JNI layer**: JNI may create temporary copies during string conversion
+  - **S3 client**: The `object_store::aws::AmazonS3` client likely stores credentials internally for the lifetime of the client
+- **Current State Analysis**:
+  - ✅ Good: Error messages don't log actual credential values (only conversion errors)
+  - ❌ Issue: Credentials stored in `CloudStorageManager` which lives in a static `Arc` (`CLOUD_STORAGE_MANAGER`)
+  - ❌ Issue: No explicit zeroization of credential strings after passing to `init_bucket`
+  - ❌ Issue: Credentials passed as regular `String` types, not secure types
+- **Recommendations** (in order of priority):
+  1. **Use `zeroize` crate for credential handling**:
+     - Replace `String` with `zeroize::Zeroizing<String>` for credential variables
+     - This ensures credentials are zeroed when dropped
+     - Example: `let rust_secret_access_key = Zeroizing::new(jstring_to_rust_string(...)?);`
+  
+  2. **Clear credentials immediately after use**:
+     - After passing credentials to `init_bucket`, explicitly drop/clear the local variables
+     - Use `std::mem::drop()` or scope the credentials to minimize lifetime
+  
+  3. **Review S3 client credential storage**:
+     - Check if `object_store::aws::AmazonS3` stores credentials in memory
+     - Consider if credentials can be passed differently (e.g., environment variables, but this has trade-offs)
+     - The S3 client likely needs credentials for each request, so they may need to persist
+  
+  4. **Java/Kotlin side considerations**:
+     - Use `char[]` instead of `String` for credentials in Java/Kotlin (if possible with JNI)
+     - Clear the Java string arrays after passing to JNI
+     - Note: JNI `JString` is still a Java `String`, so this has limitations
+  
+  5. **Alternative approaches**:
+     - Consider using Android Keystore or secure storage for credentials
+     - Use credential tokens that can be rotated instead of long-lived secrets
+     - Implement credential encryption at rest if they must be stored
+  
+  6. **Limitations to be aware of**:
+     - Rust's `String` is heap-allocated and the allocator may not immediately clear freed memory
+     - The S3 client (`AmazonS3`) needs credentials for API calls, so they must be accessible
+     - JNI string conversion creates copies, so credentials exist in both Java and Rust memory
+     - Complete protection is difficult without hardware security modules (HSM)
+  
+- **Implementation Priority**:
+  - **High**: Add `zeroize` crate and use `Zeroizing<String>` for credential variables
+  - **Medium**: Ensure credentials are dropped as soon as possible after use
+  - **Low**: Investigate if S3 client can use alternative credential mechanisms
 
 ### Code Quality & Robustness
 
@@ -461,7 +509,13 @@ Documentation could be improved:
   - Metadata cache never expires automatically
   - Cache is only invalidated on writes
   - If metadata is modified externally, cache becomes stale
-- **Impact**: 
+- **How Metadata Can Be Modified Externally**:
+  - **Manual editing**: Someone could manually edit `metadata.json` file
+  - **File system recovery**: After a crash or file system issue, metadata might be restored from backup
+  - **External scripts**: While not currently in the codebase, future scripts could modify metadata.json directly
+  - **Cloud sync operations**: If cloud sync is extended to sync metadata files, external changes could occur
+  - **Multiple instances**: If multiple app instances share the same storage path, one could modify metadata while another has it cached
+- **Impact**:
   - Stale metadata can cause incorrect behavior
   - External metadata changes may not be reflected
 - **Recommendation**: 
@@ -472,7 +526,7 @@ Documentation could be improved:
 ⚠️ **Issue: No validation of written parquet files** (VALID ISSUE, BUT MOST LIKELY WILL NOT HAPPEN - medium priority)
 - **Location**: `db_manager.rs:924-931` - File write verification
 - **Problem**: 
-  - Only checks file size (non-zero) (line 928-930)
+  - Only checks file size (non-zero) (line 1025-1027)
   - Does not validate parquet file structure
   - Does not verify file is readable
   - No verification that file can be parsed by DataFusion
