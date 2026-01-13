@@ -312,40 +312,44 @@ Documentation could be improved:
 
 ### Error Handling & Panic Safety
 
-⚠️ **Issue: Excessive use of `unwrap()` and `expect()` in production code** (VALID ISSUE - medium priority)
-- **Location**: Found 1046+ instances across the codebase
-- **Risk**: Can cause panics in production, especially in:
-  - `lib.rs`: JNI interface functions use `expect()` for string conversions (lines 29-265)
-  - `db_manager.rs`: Metadata operations, cache access, and file operations
-  - `main.rs`: Test code, but patterns may leak into production
+⚠️ **Issue: Excessive use of `unwrap()` and `expect()` in production code** (PARTIALLY FIXED - medium priority)
+- **Status**: Significantly improved, but some instances remain in critical paths
+- **Location**: 
+  - ✅ **FIXED**: `lib.rs` JNI interface functions now use proper error handling with `match` statements instead of `expect()`
+  - ⚠️ **REMAINING**: `db_manager.rs` has 4 instances in production code:
+    - Line 129: `Runtime::new().expect()` - Runtime creation in sync wrapper
+    - Line 130: `.expect("Failed to collect DataFrame results")` - DataFrame collection
+    - Line 211: `serde_json::to_string(&initial_metadata).unwrap()` - Metadata serialization
+    - Line 341: `Regex::new(r#"^$"#).expect()` - Compile-time constant regex (safe)
+  - ✅ **ACCEPTABLE**: Most remaining instances are in test code (`main.rs`, test files)
 - **Impact**: 
-  - Panics in JNI layer can crash Android/iOS applications
-  - Panics during file operations can leave system in inconsistent state
-  - Panics during metadata operations can corrupt metadata
+  - ⚠️ Panics during DataFrame collection can cause query failures
+  - ⚠️ Panics during metadata serialization can corrupt metadata
+  - ⚠️ Runtime creation failures can cause initialization failures
 - **Recommendation**: 
-  - Replace `unwrap()`/`expect()` with proper error handling in production paths
-  - Use `?` operator for error propagation
+  - Replace remaining `unwrap()`/`expect()` in `db_manager.rs` critical paths (lines 129, 130, 211)
+  - Use `?` operator for error propagation where possible
   - Add fallback behavior for critical operations
   - Consider using `unwrap_or_else()` with logging for non-critical paths
 
-⚠️ **Issue: Silent error handling with `.ok()`** (VALID ISSUE, but some errors are intentionally suppressed - medium priority)
-- **Location**: `db_manager.rs:515` - `fs::create_dir_all(&partition_dir).ok()`
-- **Problem**: 
-  - Directory creation failures are silently ignored
-  - Multiple other locations use `.ok()` to ignore errors (see grep results)
-  - `db_manager.rs:1328, 1337` - `sync_all().ok()` ignores sync failures
-  - `helpers.rs:516-518` - Optional parsing with `.ok()` may hide validation issues
+⚠️ **Issue: Silent error handling with `.ok()`** (MOSTLY FIXED - low priority)
+- **Status**: Significantly improved, with only minor instances remaining
+- **Location**: 
+  - ✅ **FIXED**: `db_manager.rs:641` - `fs::create_dir_all(&partition_dir)` now properly handles errors with logging and returns error
+  - ⚠️ **PARTIALLY FIXED**: `db_manager.rs:200` - `fs::create_dir_all(&data_path)` logs error but doesn't return (in constructor, may be acceptable)
+  - ✅ **FIXED**: `sync_all()` calls now properly handle errors:
+    - Line 1225: Uses `?` operator for error propagation
+    - Line 1691, 1710: Uses `map_err()` for proper error handling
+  - ⚠️ **REMAINING**: `db_manager.rs:1251` - `parent_file.sync_all()` silently ignored (parent directory sync, less critical)
+  - ✅ **ACCEPTABLE**: `helpers.rs:516-520` - `.ok()` is intentional for date parsing (comment explains: "invalid date formats should be skipped")
+  - ✅ **ACCEPTABLE**: `db_manager.rs:804, 812` - `.ok()` used for filtering directory entries (acceptable for non-critical filtering)
 - **Impact**: 
-  - Failed directory creation can lead to file write failures later
-  - Empty partition directories can cause DataFusion validation errors
-  - Difficult to debug issues when errors are swallowed
-  - Sync failures can lead to data loss if system crashes
+  - ✅ Critical directory creation failures are now properly handled
+  - ⚠️ Parent directory sync failures are silently ignored (low risk, non-critical)
+  - ✅ Most sync failures are now properly handled
 - **Recommendation**: 
-  - Log directory creation failures
-  - Return errors instead of silently ignoring them
-  - Clean up empty partition directories on failure
-  - Log sync failures (even if non-fatal)
-  - Consider using `unwrap_or_else()` with logging for non-critical paths
+  - Consider logging parent directory sync failures at line 1251 (even if non-fatal)
+  - Consider returning error from data directory creation at line 200 if critical
 
 ### Resource Management & Memory Leaks
 
@@ -575,35 +579,47 @@ Documentation could be improved:
 
 ### Performance & Scalability
 
-⚠️ **Issue: No limits on concurrent operations** (Not a valid issue in our use cases - low priority)
-- **Location**: Throughout codebase
-- **Problem**: 
+⚠️ **Issue: No limits on concurrent operations** (NOT A VALID ISSUE - Server code only, not needed for library/JNI usage)
+- **Note**: This is a server-specific concern. The library is used via JNI/iOS interfaces for embedded, single-user applications where the app itself controls operation rates.
+- **Location**: Throughout codebase (but only relevant for server usage)
+- **Problem** (Server context only): 
   - No rate limiting on inserts
   - No limit on concurrent queries
   - No limit on file operations
-- **Impact**: 
-  - Resource exhaustion under high load
-  - Potential DoS vulnerability
-  - Unpredictable performance degradation
+- **Impact** (Server context only): 
+  - Resource exhaustion under high load (multi-user scenarios)
+  - Potential DoS vulnerability (if exposed as HTTP API)
+  - Unpredictable performance degradation (under concurrent load)
+- **Why Not Needed for Library/JNI Usage**:
+  - JNI/iOS interfaces are used in embedded, single-user mobile applications
+  - The mobile app controls the rate of operations (not external users)
+  - File operations are local to the device, not shared across multiple users
+  - Resource limits are naturally enforced by the mobile OS and app lifecycle
+  - No external attack surface - operations are initiated by the app itself
 - **Recommendation**: 
-  - Add configurable limits on concurrent operations
-  - Implement backpressure mechanisms
-  - Add rate limiting for API calls
+  - ~~Add configurable limits on concurrent operations~~ *(Not needed - library usage)*
+  - ~~Implement backpressure mechanisms~~ *(Not needed - library usage)*
+  - ~~Add rate limiting for API calls~~ *(Not needed - library usage)*
+  - **Note**: If server code (`server/mod.rs`) is ever used, then these recommendations would apply
 
-⚠️ **Issue: Synchronous file operations in async context** (VALID ISSUE - medium priority)
-- **Location**: `db_manager.rs:1203-1253` - `read_metadata()` uses blocking I/O
-- **Problem**: 
-  - Metadata reads use blocking `fs::read_to_string()`
-  - Called from async contexts
-  - Can block async runtime
+⚠️ **Issue: Synchronous file operations in async context** (PARTIALLY FIXED - low priority)
+- **Status**: Read operations fixed, but save operations still use blocking I/O
+- **Location**: 
+  - ✅ **FIXED**: `db_manager.rs:1455-1505` - `read_metadata()` now uses `tokio::fs::read_to_string().await` instead of blocking `fs::read_to_string()`
+  - ✅ **FIXED**: `db_manager.rs:1575-1595` - `get_metadata_cached_sync()` uses `spawn_blocking` to properly handle async context
+  - ⚠️ **REMAINING**: `db_manager.rs:1669-1716` - `save_metadata_attempt()` uses blocking I/O:
+    - Line 1687: `fs::write()` - blocking file write
+    - Line 1690: `fs::File::open()` - blocking file open
+    - Line 1705: `fs::rename()` - blocking file rename
+  - ⚠️ **REMAINING**: `db_manager.rs:1647` - `save_metadata()` uses `std::thread::sleep()` instead of `tokio::time::sleep().await`
 - **Impact**: 
-  - Blocks async runtime threads
-  - Reduces concurrency
-  - Can cause deadlocks in high-load scenarios
+  - ✅ Read operations no longer block async runtime
+  - ⚠️ Save operations still block async runtime threads (but less frequent than reads)
+  - ⚠️ Retry delays in save operations block threads instead of yielding
 - **Recommendation**: 
-  - Use `tokio::fs` for async file operations
-  - Or use `spawn_blocking` for blocking operations
-  - Ensure all I/O in async paths is non-blocking
+  - Convert `save_metadata_attempt()` to use `tokio::fs` for async file operations
+  - Replace `std::thread::sleep()` with `tokio::time::sleep().await` in `save_metadata()`
+  - Consider making `save_metadata_attempt()` async or wrapping it in `spawn_blocking`
 
 ✅ **Issue: Multiple Runtime instances created in JNI/iOS interfaces** (FIXED)
 - **Location**: `lib.rs:21-26` (JNI) and `lib.rs:990-995` (iOS) - Shared static `RUNTIME`
@@ -634,19 +650,30 @@ Documentation could be improved:
   - Add examples for complex operations
   - Document thread-safety guarantees
 
-⚠️ **Issue: Magic numbers and constants**
-- **Location**: Various locations (e.g., `db_manager.rs:61-62` - lock cleanup intervals)
-- **Problem**: 
-  - Hardcoded values without explanation
-  - Magic numbers in calculations
-  - No configuration options
+✅ **Issue: Magic numbers and constants** (FIXED)
+- **Location**: `db_manager.rs:32-82` - Configuration Constants section
+- **Status**: Fixed - All magic numbers extracted to well-documented constants
+- **Implementation**: 
+  - All timing, retry, and cleanup thresholds are now defined as constants with descriptive names:
+    - `LOCK_CLEANUP_INTERVAL` (3600s) - Interval for cleaning up unused file locks
+    - `LOCK_CLEANUP_THRESHOLD` (3600s) - Threshold for removing unused locks
+    - `ORPHANED_TEMP_FILE_AGE_THRESHOLD` (3600s) - Age threshold for orphaned temp files
+    - `METADATA_READ_MAX_RETRIES` (10) - Max retries for metadata reads
+    - `METADATA_READ_RETRY_DELAY` (50ms) - Delay between read retries
+    - `METADATA_SAVE_MAX_RETRIES` (5) - Max retries for metadata saves
+    - `METADATA_SAVE_RETRY_DELAY` (100ms) - Delay between save retries
+    - `METADATA_LOCK_MAX_RETRIES` (5) - Max retries for metadata lock acquisition
+    - `METADATA_LOCK_RETRY_DELAY` (100ms) - Delay between lock retries
+    - `MAX_METADATA_BACKUPS` (5) - Maximum metadata backup files to retain
+  - Each constant has comprehensive documentation explaining:
+    - What the value represents
+    - Why the specific value was chosen
+    - The purpose and impact of the constant
+  - Constants are organized in a dedicated "Configuration Constants" section at the top of the file
 - **Impact**: 
-  - Difficult to tune for different use cases
-  - Unclear why specific values were chosen
-- **Recommendation**: 
-  - Extract constants with descriptive names
-  - Add comments explaining value choices
-  - Make configurable where appropriate
+  - ✅ Easy to tune for different use cases
+  - ✅ Clear documentation of why specific values were chosen
+  - ✅ Improved maintainability and code readability
 
 ## 8. Priority Recommendations
 

@@ -362,11 +362,11 @@ pub fn init_bucket(
   // Create a new cloud storage manager with the current database manager's username
   let cloud_storage_manager = cloud_sync::CloudStorageManager::<AmazonS3>::new(
     database_manager,
-    Some(bucket_endpoint),
-    Some(access_key_id),
-    Some(secret_access_key),
-    Some(bucket_name),
-    Some(bucket_region),
+    bucket_endpoint,
+    access_key_id,
+    secret_access_key,
+    bucket_name,
+    bucket_region,
   );
 
   // Set the cloud storage manager (can be reinitialized now)

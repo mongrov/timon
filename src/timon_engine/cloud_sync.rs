@@ -167,18 +167,18 @@ struct Metadata {
 impl<S: S3StoreInterface> CloudStorageManager<S> {
   pub fn new(
     db_manager: impl DatabaseManagerInterface + 'static,
-    bucket_endpoint: Option<&str>,
-    access_key_id: Option<&str>,
-    secret_access_key: Option<&str>,
-    bucket_name: Option<&str>,
-    bucket_region: Option<&str>,
+    bucket_endpoint: &str,
+    access_key_id: &str,
+    secret_access_key: &str,
+    bucket_name: &str,
+    bucket_region: &str,
   ) -> CloudStorageManager<AmazonS3> {
     let username = db_manager.get_username().to_string();
-    let bucket_endpoint = bucket_endpoint.unwrap_or("http://localhost:9000").to_owned();
-    let bucket_name = bucket_name.unwrap_or("timon").to_owned();
-    let access_key_id = access_key_id.unwrap_or("ahmed").to_owned();
-    let secret_access_key = secret_access_key.unwrap_or("ahmed1234").to_owned();
-    let bucket_region = bucket_region.unwrap_or("us-west-1").to_owned();
+    let bucket_endpoint = bucket_endpoint.to_owned();
+    let bucket_name = bucket_name.to_owned();
+    let access_key_id = access_key_id.to_owned();
+    let secret_access_key = secret_access_key.to_owned();
+    let bucket_region = bucket_region.to_owned();
 
     let client_options = ClientOptions::new()
       .with_allow_http(true)

@@ -1115,11 +1115,11 @@ async fn test_cloud_storage_manager_new() {
   // We don't use catch_unwind here to ensure coverage tools see the execution
   let _result = CloudStorageManager::<object_store::aws::AmazonS3>::new(
     db_manager,
-    Some("http://localhost:9000"),
-    Some("test_key"),
-    Some("test_secret"),
-    Some("test_bucket"),
-    Some("us-west-1"),
+    "http://localhost:9000",
+    "test_key",
+    "test_secret",
+    "test_bucket",
+    "us-west-1",
   );
 
   // Cleanup
