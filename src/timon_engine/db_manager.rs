@@ -197,8 +197,12 @@ impl DatabaseManager {
     let metadata_path = format!("{}/metadata.json", storage_path);
 
     // Create the data directory if it doesn't exist
+    // Note: This is critical for database operation; failure may cause subsequent operations to fail
     if let Err(e) = fs::create_dir_all(&data_path) {
-      eprintln!("Error creating data directory {}: {}", data_path, e);
+      eprintln!(
+        "Error: Failed to create critical data directory {}: {}. Database operations may fail.",
+        data_path, e
+      );
     }
 
     // Check if the metadata file exists
@@ -1248,7 +1252,9 @@ impl DatabaseManager {
     // Sync the parent directory to ensure the rename is persisted to disk
     if let Some(parent) = path.parent() {
       if let Ok(parent_file) = fs::File::open(parent) {
-        let _ = parent_file.sync_all();
+        if let Err(e) = parent_file.sync_all() {
+          eprintln!("Warning: Failed to sync parent directory {:?} after file rename: {}", parent, e);
+        }
       }
     }
 
