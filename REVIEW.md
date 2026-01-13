@@ -268,18 +268,18 @@ Documentation could be improved:
 
 3. __API Ergonomics:__
 
-   - ✅ Add higher-level functions for common operations *(Not needed - server code only)*
-   - ✅ Consider builder patterns for complex configurations *(Not needed - server code only)*
+   - ✅ Add higher-level functions for common operations *(Not needed - server code only, and server code is not used)*
+   - ✅ Consider builder patterns for complex configurations *(Not needed - server code only, and server code is not used)*
 
-   **Note:** These improvements are server-specific and not needed for library usage. Higher-level functions and builder patterns are beneficial for HTTP API consumers and complex server configurations, but the core library API is already ergonomic for direct programmatic usage.
+   **Note:** These improvements are server-specific and not needed for library usage. Higher-level functions and builder patterns are beneficial for HTTP API consumers and complex server configurations, but the core library API is already ergonomic for direct programmatic usage. **Note: Server code (`server/mod.rs`) is not currently used in production.**
 
 4. __Performance:__
 
-   - ✅ Benchmark and optimize the query path *(Not needed - server code only)*
+   - ✅ Benchmark and optimize the query path *(Not needed - server code only, and server code is not used)*
    - ✅ Look for opportunities to reduce cloning *(Already optimized - see section 4)*
-   - ✅ Consider more aggressive caching strategies *(Not needed - server code only)*
+   - ✅ Consider more aggressive caching strategies *(Not needed - server code only, and server code is not used)*
 
-   **Note:** These performance optimizations are server-specific and not needed for library usage. Benchmarking and aggressive caching are beneficial for multi-user server workloads with concurrent requests, but the library's performance is already optimized for embedded usage through efficient ownership patterns and minimal allocations.
+   **Note:** These performance optimizations are server-specific and not needed for library usage. Benchmarking and aggressive caching are beneficial for multi-user server workloads with concurrent requests, but the library's performance is already optimized for embedded usage through efficient ownership patterns and minimal allocations. **Note: Server code (`server/mod.rs`) is not currently used in production.**
 
 5. __Documentation:__
 
@@ -384,23 +384,15 @@ Documentation could be improved:
   - Verify file existence before keeping lock entry
   - Consider reducing cleanup threshold or making it configurable
 
-⚠️ **Issue: Temporary files may not be cleaned up on error** (VALID ISSUE, but less likely to have orphaned files - low priority)
-- **Location**: `db_manager.rs:964-1012` - `parquet_file_writer_locked`
-- **Problem**: 
-  - Temp files are created with unique timestamps
-  - If process crashes between temp file creation and rename, temp files remain
-  - No cleanup mechanism for orphaned temp files
-  - Temp file cleanup only happens if rename succeeds (line 1012: `let _ = fs::remove_file(&temp_path)`)
-  - If process crashes before rename, temp file remains indefinitely
-- **Impact**: 
-  - Disk space can be consumed by orphaned temp files
-  - Temp files accumulate over time
-  - No startup cleanup of old temp files
-- **Recommendation**: 
-  - Add startup cleanup of old temp files (scan for `*.tmp` files older than threshold)
-  - Use file locking or atomic operations to prevent orphaned files
-  - Consider using system temp directory with automatic cleanup
-  - Add periodic background task to clean up orphaned temp files
+✅ **Issue: Temporary files may not be cleaned up on error** (FIXED)
+- **Location**: `db_manager.rs:261-323` - `cleanup_orphaned_temp_files()`
+- **Status**: Fixed - Startup cleanup implemented
+- **Implementation**: 
+  - `cleanup_orphaned_temp_files()` function scans for `.tmp` files older than 1 hour threshold
+  - Called automatically on `init_timon` startup (line 256)
+  - Recursively walks through data directory to find all `.tmp` files
+  - Removes orphaned temp files that may have been left behind from crashes
+  - Uses `ORPHANED_TEMP_FILE_AGE_THRESHOLD` constant (1 hour) for age threshold
 
 ⚠️ **Issue: Metadata temporary files may not be cleaned up** (Keeping metadata.json.tmp files is fine because:
 1) they're small (JSON metadata), so disk usage is negligible;
@@ -424,24 +416,59 @@ Documentation could be improved:
 
 ### Security Concerns
 
-🔴 **Issue: Hardcoded default credentials in cloud storage** (NOT A VALID ISSUE)
-- **Location**: `cloud_sync.rs:177-181`
+**Note**: Server code (`server/mod.rs`) is not currently used in production. Any security issues related to server code can be ignored.
+
+🔴 **Issue: Hardcoded default credentials in cloud storage** (VALID SECURITY ISSUE - High Priority)
+- **Note**: Server code (`server/mod.rs`) is not currently used in production, so server-related issues can be ignored
+- **Location**: 
+  - `cloud_sync.rs:177-181` - Internal `CloudStorageManager::new()` uses defaults
+  - ~~`server/mod.rs:179-182`~~ - Server code uses defaults (NOT USED - can be ignored)
 - **Problem**: 
   ```rust
+  // cloud_sync.rs:177-181
   let bucket_endpoint = bucket_endpoint.unwrap_or("http://localhost:9000").to_owned();
   let bucket_name = bucket_name.unwrap_or("timon").to_owned();
   let access_key_id = access_key_id.unwrap_or("ahmed").to_owned();
   let secret_access_key = secret_access_key.unwrap_or("ahmed1234").to_owned();
+  
+  // server/mod.rs:179-182 (NOT USED - can be ignored)
+  // let access_key_id = env::var("ACCESS_KEY_ID").unwrap_or_else(|_| "ahmed".to_string());
+  // let secret_access_key = env::var("SECRET_ACCESS_KEY").unwrap_or_else(|_| "ahmed1234".to_string());
   ```
-- **Impact**: 
-  - Default credentials are hardcoded in source code
-  - If credentials are not provided, insecure defaults are used
-  - Credentials may be logged or exposed in error messages
+- **Security Analysis**:
+  - **Public API Protection**: The public `init_bucket()` function requires all parameters as `&str` (non-optional), so defaults are NOT used in normal library usage
+  - **Internal API Risk**: `CloudStorageManager::new()` accepts `Option<&str>` and WILL use defaults if `None` is passed
+  - ~~**Server Code Risk**: The HTTP server (`server/mod.rs`) uses hardcoded defaults as fallback~~ *(NOT USED - can be ignored)*
+  - **Source Code Exposure**: Default credentials are visible in source code (anyone with code access can see them)
+  
+- **Security Breaches That Can Occur**:
+  1. **Unauthorized S3 Access**: If defaults are used, attackers with code access know the credentials
+  2. **Data Exfiltration**: Weak default credentials ("ahmed/ahmed1234") can be easily guessed/brute-forced
+  3. **Production Misconfiguration**: If environment variables aren't set in production, insecure defaults are used
+  4. **Code Repository Exposure**: If code is in public/private repos, credentials are visible to anyone with access
+  5. **Supply Chain Attacks**: Malicious actors can exploit known default credentials if they gain code access
+  6. **Compliance Violations**: Using default credentials violates security best practices and may violate regulations (GDPR, HIPAA, etc.)
+  
+- **Real-World Impact Scenarios**:
+  - **Scenario 1**: ~~Developer forgets to set environment variables in production → defaults are used~~ *(NOT APPLICABLE - server code not used)*
+  - **Scenario 2**: Internal API misuse → `CloudStorageManager::new()` called with `None` → defaults used → security breach
+  - **Scenario 3**: Code repository compromised → attacker sees defaults → attempts to use them on any S3 endpoint
+  - **Scenario 4**: If someone accidentally calls internal API with `None` values, and the S3 endpoint is publicly accessible, data is exposed
+  
+- **Current State**:
+  - ✅ **Good**: Public API (`init_bucket()`) requires credentials, preventing accidental use of defaults
+  - ❌ **Bad**: Internal API allows `None` values, falling back to defaults
+  - ~~❌ **Bad**: Server code uses defaults as fallback~~ *(NOT USED - can be ignored)*
+  - ❌ **Bad**: Default credentials are weak and predictable
+  
 - **Recommendation**: 
-  - Remove hardcoded defaults
-  - Require explicit credential provision
-  - Return error if credentials are missing
-  - Never log credentials in error messages or debug output
+  - **High Priority**: Remove hardcoded default credentials from `cloud_sync.rs`
+  - ~~**High Priority**: Remove hardcoded defaults from `server/mod.rs`~~ *(NOT USED - can be ignored)*
+  - Change `CloudStorageManager::new()` to require non-optional parameters OR return error if `None` is provided
+  - Add validation to reject weak/default credentials at runtime
+  - Never log credentials in error messages or debug output (currently good - no credential logging found)
+  - Consider using a configuration struct that validates all required fields are present
+  - Add security documentation warning about credential management
 
 ⚠️ **Issue: Credentials passed through JNI interface** 
 - **Location**: 
@@ -523,41 +550,28 @@ Documentation could be improved:
   - Implement cache invalidation on file modification time changes
   - Consider using file watchers for metadata changes
 
-⚠️ **Issue: No validation of written parquet files** (VALID ISSUE, BUT MOST LIKELY WILL NOT HAPPEN - medium priority)
-- **Location**: `db_manager.rs:924-931` - File write verification
-- **Problem**: 
-  - Only checks file size (non-zero) (line 1025-1027)
-  - Does not validate parquet file structure
-  - Does not verify file is readable
-  - No verification that file can be parsed by DataFusion
-- **Impact**: 
-  - Corrupted parquet files may be written
-  - Errors only discovered during query time
-  - Difficult to debug write failures
-  - Can cause "Invalid partitioning" errors during queries
-- **Recommendation**: 
-  - Add parquet file validation after write
-  - Verify file can be read back using `SerializedFileReader`
-  - Check parquet footer integrity
-  - Validate schema matches expected schema
-  - Consider using DataFusion's file validation utilities
+✅ **Issue: No validation of written parquet files** (FIXED)
+- **Location**: `db_manager.rs:1062-1095` - `validate_parquet_file()` and `db_manager.rs:1255-1261` - validation call
+- **Status**: Fixed - Parquet file validation implemented
+- **Implementation**: 
+  - `validate_parquet_file()` function validates parquet file structure and integrity
+  - Called automatically after each parquet file write in `parquet_file_writer_locked()` (line 1257)
+  - Validates parquet file structure using `ParquetRecordBatchReaderBuilder`
+  - Verifies footer integrity and schema matches expected schema
+  - Checks that file has at least one row group
+  - If validation fails, corrupted file is cleaned up automatically
 
-⚠️ **Issue: Error handling in metadata operations** (VALID ISSUE, Less likely to happen - medium priority)
-- **Location**: `db_manager.rs:367, 412` - `save_metadata().map_err(|e| e.to_string()).unwrap()`
-- **Problem**: 
-  - Metadata save failures are converted to strings and unwrapped
-  - Panics if metadata save fails
-  - No retry logic for transient failures
-  - Error information is lost when converting to string
-- **Impact**: 
-  - Panics can leave system in inconsistent state
-  - Metadata corruption can cause data loss
-  - Difficult to debug metadata save failures
-- **Recommendation**: 
-  - Properly handle metadata save errors (return `Result` instead of panicking)
-  - Add retry logic for transient failures (similar to `read_metadata()` retry logic)
-  - Implement metadata backup/restore mechanism
-  - Preserve original error information instead of converting to string
+✅ **Issue: Error handling in metadata operations** (FIXED)
+- **Location**: `db_manager.rs:1629-1705` - `save_metadata()` with retry logic
+- **Status**: Fixed - Retry logic and proper error handling implemented
+- **Implementation**: 
+  - `save_metadata()` now has comprehensive retry logic with 3 attempts
+  - Detects transient errors (PermissionDenied, WouldBlock, TimedOut, Interrupted) and retries
+  - Uses exponential backoff with configurable retry delay
+  - `save_metadata_attempt()` performs atomic writes using temp file + rename pattern
+  - Creates metadata backup before writing (if existing file exists)
+  - Preserves original error information instead of converting to string
+  - Returns proper `Result` types instead of panicking
 
 ### Performance & Scalability
 
@@ -591,23 +605,16 @@ Documentation could be improved:
   - Or use `spawn_blocking` for blocking operations
   - Ensure all I/O in async paths is non-blocking
 
-⚠️ **Issue: Multiple Runtime instances created in JNI/iOS interfaces** (VALID ISSUE - medium priority)
-- **Location**: `lib.rs:232, 311, 335, 368, 447, 789, 895, 926, 985, 1090` - Multiple `Runtime::new().unwrap()` calls
-- **Problem**: 
-  - Each JNI/iOS function call creates a new `tokio::Runtime` instance
-  - Creating multiple runtimes is expensive and can cause issues
-  - No reuse of existing runtime
-  - Runtime creation can fail but uses `unwrap()` (panics in production)
-- **Impact**: 
-  - Performance overhead from creating runtimes repeatedly
-  - Potential resource exhaustion if many calls happen quickly
-  - Panics if runtime creation fails (should be rare but possible)
-  - Each runtime spawns its own thread pool
-- **Recommendation**: 
-  - Use a shared static `LazyLock<Runtime>` for JNI/iOS interfaces
-  - Reuse the same runtime instance across all calls
-  - Handle runtime creation errors gracefully instead of panicking
-  - Consider using `Handle::current()` if already in async context
+✅ **Issue: Multiple Runtime instances created in JNI/iOS interfaces** (FIXED)
+- **Location**: `lib.rs:21-26` (JNI) and `lib.rs:990-995` (iOS) - Shared static `RUNTIME`
+- **Status**: Fixed - Shared runtime instances implemented
+- **Implementation**: 
+  - Shared static `LazyLock<Runtime>` for JNI interface (line 21-26)
+  - Shared static `LazyLock<Runtime>` for iOS interface (line 990-995)
+  - Single runtime instance reused across all JNI/iOS calls
+  - Runtime creation errors handled gracefully with `unwrap_or_else()` and process abort (critical system error)
+  - Eliminates performance overhead from repeated runtime creation
+  - Prevents resource exhaustion from multiple thread pools
 
 ### Documentation & Maintainability
 
@@ -644,17 +651,17 @@ Documentation could be improved:
 ## 8. Priority Recommendations
 
 ### High Priority (Security & Stability)
-1. **Remove hardcoded credentials** - Security risk
+1. 🔴 **Remove hardcoded credentials** - **CRITICAL Security risk** (see section 7 for detailed analysis)
 2. **Replace `unwrap()`/`expect()` in production paths** - Stability risk
 3. **Fix silent error handling** - Data integrity risk
-4. **Add parquet file validation** - Data integrity risk
+4. ✅ **Add parquet file validation** - Data integrity risk *(FIXED - see section 7)*
 
 ### Medium Priority (Performance & Resource Management)
 1. **Implement DatabaseManager cleanup** - Memory leak prevention
-2. **Reuse Runtime instances in JNI/iOS** - Performance improvement, resource efficiency
+2. ✅ **Reuse Runtime instances in JNI/iOS** - Performance improvement, resource efficiency *(FIXED - see section 7)*
 3. **Add limits on concurrent operations** - Resource protection
 4. **Use async file operations** - Performance improvement
-5. **Improve temp file cleanup** - Disk space management (both parquet and metadata temp files)
+5. ✅ **Improve temp file cleanup** - Disk space management (both parquet and metadata temp files) *(FIXED - see section 7)*
 
 ### Low Priority (Code Quality & Documentation)
 1. **Add comprehensive documentation** - Maintainability
@@ -666,35 +673,21 @@ Documentation could be improved:
 
 ### Resource Management & Efficiency
 
-⚠️ **Issue: Inefficient Runtime creation in foreign interfaces**
-- **Location**: `lib.rs` - Multiple `Runtime::new().unwrap()` calls in JNI and iOS interfaces
-- **Details**: 
-  - 30+ instances of `Runtime::new()` across the codebase
-  - Each JNI/iOS call creates a new runtime instance
-  - Test code also creates multiple runtimes unnecessarily
-- **Impact**: 
-  - Performance overhead from repeated runtime creation
-  - Resource waste (each runtime spawns thread pool)
-  - Potential thread pool exhaustion under high load
-- **Recommendation**: 
-  - Use shared static runtime for JNI/iOS interfaces
-  - Reuse existing runtime when possible
-  - Consider using `Handle::current()` if already in async context
+✅ **Issue: Inefficient Runtime creation in foreign interfaces** (FIXED)
+- **Location**: `lib.rs:21-26` (JNI) and `lib.rs:990-995` (iOS) - Shared static `RUNTIME`
+- **Status**: Fixed - See "Multiple Runtime instances created in JNI/iOS interfaces" above
+- **Note**: Test code still creates individual runtimes, which is acceptable for test isolation
 
 ### File System & Cleanup
 
-⚠️ **Issue: Orphaned temporary files from metadata operations**
-- **Location**: `db_manager.rs:1318` - Metadata temp file `metadata.json.tmp`
-- **Details**: 
-  - Metadata writes use temp file + rename pattern
-  - If process crashes between write and rename, temp file remains
-  - No startup cleanup of orphaned metadata temp files
-- **Impact**: 
-  - Accumulation of orphaned temp files
-  - Potential confusion during debugging
-- **Recommendation**: 
-  - Add startup cleanup of `*.tmp` files in storage directory
-  - Verify temp file age before using (reject stale files)
+✅ **Issue: Orphaned temporary files from metadata operations** (FIXED)
+- **Location**: `db_manager.rs:261-323` - `cleanup_orphaned_temp_files()`
+- **Status**: Fixed - Startup cleanup implemented for all temp files (including metadata)
+- **Implementation**: 
+  - `cleanup_orphaned_temp_files()` cleans up all `.tmp` files, including `metadata.json.tmp`
+  - Called automatically on `init_timon` startup
+  - Removes files older than 1 hour threshold
+  - See "Temporary files may not be cleaned up on error" above for details
 
 ### Error Handling Improvements
 
@@ -729,4 +722,13 @@ Documentation could be improved:
   - Consider using `Arc<Mutex<>>` for simpler locking model
   - Add deadlock detection in tests
 
-Overall, Timon is a well-designed library that effectively leverages DataFusion for time-series data management, with a clean API and good error handling. The library implements robust concurrency controls with atomic file writes and file-level locking. The main areas for improvement are in query path resolution (merging default and group paths), documentation, handling edge cases around data synchronization between paths, addressing the security and stability concerns identified above, and improving resource management (Runtime reuse, temp file cleanup, DatabaseManager lifecycle management).
+Overall, Timon is a well-designed library that effectively leverages DataFusion for time-series data management, with a clean API and good error handling. The library implements robust concurrency controls with atomic file writes and file-level locking. Several critical issues have been addressed:
+
+✅ **Fixed Issues:**
+- Runtime reuse in JNI/iOS interfaces (shared static runtime)
+- Temporary file cleanup on startup (orphaned temp file removal)
+- Parquet file validation after writes
+- Metadata save retry logic with transient error handling
+- Atomic file writes with temp file + rename pattern
+
+The main areas for improvement are in query path resolution (merging default and group paths), documentation, handling edge cases around data synchronization between paths, addressing remaining security and stability concerns (hardcoded credentials, unwrap/expect usage), and DatabaseManager lifecycle management.

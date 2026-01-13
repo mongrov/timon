@@ -29,6 +29,58 @@ use std::time::{Duration, Instant};
 use std::{fmt, fs};
 use tokio::io::Result as TokioResult;
 
+// ============================================================================
+// Configuration Constants
+// ============================================================================
+// These constants define timing, retry, and cleanup thresholds used throughout
+// the database manager. They are extracted from magic numbers to improve
+// maintainability and make the codebase easier to tune for different use cases.
+
+/// Interval for cleaning up unused file locks (60 minutes).
+/// Locks that haven't been accessed within this interval are removed to prevent
+/// the lock HashMap from growing indefinitely.
+const LOCK_CLEANUP_INTERVAL: Duration = Duration::from_secs(3600);
+
+/// Threshold for removing unused file locks (60 minutes).
+/// Locks unused for longer than this duration are considered stale and removed.
+const LOCK_CLEANUP_THRESHOLD: Duration = Duration::from_secs(3600);
+
+/// Age threshold for orphaned temporary files (1 hour).
+/// Temporary files older than this are considered orphaned (from crashes/interruptions)
+/// and are safely removed during startup cleanup.
+const ORPHANED_TEMP_FILE_AGE_THRESHOLD: Duration = Duration::from_secs(3600);
+
+/// Maximum number of retries when reading metadata file.
+/// Metadata reads may fail transiently if the file is being written concurrently.
+/// This value balances reliability with performance (avoiding excessive retries).
+const METADATA_READ_MAX_RETRIES: usize = 10;
+
+/// Delay between retries when reading metadata file (50ms).
+/// Short delay allows quick recovery from transient file locking issues while
+/// avoiding excessive CPU usage during retries.
+const METADATA_READ_RETRY_DELAY: Duration = Duration::from_millis(50);
+
+/// Maximum number of retries when saving metadata file.
+/// Metadata saves may fail transiently due to file system issues or concurrent access.
+/// Fewer retries than reads since writes are less frequent and failures are more critical.
+const METADATA_SAVE_MAX_RETRIES: usize = 5;
+
+/// Delay between retries when saving metadata file (100ms).
+/// Longer delay than read retries to allow file system operations to complete.
+const METADATA_SAVE_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+/// Maximum number of retries when acquiring metadata lock.
+/// Used when updating metadata to prevent concurrent modifications.
+const METADATA_LOCK_MAX_RETRIES: usize = 5;
+
+/// Delay between retries when acquiring metadata lock (100ms).
+/// Allows other processes/threads holding the lock to complete their operations.
+const METADATA_LOCK_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+/// Maximum number of metadata backup files to retain.
+/// Prevents unlimited backup growth while maintaining a reasonable history for recovery.
+const MAX_METADATA_BACKUPS: usize = 5;
+
 /// Type of name being validated (Database or Table)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NameType {
@@ -57,11 +109,6 @@ fn get_file_locks() -> &'static Mutex<HashMap<String, FileLockEntry>> {
   static FILE_LOCKS: OnceLock<Mutex<HashMap<String, FileLockEntry>>> = OnceLock::new();
   FILE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
 }
-
-// Cleanup unused locks that haven't been accessed in the last 60 minutes
-// This prevents the HashMap from growing indefinitely
-const LOCK_CLEANUP_INTERVAL: Duration = Duration::from_secs(3600); // 60 minutes
-const LOCK_CLEANUP_THRESHOLD: Duration = Duration::from_secs(3600); // Remove locks unused for 60 minutes
 
 fn cleanup_unused_locks(locks: &mut HashMap<String, FileLockEntry>) {
   let now = Instant::now();
@@ -212,9 +259,9 @@ impl DatabaseManager {
   }
 
   /// Clean up orphaned temporary files that may have been left behind
-  /// from previous crashes or interrupted writes. Removes .tmp files older than 1 hour.
+  /// from previous crashes or interrupted writes. Removes .tmp files older than the threshold.
   fn cleanup_orphaned_temp_files(&self) {
-    let cleanup_threshold = Duration::from_secs(3600); // 1 hour
+    let cleanup_threshold = ORPHANED_TEMP_FILE_AGE_THRESHOLD;
     let data_path = Path::new(&self.data_path);
 
     if !data_path.exists() {
@@ -1407,8 +1454,8 @@ impl DatabaseManager {
 
   async fn read_metadata(&self) -> Result<Metadata, Box<dyn Error>> {
     // Retry logic to handle cases where metadata is being written
-    let max_retries = 10;
-    let retry_delay = Duration::from_millis(50);
+    let max_retries = METADATA_READ_MAX_RETRIES;
+    let retry_delay = METADATA_READ_RETRY_DELAY;
 
     for attempt in 0..max_retries {
       match tokio::fs::read_to_string(&self.metadata_path).await {
@@ -1577,8 +1624,8 @@ impl DatabaseManager {
 
   fn save_metadata(&self) -> TokioResult<()> {
     // Retry logic to handle transient failures (similar to read_metadata)
-    let max_retries = 5;
-    let retry_delay = Duration::from_millis(100);
+    let max_retries = METADATA_SAVE_MAX_RETRIES;
+    let retry_delay = METADATA_SAVE_RETRY_DELAY;
 
     for attempt in 0..max_retries {
       match self.save_metadata_attempt() {
@@ -1680,10 +1727,8 @@ impl DatabaseManager {
   }
 
   /// Create a backup of the current metadata file
-  /// Keeps only the last MAX_BACKUPS backups to prevent disk space issues
+  /// Keeps only the last MAX_METADATA_BACKUPS backups to prevent disk space issues
   fn create_metadata_backup(&self) -> Result<(), Box<dyn Error>> {
-    const MAX_BACKUPS: usize = 5;
-
     if !Path::new(&self.metadata_path).exists() {
       return Ok(()); // Nothing to backup
     }
@@ -1703,8 +1748,8 @@ impl DatabaseManager {
     // Copy current metadata file to backup location
     fs::copy(&self.metadata_path, &backup_path)?;
 
-    // Clean up old backups, keeping only the last MAX_BACKUPS
-    self.cleanup_old_backups(&backup_dir, MAX_BACKUPS)?;
+    // Clean up old backups, keeping only the last MAX_METADATA_BACKUPS
+    self.cleanup_old_backups(&backup_dir, MAX_METADATA_BACKUPS)?;
 
     Ok(())
   }
@@ -1760,8 +1805,8 @@ impl DatabaseManager {
 
     // Try to acquire the lock with retries
     let mut retries = 0;
-    let max_retries = 5;
-    let retry_delay = Duration::from_millis(100);
+    let max_retries = METADATA_LOCK_MAX_RETRIES;
+    let retry_delay = METADATA_LOCK_RETRY_DELAY;
 
     let _lock_file = loop {
       match File::create(&lock_file_path) {
