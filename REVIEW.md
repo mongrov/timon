@@ -312,25 +312,24 @@ Documentation could be improved:
 
 ### Error Handling & Panic Safety
 
-⚠️ **Issue: Excessive use of `unwrap()` and `expect()` in production code** (PARTIALLY FIXED - medium priority)
-- **Status**: Significantly improved, but some instances remain in critical paths
+✅ **Issue: Excessive use of `unwrap()` and `expect()` in production code** (FIXED - medium priority)
+- **Status**: All critical instances in production code have been fixed
 - **Location**: 
   - ✅ **FIXED**: `lib.rs` JNI interface functions now use proper error handling with `match` statements instead of `expect()`
-  - ⚠️ **REMAINING**: `db_manager.rs` has 4 instances in production code:
-    - Line 129: `Runtime::new().expect()` - Runtime creation in sync wrapper
-    - Line 130: `.expect("Failed to collect DataFrame results")` - DataFrame collection
-    - Line 211: `serde_json::to_string(&initial_metadata).unwrap()` - Metadata serialization
-    - Line 341: `Regex::new(r#"^$"#).expect()` - Compile-time constant regex (safe)
-  - ✅ **ACCEPTABLE**: Most remaining instances are in test code (`main.rs`, test files)
+  - ✅ **FIXED**: `db_manager.rs` critical paths now use proper error handling:
+    - Line 130-135: `Runtime::new()` now uses `match` with error message in Debug output instead of `expect()`
+    - Line 139-144: DataFrame collection now uses `match` with error message in Debug output instead of `expect()`
+    - Line 231-238: `serde_json::to_string()` now uses `match` with proper error handling instead of `unwrap()`
+    - Line 345: `Regex::new(r#"^$"#).expect()` - Compile-time constant regex (safe, acceptable)
+  - ✅ **ACCEPTABLE**: Remaining instances are in test code (`main.rs`, test files)
 - **Impact**: 
-  - ⚠️ Panics during DataFrame collection can cause query failures
-  - ⚠️ Panics during metadata serialization can corrupt metadata
-  - ⚠️ Runtime creation failures can cause initialization failures
-- **Recommendation**: 
-  - Replace remaining `unwrap()`/`expect()` in `db_manager.rs` critical paths (lines 129, 130, 211)
-  - Use `?` operator for error propagation where possible
-  - Add fallback behavior for critical operations
-  - Consider using `unwrap_or_else()` with logging for non-critical paths
+  - ✅ No more panics during DataFrame collection - errors are gracefully handled in Debug output
+  - ✅ No more panics during metadata serialization - errors are logged and handled gracefully
+  - ✅ No more panics during runtime creation - errors are gracefully handled in Debug output
+- **Resolution**: 
+  - All critical `unwrap()`/`expect()` instances in `db_manager.rs` have been replaced with proper error handling
+  - Error handling uses `match` statements with appropriate fallback behavior
+  - Errors are logged or displayed in Debug output instead of causing panics
 
 ✅ **Issue: Silent error handling with `.ok()`** (FIXED)
 - **Status**: All remaining issues have been addressed

@@ -126,8 +126,24 @@ impl fmt::Debug for DataFusionOutput {
     match self {
       DataFusionOutput::Json(s) => write!(f, "Json({})", s),
       DataFusionOutput::DataFrame(df) => {
-        let runtime = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-        let result = runtime.block_on(async { df.clone().collect().await.expect("Failed to collect DataFrame results") });
+        // Create runtime with proper error handling
+        let runtime = match tokio::runtime::Runtime::new() {
+          Ok(rt) => rt,
+          Err(e) => {
+            // If runtime creation fails, write error message instead of panicking
+            return write!(f, "DataFrame(<Failed to create runtime: {}>)", e);
+          }
+        };
+
+        // Collect DataFrame with proper error handling
+        let result = match runtime.block_on(async { df.clone().collect().await }) {
+          Ok(batches) => batches,
+          Err(e) => {
+            // If collection fails, write error message instead of panicking
+            return write!(f, "DataFrame(<Failed to collect DataFrame results: {:?}>)", e);
+          }
+        };
+
         for batch in result {
           writeln!(f, "{:?}", batch)?;
         }
@@ -212,8 +228,15 @@ impl DatabaseManager {
         Ok(_) => {
           // Write the initial metadata structure `{"databases":{}}` into the file
           let initial_metadata = Metadata { databases: HashMap::new() };
-          if let Err(e) = fs::write(&metadata_path, serde_json::to_string(&initial_metadata).unwrap()) {
-            eprintln!("Error writing initial metadata to file: {}", e);
+          match serde_json::to_string(&initial_metadata) {
+            Ok(metadata_json) => {
+              if let Err(e) = fs::write(&metadata_path, metadata_json) {
+                eprintln!("Error writing initial metadata to file: {}", e);
+              }
+            }
+            Err(e) => {
+              eprintln!("Error serializing initial metadata: {}", e);
+            }
           }
         }
         Err(e) => eprintln!("Error creating metadata file: {}", e),
