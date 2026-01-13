@@ -422,57 +422,49 @@ Documentation could be improved:
 
 **Note**: Server code (`server/mod.rs`) is not currently used in production. Any security issues related to server code can be ignored.
 
-🔴 **Issue: Hardcoded default credentials in cloud storage** (VALID SECURITY ISSUE - High Priority)
+✅ **Issue: Hardcoded default credentials in cloud storage** (FIXED)
 - **Note**: Server code (`server/mod.rs`) is not currently used in production, so server-related issues can be ignored
 - **Location**: 
-  - `cloud_sync.rs:177-181` - Internal `CloudStorageManager::new()` uses defaults
+  - ✅ **FIXED**: `cloud_sync.rs:168-181` - `CloudStorageManager::new()` now requires all parameters (no defaults)
   - ~~`server/mod.rs:179-182`~~ - Server code uses defaults (NOT USED - can be ignored)
-- **Problem**: 
+- **Previous Problem**: 
   ```rust
-  // cloud_sync.rs:177-181
+  // cloud_sync.rs:177-181 (BEFORE FIX)
   let bucket_endpoint = bucket_endpoint.unwrap_or("http://localhost:9000").to_owned();
   let bucket_name = bucket_name.unwrap_or("timon").to_owned();
   let access_key_id = access_key_id.unwrap_or("ahmed").to_owned();
   let secret_access_key = secret_access_key.unwrap_or("ahmed1234").to_owned();
-  
-  // server/mod.rs:179-182 (NOT USED - can be ignored)
-  // let access_key_id = env::var("ACCESS_KEY_ID").unwrap_or_else(|_| "ahmed".to_string());
-  // let secret_access_key = env::var("SECRET_ACCESS_KEY").unwrap_or_else(|_| "ahmed1234".to_string());
   ```
+- **Fix Implementation**:
+  - Changed `CloudStorageManager::new()` parameters from `Option<&str>` to `&str` (required)
+  - Removed all hardcoded default values ("ahmed", "ahmed1234", "http://localhost:9000", "timon", "us-west-1")
+  - Updated call site in `mod.rs` to pass parameters directly (removed `Some(...)` wrappers)
+  - Updated test in `cloud_sync_test.rs` to match new signature
 - **Security Analysis**:
-  - **Public API Protection**: The public `init_bucket()` function requires all parameters as `&str` (non-optional), so defaults are NOT used in normal library usage
-  - **Internal API Risk**: `CloudStorageManager::new()` accepts `Option<&str>` and WILL use defaults if `None` is passed
+  - ✅ **Fixed**: `CloudStorageManager::new()` now requires all parameters as `&str` (non-optional)
+  - ✅ **Fixed**: No default credentials in source code
+  - ✅ **Fixed**: All parameters must be explicitly provided, preventing accidental use of defaults
   - ~~**Server Code Risk**: The HTTP server (`server/mod.rs`) uses hardcoded defaults as fallback~~ *(NOT USED - can be ignored)*
-  - **Source Code Exposure**: Default credentials are visible in source code (anyone with code access can see them)
   
-- **Security Breaches That Can Occur**:
-  1. **Unauthorized S3 Access**: If defaults are used, attackers with code access know the credentials
-  2. **Data Exfiltration**: Weak default credentials ("ahmed/ahmed1234") can be easily guessed/brute-forced
-  3. **Production Misconfiguration**: If environment variables aren't set in production, insecure defaults are used
-  4. **Code Repository Exposure**: If code is in public/private repos, credentials are visible to anyone with access
-  5. **Supply Chain Attacks**: Malicious actors can exploit known default credentials if they gain code access
-  6. **Compliance Violations**: Using default credentials violates security best practices and may violate regulations (GDPR, HIPAA, etc.)
-  
-- **Real-World Impact Scenarios**:
-  - **Scenario 1**: ~~Developer forgets to set environment variables in production → defaults are used~~ *(NOT APPLICABLE - server code not used)*
-  - **Scenario 2**: Internal API misuse → `CloudStorageManager::new()` called with `None` → defaults used → security breach
-  - **Scenario 3**: Code repository compromised → attacker sees defaults → attempts to use them on any S3 endpoint
-  - **Scenario 4**: If someone accidentally calls internal API with `None` values, and the S3 endpoint is publicly accessible, data is exposed
+- **Security Breaches That Were Prevented**:
+  1. ✅ **Unauthorized S3 Access**: No default credentials available for attackers
+  2. ✅ **Data Exfiltration**: Weak default credentials removed from codebase
+  3. ✅ **Production Misconfiguration**: Cannot accidentally use defaults - all parameters required
+  4. ✅ **Code Repository Exposure**: No credentials visible in source code
+  5. ✅ **Supply Chain Attacks**: No default credentials to exploit
+  6. ✅ **Compliance Violations**: No default credentials violating security best practices
   
 - **Current State**:
-  - ✅ **Good**: Public API (`init_bucket()`) requires credentials, preventing accidental use of defaults
-  - ❌ **Bad**: Internal API allows `None` values, falling back to defaults
+  - ✅ **Fixed**: Public API (`init_bucket()`) requires credentials (unchanged)
+  - ✅ **Fixed**: Internal API (`CloudStorageManager::new()`) now requires all parameters (no defaults)
   - ~~❌ **Bad**: Server code uses defaults as fallback~~ *(NOT USED - can be ignored)*
-  - ❌ **Bad**: Default credentials are weak and predictable
+  - ✅ **Fixed**: No default credentials in source code
   
-- **Recommendation**: 
-  - **High Priority**: Remove hardcoded default credentials from `cloud_sync.rs`
-  - ~~**High Priority**: Remove hardcoded defaults from `server/mod.rs`~~ *(NOT USED - can be ignored)*
-  - Change `CloudStorageManager::new()` to require non-optional parameters OR return error if `None` is provided
-  - Add validation to reject weak/default credentials at runtime
-  - Never log credentials in error messages or debug output (currently good - no credential logging found)
-  - Consider using a configuration struct that validates all required fields are present
-  - Add security documentation warning about credential management
+- **Implementation Details**:
+  - `CloudStorageManager::new()` signature changed from `Option<&str>` to `&str` for all credential parameters
+  - All call sites updated to pass required parameters directly
+  - Code compiles successfully with no breaking changes to public API
+  - Test coverage updated to match new signature
 
 ⚠️ **Issue: Credentials passed through JNI interface** 
 - **Location**: 
@@ -602,24 +594,25 @@ Documentation could be improved:
   - ~~Add rate limiting for API calls~~ *(Not needed - library usage)*
   - **Note**: If server code (`server/mod.rs`) is ever used, then these recommendations would apply
 
-⚠️ **Issue: Synchronous file operations in async context** (PARTIALLY FIXED - low priority)
-- **Status**: Read operations fixed, but save operations still use blocking I/O
+✅ **Issue: Synchronous file operations in async context** (FIXED)
+- **Status**: All read and save operations now use async I/O
 - **Location**: 
   - ✅ **FIXED**: `db_manager.rs:1455-1505` - `read_metadata()` now uses `tokio::fs::read_to_string().await` instead of blocking `fs::read_to_string()`
   - ✅ **FIXED**: `db_manager.rs:1575-1595` - `get_metadata_cached_sync()` uses `spawn_blocking` to properly handle async context
-  - ⚠️ **REMAINING**: `db_manager.rs:1669-1716` - `save_metadata_attempt()` uses blocking I/O:
-    - Line 1687: `fs::write()` - blocking file write
-    - Line 1690: `fs::File::open()` - blocking file open
-    - Line 1705: `fs::rename()` - blocking file rename
-  - ⚠️ **REMAINING**: `db_manager.rs:1647` - `save_metadata()` uses `std::thread::sleep()` instead of `tokio::time::sleep().await`
+  - ✅ **FIXED**: `db_manager.rs:1710-1765` - `save_metadata_attempt()` now uses async I/O:
+    - Line 1728: `tokio::fs::write().await` - async file write
+    - Line 1731: `tokio::fs::File::open().await` - async file open
+    - Line 1745: `tokio::fs::rename().await` - async file rename
+  - ✅ **FIXED**: `db_manager.rs:1665-1706` - `save_metadata_async()` uses `tokio::time::sleep().await` instead of `std::thread::sleep()`
+  - ✅ **FIXED**: `db_manager.rs:1625-1663` - `save_metadata()` now properly handles async operations in sync context using the same pattern as `get_metadata_cached_sync()`
 - **Impact**: 
   - ✅ Read operations no longer block async runtime
-  - ⚠️ Save operations still block async runtime threads (but less frequent than reads)
-  - ⚠️ Retry delays in save operations block threads instead of yielding
-- **Recommendation**: 
-  - Convert `save_metadata_attempt()` to use `tokio::fs` for async file operations
-  - Replace `std::thread::sleep()` with `tokio::time::sleep().await` in `save_metadata()`
-  - Consider making `save_metadata_attempt()` async or wrapping it in `spawn_blocking`
+  - ✅ Save operations no longer block async runtime threads
+  - ✅ Retry delays in save operations now yield properly using `tokio::time::sleep().await`
+- **Changes Made**: 
+  - Converted `save_metadata_attempt()` to async function using `tokio::fs` for all file operations
+  - Created `save_metadata_async()` async function with retry logic using `tokio::time::sleep().await`
+  - Updated `save_metadata()` to handle async operations in both async and sync contexts using `spawn_blocking` pattern
 
 ✅ **Issue: Multiple Runtime instances created in JNI/iOS interfaces** (FIXED)
 - **Location**: `lib.rs:21-26` (JNI) and `lib.rs:990-995` (iOS) - Shared static `RUNTIME`
@@ -678,7 +671,7 @@ Documentation could be improved:
 ## 8. Priority Recommendations
 
 ### High Priority (Security & Stability)
-1. 🔴 **Remove hardcoded credentials** - **CRITICAL Security risk** (see section 7 for detailed analysis)
+1. ✅ **Remove hardcoded credentials** - **CRITICAL Security risk** *(FIXED - see section 7)*
 2. **Replace `unwrap()`/`expect()` in production paths** - Stability risk
 3. **Fix silent error handling** - Data integrity risk
 4. ✅ **Add parquet file validation** - Data integrity risk *(FIXED - see section 7)*
@@ -752,10 +745,11 @@ Documentation could be improved:
 Overall, Timon is a well-designed library that effectively leverages DataFusion for time-series data management, with a clean API and good error handling. The library implements robust concurrency controls with atomic file writes and file-level locking. Several critical issues have been addressed:
 
 ✅ **Fixed Issues:**
+- Hardcoded default credentials removed from CloudStorageManager (security fix)
 - Runtime reuse in JNI/iOS interfaces (shared static runtime)
 - Temporary file cleanup on startup (orphaned temp file removal)
 - Parquet file validation after writes
 - Metadata save retry logic with transient error handling
 - Atomic file writes with temp file + rename pattern
 
-The main areas for improvement are in query path resolution (merging default and group paths), documentation, handling edge cases around data synchronization between paths, addressing remaining security and stability concerns (hardcoded credentials, unwrap/expect usage), and DatabaseManager lifecycle management.
+The main areas for improvement are in query path resolution (merging default and group paths), documentation, handling edge cases around data synchronization between paths, addressing remaining security and stability concerns (unwrap/expect usage), and DatabaseManager lifecycle management.

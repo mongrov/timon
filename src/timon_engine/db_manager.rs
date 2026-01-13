@@ -1623,12 +1623,51 @@ impl DatabaseManager {
   }
 
   fn save_metadata(&self) -> TokioResult<()> {
+    // Check if we're already in an async context
+    match tokio::runtime::Handle::try_current() {
+      Ok(handle) => {
+        // We're in an async context - use spawn_blocking to avoid deadlocks
+        let self_clone = self.clone();
+        let join_handle = handle.spawn_blocking(move || {
+          // Create a new runtime in the blocking thread
+          let rt = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(e) => {
+              return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to create tokio runtime: {}", e),
+              ))
+            }
+          };
+          rt.block_on(self_clone.save_metadata_async())
+        });
+
+        // Use futures::executor::block_on to wait for the join handle without creating another runtime
+        match executor::block_on(join_handle) {
+          Ok(result) => result,
+          Err(e) => Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Failed to join blocking task: {}", e),
+          )),
+        }
+      }
+      Err(_) => {
+        // We're not in an async context - safe to create a new runtime
+        let rt = tokio::runtime::Runtime::new()
+          .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to create tokio runtime: {}", e)))?;
+        rt.block_on(self.save_metadata_async())
+      }
+    }
+  }
+
+  /// Async version of save_metadata that performs the actual save with retry logic
+  async fn save_metadata_async(&self) -> TokioResult<()> {
     // Retry logic to handle transient failures (similar to read_metadata)
     let max_retries = METADATA_SAVE_MAX_RETRIES;
     let retry_delay = METADATA_SAVE_RETRY_DELAY;
 
     for attempt in 0..max_retries {
-      match self.save_metadata_attempt() {
+      match self.save_metadata_attempt().await {
         Ok(()) => return Ok(()),
         Err(e) => {
           // Check if this is a transient error that might succeed on retry
@@ -1644,7 +1683,7 @@ impl DatabaseManager {
               max_retries,
               e
             );
-            std::thread::sleep(retry_delay);
+            tokio::time::sleep(retry_delay).await;
             continue;
           } else {
             // Last attempt or non-transient error - return the error
@@ -1666,9 +1705,9 @@ impl DatabaseManager {
 
   /// Internal method that performs a single save attempt
   /// This is separated to allow retry logic in the public method
-  fn save_metadata_attempt(&self) -> TokioResult<()> {
+  async fn save_metadata_attempt(&self) -> TokioResult<()> {
     // Create backup of existing metadata file before writing (if it exists)
-    if Path::new(&self.metadata_path).exists() {
+    if tokio::fs::metadata(&self.metadata_path).await.is_ok() {
       if let Err(e) = self.create_metadata_backup() {
         eprintln!("Warning: Failed to create metadata backup: {}. Continuing with save...", e);
         // Don't fail the save operation if backup fails, but log the warning
@@ -1684,41 +1723,42 @@ impl DatabaseManager {
       .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to serialize metadata to JSON: {}", e)))?;
 
     // Write to temporary file
-    fs::write(&temp_path, json)?;
+    tokio::fs::write(&temp_path, json).await?;
 
     // Sync to ensure data is written to disk
-    if let Ok(temp_file) = fs::File::open(&temp_path) {
-      temp_file.sync_all().map_err(|e| {
-        std::io::Error::new(
-          std::io::ErrorKind::Other,
-          format!("Failed to sync temporary metadata file '{}': {}", temp_path, e),
-        )
-      })?;
-    } else {
-      return Err(std::io::Error::new(
+    let temp_file = tokio::fs::File::open(&temp_path).await.map_err(|e| {
+      std::io::Error::new(
         std::io::ErrorKind::Other,
-        format!("Failed to open temporary metadata file '{}' for syncing", temp_path),
-      ));
-    }
+        format!("Failed to open temporary metadata file '{}' for syncing: {}", temp_path, e),
+      )
+    })?;
+    temp_file.sync_all().await.map_err(|e| {
+      std::io::Error::new(
+        std::io::ErrorKind::Other,
+        format!("Failed to sync temporary metadata file '{}': {}", temp_path, e),
+      )
+    })?;
 
     // Atomically rename temp file to final location
-    fs::rename(&temp_path, &self.metadata_path)?;
+    tokio::fs::rename(&temp_path, &self.metadata_path).await?;
 
     // Sync the parent directory to ensure rename is persisted
     if let Some(parent) = Path::new(&self.metadata_path).parent() {
-      if let Ok(parent_file) = fs::File::open(parent) {
-        parent_file.sync_all().map_err(|e| {
-          std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Failed to sync parent directory for metadata file '{}': {}", self.metadata_path, e),
-          )
-        })?;
-      } else {
-        return Err(std::io::Error::new(
+      let parent_file = tokio::fs::File::open(parent).await.map_err(|e| {
+        std::io::Error::new(
           std::io::ErrorKind::Other,
-          format!("Failed to open parent directory for syncing metadata file '{}'", self.metadata_path),
-        ));
-      }
+          format!(
+            "Failed to open parent directory for syncing metadata file '{}': {}",
+            self.metadata_path, e
+          ),
+        )
+      })?;
+      parent_file.sync_all().await.map_err(|e| {
+        std::io::Error::new(
+          std::io::ErrorKind::Other,
+          format!("Failed to sync parent directory for metadata file '{}': {}", self.metadata_path, e),
+        )
+      })?;
     }
 
     // Invalidate cache after saving metadata
