@@ -95,15 +95,17 @@ impl S3StoreInterface for MockS3Store {
       .cloud_files
       .keys()
       .filter(|k| k.starts_with(&prefix_str))
-      .map(|k| {
-        let meta = ObjectMeta {
-          location: StorePath::from(k.clone()),
-          last_modified: self.modified_times.get(k).unwrap_or(&Utc::now()).clone(),
-          size: self.cloud_files.get(k).unwrap().len(),
-          e_tag: None,
-          version: None,
-        };
-        Ok(meta)
+      .filter_map(|k| {
+        self.cloud_files.get(k).map(|data| {
+          let meta = ObjectMeta {
+            location: StorePath::from(k.clone()),
+            last_modified: self.modified_times.get(k).unwrap_or(&Utc::now()).clone(),
+            size: data.len(),
+            e_tag: None,
+            version: None,
+          };
+          Ok(meta)
+        })
       })
       .collect::<Vec<_>>();
 
@@ -112,12 +114,12 @@ impl S3StoreInterface for MockS3Store {
 
   async fn store_head(&self, path: &StorePath) -> Result<ObjectMeta, Box<dyn std::error::Error>> {
     let path_str = path.to_string();
-    if self.cloud_files.contains_key(&path_str) {
+    if let Some(data) = self.cloud_files.get(&path_str) {
       let last_modified = self.modified_times.get(&path_str).unwrap_or(&Utc::now()).clone();
       Ok(ObjectMeta {
         location: path.clone(),
         last_modified,
-        size: self.cloud_files.get(&path_str).unwrap().len(),
+        size: data.len(),
         e_tag: None,
         version: None,
       })
@@ -172,7 +174,7 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
     secret_access_key: &str,
     bucket_name: &str,
     bucket_region: &str,
-  ) -> CloudStorageManager<AmazonS3> {
+  ) -> Result<CloudStorageManager<AmazonS3>, Box<dyn std::error::Error>> {
     let username = db_manager.get_username().to_string();
     let bucket_endpoint = bucket_endpoint.to_owned();
     let bucket_name = bucket_name.to_owned();
@@ -195,14 +197,14 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
       .with_allow_http(true)
       .with_client_options(client_options)
       .build()
-      .unwrap();
+      .map_err(|e| format!("Failed to build S3 client: {}", e))?;
 
-    CloudStorageManager {
+    Ok(CloudStorageManager {
       s3_store: Arc::new(s3_store),
       db_manager: Arc::new(db_manager),
       username,
       bucket_name,
-    }
+    })
   }
 
   #[allow(dead_code)]
@@ -354,7 +356,7 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
     // Minute: partition_date=YYYY-MM-DD_HH-MM
     let partition_regx =
       Regex::new(r"partition_date=(?P<year>\d{4})-(?P<month>\d{2})(?:-(?P<day>\d{2}))?(?:_(?P<hour>\d{2}))?(?:-(?P<minute>\d{2}))?")
-        .expect("Invalid partition regex");
+        .map_err(|e| format!("Failed to compile partition regex: {}", e))?;
 
     // Extract date from parent directory path
     let parent_path = file_path.parent().and_then(|p| p.to_str()).unwrap_or("");
@@ -423,7 +425,10 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
     for (index, batch) in batches.iter().enumerate() {
       let merge_target_path = &merge_target_paths[index];
       let file_path = PathBuf::from(merge_target_path);
-      let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap();
+      let filename = file_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("Invalid file path: {}", merge_target_path))?;
       let merged_file_path = format!("{}/merge_workspace/{}/merged_{}", self.db_manager.get_storage_path(), username, filename);
 
       let merge_file = File::create(&merged_file_path)?;

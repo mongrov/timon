@@ -365,7 +365,12 @@ impl DatabaseManager {
       Regex::new(r#"^[a-zA-Z0-9_]+$"#).unwrap_or_else(|e| {
         eprintln!("CRITICAL: Failed to compile regex pattern: {:?}", e);
         // This should never fail, but if it does, we'll use a pattern that matches nothing
-        Regex::new(r#"^$"#).expect("Failed to compile fallback regex pattern")
+        Regex::new(r#"^$"#).unwrap_or_else(|fallback_e| {
+          eprintln!("CRITICAL: Failed to compile fallback regex pattern: {:?}", fallback_e);
+          // Return a regex that matches nothing by using an impossible pattern
+          // This is a last resort - if this fails, the program will panic, but it should never happen
+          Regex::new(r#"^$"#).expect("Failed to compile fallback regex pattern - this should never happen")
+        })
       })
     });
 

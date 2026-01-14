@@ -17,152 +17,204 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs::{self, metadata, File};
-use std::io::Read;
+use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 pub fn record_batches_to_json(batches: &[RecordBatch]) -> Result<Value, serde_json::Error> {
-  fn array_value_to_json(array: &ArrayRef, row_index: usize) -> serde_json::Value {
+  fn array_value_to_json(array: &ArrayRef, row_index: usize) -> Result<serde_json::Value, String> {
     match array.data_type() {
-      DataType::Int64 => json!(array.as_any().downcast_ref::<Int64Array>().unwrap().value(row_index)),
-      DataType::Int32 => json!(array.as_any().downcast_ref::<Int32Array>().unwrap().value(row_index)),
-      DataType::Float64 => json!(array.as_any().downcast_ref::<Float64Array>().unwrap().value(row_index)),
-      DataType::Utf8 => {
-        let string_array = array.as_any().downcast_ref::<StringArray>().unwrap();
-        if string_array.is_null(row_index) {
-          json!(null)
-        } else {
-          json!(string_array.value(row_index))
-        }
-      }
-      DataType::Utf8View => {
-        let string_view_array = array
-          .as_any()
-          .downcast_ref::<StringViewArray>()
-          .expect("Failed to downcast to StringViewArray");
-        if string_view_array.is_null(row_index) {
-          json!(null)
-        } else {
-          json!(string_view_array.value(row_index).to_string())
-        }
-      }
-      DataType::Boolean => json!(array.as_any().downcast_ref::<BooleanArray>().unwrap().value(row_index)),
-      DataType::Timestamp(TimeUnit::Millisecond, None) => json!(array.as_any().downcast_ref::<TimestampMillisecondArray>().unwrap().value(row_index)),
+      DataType::Int64 => array
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .map(|arr| json!(arr.value(row_index)))
+        .ok_or_else(|| format!("Failed to downcast array to Int64Array for row {}", row_index)),
+      DataType::Int32 => array
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .map(|arr| json!(arr.value(row_index)))
+        .ok_or_else(|| format!("Failed to downcast array to Int32Array for row {}", row_index)),
+      DataType::Float64 => array
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .map(|arr| json!(arr.value(row_index)))
+        .ok_or_else(|| format!("Failed to downcast array to Float64Array for row {}", row_index)),
+      DataType::Utf8 => array
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .map(|string_array| {
+          if string_array.is_null(row_index) {
+            json!(null)
+          } else {
+            json!(string_array.value(row_index))
+          }
+        })
+        .ok_or_else(|| format!("Failed to downcast array to StringArray for row {}", row_index)),
+      DataType::Utf8View => array
+        .as_any()
+        .downcast_ref::<StringViewArray>()
+        .map(|string_view_array| {
+          if string_view_array.is_null(row_index) {
+            json!(null)
+          } else {
+            json!(string_view_array.value(row_index).to_string())
+          }
+        })
+        .ok_or_else(|| format!("Failed to downcast array to StringViewArray for row {}", row_index)),
+      DataType::Boolean => array
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .map(|arr| json!(arr.value(row_index)))
+        .ok_or_else(|| format!("Failed to downcast array to BooleanArray for row {}", row_index)),
+      DataType::Timestamp(TimeUnit::Millisecond, None) => array
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .map(|arr| json!(arr.value(row_index)))
+        .ok_or_else(|| format!("Failed to downcast array to TimestampMillisecondArray for row {}", row_index)),
       DataType::Timestamp(TimeUnit::Millisecond, Some(_)) => {
-        let timestamp_ms = array.as_any().downcast_ref::<TimestampMillisecondArray>().unwrap().value(row_index);
+        let timestamp_ms = array
+          .as_any()
+          .downcast_ref::<TimestampMillisecondArray>()
+          .ok_or_else(|| format!("Failed to downcast array to TimestampMillisecondArray for row {}", row_index))?
+          .value(row_index);
         let naive_datetime = DateTime::from_timestamp(
           timestamp_ms / 1_000,                      // Seconds
           (timestamp_ms % 1_000 * 1_000_000) as u32, // Nanoseconds
         )
-        .unwrap();
+        .ok_or_else(|| format!("Invalid timestamp value {} for row {}", timestamp_ms, row_index))?;
         let local_time = naive_datetime.with_timezone(&Local);
-        json!(local_time.format("%Y-%m-%d %H:%M:%S").to_string())
+        Ok(json!(local_time.format("%Y-%m-%d %H:%M:%S").to_string()))
       }
       DataType::Timestamp(TimeUnit::Nanosecond, None) => {
-        let timestamp_ns = array.as_any().downcast_ref::<TimestampNanosecondArray>().unwrap().value(row_index);
+        let timestamp_ns = array
+          .as_any()
+          .downcast_ref::<TimestampNanosecondArray>()
+          .ok_or_else(|| format!("Failed to downcast array to TimestampNanosecondArray for row {}", row_index))?
+          .value(row_index);
         let naive_datetime = DateTime::from_timestamp(
           timestamp_ns / 1_000_000_000,          // Seconds
           (timestamp_ns % 1_000_000_000) as u32, // Nanoseconds
         )
-        .unwrap();
+        .ok_or_else(|| format!("Invalid timestamp value {} for row {}", timestamp_ns, row_index))?;
         let local_time = naive_datetime.with_timezone(&Local);
-        json!(local_time.format("%Y-%m-%d %H:%M:%S").to_string())
+        Ok(json!(local_time.format("%Y-%m-%d %H:%M:%S").to_string()))
       }
       DataType::Timestamp(TimeUnit::Nanosecond, Some(_)) => {
-        let timestamp_ns = array.as_any().downcast_ref::<TimestampNanosecondArray>().unwrap().value(row_index);
+        let timestamp_ns = array
+          .as_any()
+          .downcast_ref::<TimestampNanosecondArray>()
+          .ok_or_else(|| format!("Failed to downcast array to TimestampNanosecondArray for row {}", row_index))?
+          .value(row_index);
         let naive_datetime = DateTime::from_timestamp(
           timestamp_ns / 1_000_000_000,          // Seconds
           (timestamp_ns % 1_000_000_000) as u32, // Nanoseconds
         )
-        .unwrap();
+        .ok_or_else(|| format!("Invalid timestamp value {} for row {}", timestamp_ns, row_index))?;
         let local_time = naive_datetime.with_timezone(&Local);
-        json!(local_time.format("%Y-%m-%d %H:%M:%S").to_string())
+        Ok(json!(local_time.format("%Y-%m-%d %H:%M:%S").to_string()))
       }
       DataType::Date32 => {
-        let base_date = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-        array
-          .as_any()
-          .downcast_ref::<Date32Array>()
-          .map(|date_array| date_array.value(row_index))
-          .and_then(|days_since_epoch| base_date.checked_add_days(Days::new(days_since_epoch as u64)))
-          .map_or(json!(null), |naive_date| json!(naive_date))
+        let base_date = NaiveDate::from_ymd_opt(1970, 1, 1).ok_or_else(|| "Failed to create base date (1970-01-01)".to_string())?;
+        Ok(
+          array
+            .as_any()
+            .downcast_ref::<Date32Array>()
+            .map(|date_array| date_array.value(row_index))
+            .and_then(|days_since_epoch| base_date.checked_add_days(Days::new(days_since_epoch as u64)))
+            .map_or(json!(null), |naive_date| json!(naive_date)),
+        )
       }
       DataType::List(_inner_field) => {
-        let list_array = array.as_any().downcast_ref::<ListArray>().unwrap();
+        let list_array = array
+          .as_any()
+          .downcast_ref::<ListArray>()
+          .ok_or_else(|| format!("Failed to downcast array to ListArray for row {}", row_index))?;
         let offsets = list_array.value_offsets();
         let start_idx = offsets[row_index] as usize;
         let end_idx = offsets[row_index + 1] as usize;
         let values_array = list_array.values();
 
         // Recursive function to handle nested lists
-        fn extract_list_values(array: &dyn Array, start_idx: usize, end_idx: usize) -> Vec<serde_json::Value> {
+        fn extract_list_values(array: &dyn Array, start_idx: usize, end_idx: usize) -> Result<Vec<serde_json::Value>, String> {
           match array.data_type() {
-            DataType::Utf8 => {
-              let string_array = array.as_any().downcast_ref::<StringArray>().unwrap();
-              (start_idx..end_idx).map(|i| json!(string_array.value(i))).collect()
-            }
-            DataType::Int64 => {
-              let int_array = array.as_any().downcast_ref::<Int64Array>().unwrap();
-              (start_idx..end_idx).map(|i| json!(int_array.value(i))).collect()
-            }
-            DataType::Float64 => {
-              let float_array = array.as_any().downcast_ref::<Float64Array>().unwrap();
-              (start_idx..end_idx).map(|i| json!(float_array.value(i))).collect()
-            }
-            DataType::Boolean => {
-              let bool_array = array.as_any().downcast_ref::<BooleanArray>().unwrap();
-              (start_idx..end_idx).map(|i| json!(bool_array.value(i))).collect()
-            }
-            _ => Vec::new(),
+            DataType::Utf8 => array
+              .as_any()
+              .downcast_ref::<StringArray>()
+              .map(|string_array| (start_idx..end_idx).map(|i| json!(string_array.value(i))).collect())
+              .ok_or_else(|| "Failed to downcast list values to StringArray".to_string()),
+            DataType::Int64 => array
+              .as_any()
+              .downcast_ref::<Int64Array>()
+              .map(|int_array| (start_idx..end_idx).map(|i| json!(int_array.value(i))).collect())
+              .ok_or_else(|| "Failed to downcast list values to Int64Array".to_string()),
+            DataType::Float64 => array
+              .as_any()
+              .downcast_ref::<Float64Array>()
+              .map(|float_array| (start_idx..end_idx).map(|i| json!(float_array.value(i))).collect())
+              .ok_or_else(|| "Failed to downcast list values to Float64Array".to_string()),
+            DataType::Boolean => array
+              .as_any()
+              .downcast_ref::<BooleanArray>()
+              .map(|bool_array| (start_idx..end_idx).map(|i| json!(bool_array.value(i))).collect())
+              .ok_or_else(|| "Failed to downcast list values to BooleanArray".to_string()),
+            _ => Ok(Vec::new()),
           }
         }
 
-        let values = extract_list_values(values_array.as_ref(), start_idx, end_idx);
-        json!(values)
+        extract_list_values(values_array.as_ref(), start_idx, end_idx).map(|values| json!(values))
       }
       DataType::Struct(fields) => {
-        let struct_array = array.as_any().downcast_ref::<StructArray>().unwrap();
+        let struct_array = array
+          .as_any()
+          .downcast_ref::<StructArray>()
+          .ok_or_else(|| format!("Failed to downcast array to StructArray for row {}", row_index))?;
 
         // Check if the struct value is null
         if struct_array.is_null(row_index) {
-          return json!(null);
+          return Ok(json!(null));
         }
 
         // Build a JSON object from the struct fields
         let mut obj = serde_json::Map::new();
         for (i, field) in fields.iter().enumerate() {
           let column = struct_array.column(i);
-          let field_value = array_value_to_json(column, row_index);
+          let field_value = array_value_to_json(column, row_index)?;
           obj.insert(field.name().clone(), field_value);
         }
-        json!(obj)
+        Ok(json!(obj))
       }
       datatype => {
-        println!("Warning: unsupported Datatype {}", datatype);
-        json!(null)
+        eprintln!("Warning: unsupported Datatype {} for row {}", datatype, row_index);
+        Ok(json!(null))
       }
     }
   }
 
   // Convert each row of the record batches into a JSON object
-  let rows: Vec<_> = batches
-    .iter()
-    .flat_map(|batch| {
-      let schema = batch.schema();
-      let num_rows = batch.num_rows();
-      let mut rows = Vec::with_capacity(num_rows);
-      for row_index in 0..num_rows {
-        let mut row = HashMap::with_capacity(schema.fields().len());
-        for (col_index, field) in schema.fields().iter().enumerate() {
-          let column = batch.column(col_index);
-          row.insert(field.name().clone(), array_value_to_json(column, row_index));
+  let mut rows = Vec::new();
+  for batch in batches {
+    let schema = batch.schema();
+    let num_rows = batch.num_rows();
+    for row_index in 0..num_rows {
+      let mut row = HashMap::with_capacity(schema.fields().len());
+      for (col_index, field) in schema.fields().iter().enumerate() {
+        let column = batch.column(col_index);
+        match array_value_to_json(column, row_index) {
+          Ok(value) => {
+            row.insert(field.name().clone(), value);
+          }
+          Err(e) => {
+            return Err(serde_json::Error::io(std::io::Error::new(
+              ErrorKind::InvalidData,
+              format!("Failed to convert field '{}' at row {}: {}", field.name(), row_index, e),
+            )));
+          }
         }
-        rows.push(row);
       }
-      rows
-    })
-    .collect();
+      rows.push(row);
+    }
+  }
 
   serde_json::to_value(&rows)
 }
@@ -404,45 +456,50 @@ pub fn json_to_arrow(json_values: &[Value]) -> Result<(Vec<ArrayRef>, Schema), B
 }
 
 pub fn rounded_timestamp(timestamp: i64, interval: u32) -> String {
-  let dt = Utc.timestamp_opt(timestamp, 0).single().expect("Invalid timestamp");
+  let dt = match Utc.timestamp_opt(timestamp, 0).single() {
+    Some(dt) => dt,
+    None => {
+      eprintln!("Warning: Invalid timestamp {}, using current time", timestamp);
+      Utc::now()
+    }
+  };
 
   let rounded_time = if interval >= 43200 {
     // 30 days * 24 hours * 60 minutes = 43200
     // For monthly intervals
     dt.with_day(1)
-      .unwrap()
-      .with_hour(0)
-      .unwrap()
-      .with_minute(0)
-      .unwrap()
-      .with_second(0)
-      .unwrap()
-      .with_nanosecond(0)
-      .unwrap()
+      .and_then(|d| d.with_hour(0))
+      .and_then(|d| d.with_minute(0))
+      .and_then(|d| d.with_second(0))
+      .and_then(|d| d.with_nanosecond(0))
+      .unwrap_or_else(|| {
+        eprintln!("Warning: Failed to round timestamp for monthly interval, using original");
+        dt
+      })
   } else if interval >= 10080 {
     // 7 days * 24 hours * 60 minutes = 10080
     // For weekly intervals
     let days_since_monday = dt.weekday().num_days_from_monday();
     (dt - chrono::Duration::days(days_since_monday as i64))
       .with_hour(0)
-      .unwrap()
-      .with_minute(0)
-      .unwrap()
-      .with_second(0)
-      .unwrap()
-      .with_nanosecond(0)
-      .unwrap()
+      .and_then(|d| d.with_minute(0))
+      .and_then(|d| d.with_second(0))
+      .and_then(|d| d.with_nanosecond(0))
+      .unwrap_or_else(|| {
+        eprintln!("Warning: Failed to round timestamp for weekly interval, using original");
+        dt
+      })
   } else if interval >= 1440 {
     // 1 day * 24 hours * 60 minutes = 1440
     // For daily intervals
     dt.with_hour(0)
-      .unwrap()
-      .with_minute(0)
-      .unwrap()
-      .with_second(0)
-      .unwrap()
-      .with_nanosecond(0)
-      .unwrap()
+      .and_then(|d| d.with_minute(0))
+      .and_then(|d| d.with_second(0))
+      .and_then(|d| d.with_nanosecond(0))
+      .unwrap_or_else(|| {
+        eprintln!("Warning: Failed to round timestamp for daily interval, using original");
+        dt
+      })
   } else if interval > 60 {
     // For intervals greater than 60 minutes
     let total_minutes = dt.hour() * 60 + dt.minute();
@@ -451,22 +508,23 @@ pub fn rounded_timestamp(timestamp: i64, interval: u32) -> String {
     let rounded_minute = rounded_total_minutes % 60;
 
     dt.with_hour(rounded_hour as u32)
-      .unwrap()
-      .with_minute(rounded_minute as u32)
-      .unwrap()
-      .with_second(0)
-      .unwrap()
-      .with_nanosecond(0)
-      .unwrap()
+      .and_then(|d| d.with_minute(rounded_minute as u32))
+      .and_then(|d| d.with_second(0))
+      .and_then(|d| d.with_nanosecond(0))
+      .unwrap_or_else(|| {
+        eprintln!("Warning: Failed to round timestamp for {} minute interval, using original", interval);
+        dt
+      })
   } else {
     // For intervals within 60 minutes
     let rounded_minute = (dt.minute() / interval) * interval;
     dt.with_minute(rounded_minute)
-      .unwrap()
-      .with_second(0)
-      .unwrap()
-      .with_nanosecond(0)
-      .unwrap()
+      .and_then(|d| d.with_second(0))
+      .and_then(|d| d.with_nanosecond(0))
+      .unwrap_or_else(|| {
+        eprintln!("Warning: Failed to round timestamp for {} minute interval, using original", interval);
+        dt
+      })
   };
 
   // Output format based on interval
@@ -506,7 +564,8 @@ pub fn filter_files_by_date_range(files: Vec<String>, start_date: &str, end_date
   let start_date = NaiveDate::parse_from_str(start_date, "%Y-%m-%d")?;
   let end_date = NaiveDate::parse_from_str(end_date, "%Y-%m-%d")?;
   // Regex to match different file formats: YYYY-MM-DD, YYYY-MM, YYYY
-  let regx = Regex::new(r"(?P<year>\d{4})(?:-(?P<month>\d{2})(?:-(?P<day>\d{2}))?)?").expect("Invalid regex pattern");
+  let regx =
+    Regex::new(r"(?P<year>\d{4})(?:-(?P<month>\d{2})(?:-(?P<day>\d{2}))?)?").map_err(|e| format!("Failed to compile regex pattern: {}", e))?;
 
   let filtered_files: Vec<String> = files
     .iter()
@@ -576,12 +635,18 @@ pub fn combine_unique_batches(
     for row_index in 0..unified_batch.num_rows() {
       let unique_key: Vec<ScalarValue> = unique_indices
         .iter()
-        .map(|&index| ScalarValue::try_from_array(unified_batch.column(index), row_index).unwrap())
-        .collect();
+        .map(|&index| {
+          ScalarValue::try_from_array(unified_batch.column(index), row_index)
+            .map_err(|e| format!("Failed to convert unique key field at index {} for row {}: {:?}", index, row_index, e))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
       let row_values: Vec<ScalarValue> = (0..unified_batch.num_columns())
-        .map(|col_index| ScalarValue::try_from_array(unified_batch.column(col_index), row_index).unwrap())
-        .collect();
+        .map(|col_index| {
+          ScalarValue::try_from_array(unified_batch.column(col_index), row_index)
+            .map_err(|e| format!("Failed to convert column {} for row {}: {:?}", col_index, row_index, e))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
       unique_map.insert(unique_key, row_values);
     }
@@ -649,7 +714,13 @@ pub fn read_parquet_batches(file_path: &Path, batches: &mut Vec<RecordBatch>) ->
 }
 
 pub async fn cleanup_old_files(processed_files: &[PathBuf]) {
-  let regx = Regex::new(r"(\d{4})-(\d{2})-(\d{2})").expect("Invalid regex pattern");
+  let regx = match Regex::new(r"(\d{4})-(\d{2})-(\d{2})") {
+    Ok(regex) => regex,
+    Err(e) => {
+      eprintln!("Warning: Failed to compile regex pattern for cleanup: {}", e);
+      return;
+    }
+  };
   let current_date = chrono::Utc::now().naive_utc().date();
   for file_path in processed_files {
     if let Some(filename) = file_path.file_name().and_then(|n| n.to_str()) {

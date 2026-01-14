@@ -367,7 +367,7 @@ pub fn init_bucket(
     secret_access_key,
     bucket_name,
     bucket_region,
-  );
+  )?;
 
   // Set the cloud storage manager (can be reinitialized now)
   let mut cloud_manager_guard = CLOUD_STORAGE_MANAGER.lock().map_err(|e| {

@@ -1121,6 +1121,7 @@ async fn test_cloud_storage_manager_new() {
     "test_bucket",
     "us-west-1",
   );
+  // Result may be Ok or Err depending on endpoint availability, but code path is executed
 
   // Cleanup
   let _ = std::fs::remove_dir_all(&storage_path);
@@ -2720,17 +2721,18 @@ async fn test_s3_store_interface_error_handling_attempt() {
   let cloud_mgr_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
     CloudStorageManager::<object_store::aws::AmazonS3>::new(
       db_manager,
-      Some("http://127.0.0.1:65535"), // Invalid port that should fail
-      Some("invalid_key"),
-      Some("invalid_secret"),
-      Some("invalid_bucket"),
-      Some("us-west-1"),
+      "http://127.0.0.1:65535", // Invalid port that should fail
+      "invalid_key",
+      "invalid_secret",
+      "invalid_bucket",
+      "us-west-1",
     )
   }));
 
   // If creation succeeds, try operations that should fail (lines 61-65, 69-73, 77-81)
   // Note: s3_store is pub(crate), so we can access it in tests
-  if let Ok(cloud_mgr) = cloud_mgr_result {
+  // Handle nested Result: catch_unwind returns Result<Result<CloudStorageManager, Error>, Panic>
+  if let Ok(Ok(cloud_mgr)) = cloud_mgr_result {
     use object_store::path::Path as StorePath;
     let test_path = StorePath::from("nonexistent/path/file.parquet");
 
