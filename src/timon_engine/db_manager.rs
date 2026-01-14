@@ -174,6 +174,13 @@ struct DatabaseInfo {
   names: Vec<String>,
 }
 
+/// Combined metadata cache structure to ensure atomic updates
+/// This prevents deadlocks by using a single lock instead of multiple locks
+struct MetadataCache {
+  metadata: Option<Metadata>,
+  timestamp: Option<Instant>,
+}
+
 pub struct DatabaseManager {
   pub storage_path: String,
   pub username: String,
@@ -182,9 +189,8 @@ pub struct DatabaseManager {
   metadata_path: String,
   bucket_interval: u32,
   session_context: SessionContext,
-  // Metadata cache with TTL
-  cached_metadata: Arc<RwLock<Option<Metadata>>>,
-  cache_timestamp: Arc<RwLock<Option<Instant>>>,
+  // Metadata cache with TTL - using single lock to prevent deadlocks
+  cache: Arc<RwLock<MetadataCache>>,
   cache_ttl: Duration,
 }
 
@@ -200,8 +206,7 @@ impl Clone for DatabaseManager {
       metadata_path: self.metadata_path.clone(),
       bucket_interval: self.bucket_interval,
       session_context: SessionContext::new(), // Fresh context for each clone
-      cached_metadata: Arc::clone(&self.cached_metadata),
-      cache_timestamp: Arc::clone(&self.cache_timestamp),
+      cache: Arc::clone(&self.cache),         // Share the same cache across clones
       cache_ttl: self.cache_ttl,
     }
   }
@@ -269,8 +274,11 @@ impl DatabaseManager {
       bucket_interval,
       session_context: SessionContext::new(),
       // Initialize cache - infinite TTL, only invalidated on writes
-      cached_metadata: Arc::new(RwLock::new(None)),
-      cache_timestamp: Arc::new(RwLock::new(None)),
+      // Using single lock to prevent deadlocks from lock ordering issues
+      cache: Arc::new(RwLock::new(MetadataCache {
+        metadata: None,
+        timestamp: None,
+      })),
       cache_ttl: Duration::MAX, // Infinite cache - only invalidated on metadata changes
     };
 
@@ -1540,63 +1548,53 @@ impl DatabaseManager {
 
   /// Get metadata with caching support (infinite TTL, invalidated only on writes)
   async fn get_metadata_cached(&self) -> Result<Metadata, Box<dyn Error>> {
-    // Check if we have a valid cache
-    let cache_timestamp = self
-      .cache_timestamp
-      .read()
-      .map_err(|e| format!("Failed to acquire read lock on cache_timestamp (poisoned): {:?}", e))?;
-    let should_refresh = match *cache_timestamp {
-      Some(timestamp) => Instant::now().duration_since(timestamp) > self.cache_ttl,
-      None => true,
+    // Check if we have a valid cache using a single lock to prevent deadlocks
+    let should_refresh = {
+      let cache = self
+        .cache
+        .read()
+        .map_err(|e| format!("Failed to acquire read lock on cache (poisoned): {:?}", e))?;
+      match cache.timestamp {
+        Some(timestamp) => Instant::now().duration_since(timestamp) > self.cache_ttl,
+        None => true,
+      }
     };
-    drop(cache_timestamp);
 
     if should_refresh {
       // Cache expired or doesn't exist, refresh it
       let fresh_metadata = self.read_metadata().await?;
 
-      // Update cache with write lock
-      let mut cached_metadata = self
-        .cached_metadata
+      // Update cache atomically with a single write lock
+      let mut cache = self
+        .cache
         .write()
-        .map_err(|e| format!("Failed to acquire write lock on cached_metadata (poisoned): {:?}", e))?;
-      *cached_metadata = Some(fresh_metadata.clone());
-      drop(cached_metadata);
-
-      let mut cache_timestamp = self
-        .cache_timestamp
-        .write()
-        .map_err(|e| format!("Failed to acquire write lock on cache_timestamp (poisoned): {:?}", e))?;
-      *cache_timestamp = Some(Instant::now());
-      drop(cache_timestamp);
+        .map_err(|e| format!("Failed to acquire write lock on cache (poisoned): {:?}", e))?;
+      cache.metadata = Some(fresh_metadata.clone());
+      cache.timestamp = Some(Instant::now());
+      drop(cache);
 
       Ok(fresh_metadata)
     } else {
       // Return cached metadata
-      let cached_metadata = self
-        .cached_metadata
+      let cache = self
+        .cache
         .read()
-        .map_err(|e| format!("Failed to acquire read lock on cached_metadata (poisoned): {:?}", e))?;
-      match &*cached_metadata {
+        .map_err(|e| format!("Failed to acquire read lock on cache (poisoned): {:?}", e))?;
+      match &cache.metadata {
         Some(metadata) => Ok(metadata.clone()),
         None => {
           // Shouldn't happen, but handle gracefully
-          drop(cached_metadata);
+          drop(cache);
           let fresh_metadata = self.read_metadata().await?;
 
-          let mut cached_metadata = self
-            .cached_metadata
+          // Update cache atomically
+          let mut cache = self
+            .cache
             .write()
-            .map_err(|e| format!("Failed to acquire write lock on cached_metadata (poisoned): {:?}", e))?;
-          *cached_metadata = Some(fresh_metadata.clone());
-          drop(cached_metadata);
-
-          let mut cache_timestamp = self
-            .cache_timestamp
-            .write()
-            .map_err(|e| format!("Failed to acquire write lock on cache_timestamp (poisoned): {:?}", e))?;
-          *cache_timestamp = Some(Instant::now());
-          drop(cache_timestamp);
+            .map_err(|e| format!("Failed to acquire write lock on cache (poisoned): {:?}", e))?;
+          cache.metadata = Some(fresh_metadata.clone());
+          cache.timestamp = Some(Instant::now());
+          drop(cache);
 
           Ok(fresh_metadata)
         }
@@ -1643,16 +1641,12 @@ impl DatabaseManager {
   /// Manually invalidate the metadata cache
   /// Should be called after any operation that modifies metadata (create_table, delete_table, etc.)
   fn invalidate_cache(&self) {
-    if let Ok(mut cached_metadata) = self.cached_metadata.write() {
-      *cached_metadata = None;
+    if let Ok(mut cache) = self.cache.write() {
+      // Atomically invalidate both cache fields with a single lock
+      cache.metadata = None;
+      cache.timestamp = None;
     } else {
-      eprintln!("Warning: Failed to acquire write lock on cached_metadata for invalidation (poisoned)");
-    }
-
-    if let Ok(mut cache_timestamp) = self.cache_timestamp.write() {
-      *cache_timestamp = None;
-    } else {
-      eprintln!("Warning: Failed to acquire write lock on cache_timestamp for invalidation (poisoned)");
+      eprintln!("Warning: Failed to acquire write lock on cache for invalidation (poisoned)");
     }
   }
 

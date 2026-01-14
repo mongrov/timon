@@ -741,19 +741,17 @@ Documentation could be improved:
 
 ### Concurrency & Thread Safety
 
-⚠️ **Issue: Potential deadlock in metadata cache access**
-- **Location**: `db_manager.rs:1256-1301` - `get_metadata_cached()`
-- **Details**: 
-  - Uses `RwLock` for cache with read/write locks
+✅ **Fixed: Potential deadlock in metadata cache access**
+- **Location**: `db_manager.rs:1542-1605` - `get_metadata_cached()`
+- **Original Issue**: 
+  - Used two separate `RwLock`s (`cached_metadata` and `cache_timestamp`)
   - Multiple lock acquisitions in same function
   - Lock ordering could cause issues if called from multiple threads
-- **Impact**: 
-  - Potential deadlocks if locks are acquired in different order
-  - Reduced concurrency due to lock contention
-- **Recommendation**: 
-  - Review lock ordering
-  - Consider using `Arc<Mutex<>>` for simpler locking model
-  - Add deadlock detection in tests
+- **Fix Applied**: 
+  - Combined both cache fields into a single `MetadataCache` struct
+  - Replaced two separate `RwLock`s with a single `Arc<RwLock<MetadataCache>>`
+  - Ensures atomic updates and eliminates deadlock risk from lock ordering
+  - All cache operations now use a single lock acquisition
 
 Overall, Timon is a well-designed library that effectively leverages DataFusion for time-series data management, with a clean API and good error handling. The library implements robust concurrency controls with atomic file writes and file-level locking. Several critical issues have been addressed:
 
@@ -765,5 +763,6 @@ Overall, Timon is a well-designed library that effectively leverages DataFusion 
 - Metadata save retry logic with transient error handling
 - Atomic file writes with temp file + rename pattern
 - Inconsistent error handling patterns - all `unwrap()`/`expect()` calls in production paths replaced with proper error handling
+- Potential deadlock in metadata cache access (consolidated two locks into one)
 
 The main areas for improvement are in query path resolution (merging default and group paths), documentation, handling edge cases around data synchronization between paths, and DatabaseManager lifecycle management.
