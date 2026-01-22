@@ -20,6 +20,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::{collections::HashMap, sync::Arc};
 use tokio::io::AsyncReadExt;
+use zeroize::Zeroize;
 
 pub trait DatabaseManagerInterface: Send + Sync {
   fn build_files_list(&self, db_name: &str, table_name: &str, username: Option<&str>) -> Result<Vec<String>, Box<dyn std::error::Error>>;
@@ -178,8 +179,10 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
     let username = db_manager.get_username().to_string();
     let bucket_endpoint = bucket_endpoint.to_owned();
     let bucket_name = bucket_name.to_owned();
-    let access_key_id = access_key_id.to_owned();
-    let secret_access_key = secret_access_key.to_owned();
+    
+    // Create mutable owned copies for zeroization
+    let mut access_key_id_owned = access_key_id.to_string();
+    let mut secret_access_key_owned = secret_access_key.to_string();
     let bucket_region = bucket_region.to_owned();
 
     let client_options = ClientOptions::new()
@@ -188,16 +191,22 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
       // .with_root_certificate(certificate)
       .with_allow_invalid_certificates(true);
 
+    // Build S3 client using references to credentials
     let s3_store = AmazonS3Builder::new()
       .with_endpoint(&bucket_endpoint)
       .with_bucket_name(&bucket_name)
-      .with_access_key_id(&access_key_id)
-      .with_secret_access_key(&secret_access_key)
+      .with_access_key_id(&access_key_id_owned)
+      .with_secret_access_key(&secret_access_key_owned)
       .with_region(&bucket_region)
       .with_allow_http(true)
       .with_client_options(client_options)
       .build()
       .map_err(|e| format!("Failed to build S3 client: {}", e))?;
+
+    // Zeroize credentials from memory immediately after S3 client creation
+    // Note: The S3 client may still store credentials internally, but we clear our copies
+    access_key_id_owned.zeroize();
+    secret_access_key_owned.zeroize();
 
     Ok(CloudStorageManager {
       s3_store: Arc::new(s3_store),

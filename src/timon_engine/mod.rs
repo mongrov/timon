@@ -2,6 +2,7 @@ pub mod cloud_sync;
 pub mod db_manager;
 pub mod errors;
 pub mod helpers;
+pub mod security;
 pub mod sql_query_parser;
 
 use cloud_sync::CloudStorageManager;
@@ -356,18 +357,35 @@ pub fn init_bucket(
   secret_access_key: &str,
   bucket_region: &str,
 ) -> TimonResult<Value> {
+  // Security check: Detect debugging/tampering
+  if let Err(e) = security::security::perform_security_checks() {
+    return Err(TimonError::new(
+      TimonErrorKind::SecurityError,
+      e,
+    ));
+  }
+
   let database_manager = get_database_manager(None)?;
   let username = database_manager.username.clone();
+
+  // Create mutable copies for zeroization
+  let mut access_key_id_owned = access_key_id.to_string();
+  let mut secret_access_key_owned = secret_access_key.to_string();
 
   // Create a new cloud storage manager with the current database manager's username
   let cloud_storage_manager = cloud_sync::CloudStorageManager::<AmazonS3>::new(
     database_manager,
     bucket_endpoint,
-    access_key_id,
-    secret_access_key,
+    &access_key_id_owned,
+    &secret_access_key_owned,
     bucket_name,
     bucket_region,
   )?;
+
+  // Zeroize credentials from memory immediately after use
+  use zeroize::Zeroize;
+  access_key_id_owned.zeroize();
+  secret_access_key_owned.zeroize();
 
   // Set the cloud storage manager (can be reinitialized now)
   let mut cloud_manager_guard = CLOUD_STORAGE_MANAGER.lock().map_err(|e| {

@@ -412,6 +412,8 @@ pub mod android {
     secret_access_key: JString,
     bucket_region: JString,
   ) -> jstring {
+    use zeroize::Zeroize;
+    
     let rust_bucket_endpoint = match jstring_to_rust_string(&mut env, &bucket_endpoint) {
       Ok(s) => s,
       Err(e) => {
@@ -426,14 +428,16 @@ pub mod android {
         return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
       }
     };
-    let rust_access_key_id = match jstring_to_rust_string(&mut env, &access_key_id) {
+    
+    // Create mutable owned copies for zeroization
+    let mut rust_access_key_id = match jstring_to_rust_string(&mut env, &access_key_id) {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting access_key_id: {}", e);
         return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
       }
     };
-    let rust_secret_access_key = match jstring_to_rust_string(&mut env, &secret_access_key) {
+    let mut rust_secret_access_key = match jstring_to_rust_string(&mut env, &secret_access_key) {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting secret_access_key: {}", e);
@@ -448,15 +452,22 @@ pub mod android {
       }
     };
 
-    match init_bucket(
+    // Call init_bucket which will perform security checks and zeroize credentials
+    let result = init_bucket(
       &rust_bucket_endpoint,
       &rust_bucket_name,
       &rust_access_key_id,
       &rust_secret_access_key,
       &rust_bucket_region,
-    ) {
-      Ok(result) => {
-        let json_string = result.to_string();
+    );
+
+    // Zeroize credentials from JNI layer memory as well
+    rust_access_key_id.zeroize();
+    rust_secret_access_key.zeroize();
+
+    match result {
+      Ok(result_value) => {
+        let json_string = result_value.to_string();
         rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
           eprintln!("Error creating success string: {}", e);
           std::ptr::null_mut()

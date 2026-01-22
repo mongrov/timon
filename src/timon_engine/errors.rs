@@ -76,6 +76,9 @@ pub enum TimonErrorKind {
   // Internal errors
   InternalError,
   UnexpectedError,
+
+  // Security errors
+  SecurityError,
 }
 
 /// Standardized error structure for Timon operations
@@ -143,7 +146,7 @@ impl TimonError {
 
       TimonErrorKind::CloudStorageAuthenticationFailed | TimonErrorKind::UsernameMismatch => 401,
 
-      TimonErrorKind::PermissionDenied => 403,
+      TimonErrorKind::PermissionDenied | TimonErrorKind::SecurityError => 403,
 
       TimonErrorKind::CloudStorageConnectionFailed
       | TimonErrorKind::CloudStorageUploadFailed
