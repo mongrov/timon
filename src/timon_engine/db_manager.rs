@@ -1,3 +1,4 @@
+use super::errors::TimonError;
 use super::helpers::{
   build_rules_tree, get_property_fields, infer_schema_with_coercion, json_to_arrow, record_batches_to_json, rounded_timestamp, row_to_json,
 };
@@ -823,18 +824,22 @@ impl DatabaseManager {
     let _ = self.session_context.deregister_table(table_name);
 
     // Resolve the table directory to get the correct path for this username
-    // For group users, if the table doesn't exist in their path, resolve_table_dir will return an error
-    // In that case, we skip registration (return Ok) so the query can proceed but will return 0 rows
     let table_dir = match self.resolve_table_dir(db_name, table_name, username) {
       Ok(dir) => dir,
       Err(e) => {
-        // For group users, if table doesn't exist in their path, skip registration
-        // This allows the query to proceed but will return 0 rows (correct behavior)
-        eprintln!(
-          "Table '{}' does not exist for username '{:?}': {}. Skipping registration - query will return 0 rows.",
-          table_name, username, e
-        );
-        return Ok(());
+        // For group users, if table doesn't exist in their path, skip registration silently
+        // This allows multi-table joins where the user doesn't have access to all tables
+        if username.is_some() {
+          eprintln!(
+            "INFO: Table '{}' does not exist for group user '{:?}': {}. Skipping registration - query will return 0 rows for this table.",
+            table_name, username, e
+          );
+          return Ok(());
+        } else {
+          // For local users, this is an error - the table should exist
+          let error = TimonError::table_not_found_for_user(table_name, username);
+          return Err(DataFusionError::Plan(error.to_string()));
+        }
       }
     };
 
@@ -858,14 +863,21 @@ impl DatabaseManager {
       })
       .unwrap_or(false);
 
-    // If no parquet files exist yet, don't register the table
-    // This prevents registering with an incomplete schema (only partition columns)
+    // If no parquet files exist yet, handle based on user type
     if !has_parquet_files {
-      eprintln!(
-        "Warning: Skipping registration of table '{}' - no parquet files found yet. Table will be registered on first query after data is inserted.",
-        table_name
-      );
-      return Ok(());
+      // For group users, skip registration silently (they might not have data in this table yet)
+      if username.is_some() {
+        eprintln!(
+          "INFO: Table '{}' exists for group user '{:?}' but contains no parquet files. Skipping registration - query will return 0 rows for this table.",
+          table_name, username
+        );
+        return Ok(());
+      } else {
+        // For local users, this is an error condition - the table exists but has no data
+        // This helps distinguish between "empty result set" and "table not properly initialized"
+        let error = TimonError::no_data_available(table_name);
+        return Err(DataFusionError::Plan(error.to_string()));
+      }
     }
 
     // - Local users Use Hive-style partitioning, Group users use no partitioning.

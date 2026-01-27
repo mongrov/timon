@@ -35,6 +35,7 @@ pub enum TimonErrorKind {
   QueryParsingFailed,
   InvalidSqlQuery,
   PartitionNotFound,
+  NoDataAvailable,
 
   // File system errors
   FileSystemError,
@@ -320,6 +321,21 @@ impl TimonError {
     TimonError::new(
       TimonErrorKind::InitializationError,
       "DatabaseManager is not initialized. Please call init_timon() first.",
+    )
+  }
+
+  pub fn table_not_found_for_user(table_name: &str, username: Option<&str>) -> Self {
+    let msg = match username {
+      Some(user) => format!("Table '{}' does not exist for user '{}'", table_name, user),
+      None => format!("Table '{}' does not exist", table_name),
+    };
+    TimonError::new(TimonErrorKind::TableNotFound, msg)
+  }
+
+  pub fn no_data_available(table_name: &str) -> Self {
+    TimonError::new(
+      TimonErrorKind::NoDataAvailable,
+      format!("Table '{}' exists but contains no data (no parquet files found)", table_name),
     )
   }
 }
