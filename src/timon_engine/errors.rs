@@ -53,6 +53,7 @@ pub enum TimonErrorKind {
   CloudStorageDownloadFailed,
   CloudStorageListFailed,
   CloudStorageAuthenticationFailed,
+  CloudStorageTimeout,
 
   // Synchronization errors
   SyncOperationFailed,
@@ -153,6 +154,8 @@ impl TimonError {
       | TimonErrorKind::CloudStorageUploadFailed
       | TimonErrorKind::CloudStorageDownloadFailed
       | TimonErrorKind::CloudStorageListFailed => 502,
+
+      TimonErrorKind::CloudStorageTimeout => 504, // Gateway Timeout
 
       _ => 500,
     }
@@ -336,6 +339,13 @@ impl TimonError {
     TimonError::new(
       TimonErrorKind::NoDataAvailable,
       format!("Table '{}' exists but contains no data (no parquet files found)", table_name),
+    )
+  }
+
+  pub fn cloud_storage_timeout(operation: &str, timeout_secs: u64) -> Self {
+    TimonError::new(
+      TimonErrorKind::CloudStorageTimeout,
+      format!("Cloud storage operation '{}' timed out after {} seconds", operation, timeout_secs),
     )
   }
 }

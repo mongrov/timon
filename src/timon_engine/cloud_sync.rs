@@ -1,4 +1,5 @@
 use super::db_manager::DatabaseManager;
+use super::errors::TimonError;
 use super::helpers::{
   cleanup_old_files, combine_unique_batches, filter_files_by_date_range, get_local_file_modified_time, get_property_fields, read_parquet_batches,
 };
@@ -18,9 +19,19 @@ use std::fs::{self};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
 use std::{collections::HashMap, sync::Arc};
 use tokio::io::AsyncReadExt;
 use zeroize::Zeroize;
+
+/// Default timeout for S3 download operations (30 seconds)
+const DEFAULT_DOWNLOAD_TIMEOUT_SECS: u64 = 30;
+
+/// Default timeout for S3 upload operations (60 seconds)
+const DEFAULT_UPLOAD_TIMEOUT_SECS: u64 = 60;
+
+/// Default timeout for S3 list/head operations (15 seconds)
+const DEFAULT_METADATA_TIMEOUT_SECS: u64 = 15;
 
 pub trait DatabaseManagerInterface: Send + Sync {
   fn build_files_list(&self, db_name: &str, table_name: &str, username: Option<&str>) -> Result<Vec<String>, Box<dyn std::error::Error>>;
@@ -160,6 +171,9 @@ pub struct CloudStorageManager<S: S3StoreInterface> {
   db_manager: Arc<dyn DatabaseManagerInterface>,
   pub username: String,
   pub bucket_name: String,
+  download_timeout: Duration,
+  upload_timeout: Duration,
+  metadata_timeout: Duration,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -179,7 +193,7 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
     let username = db_manager.get_username().to_string();
     let bucket_endpoint = bucket_endpoint.to_owned();
     let bucket_name = bucket_name.to_owned();
-    
+
     // Create mutable owned copies for zeroization
     let mut access_key_id_owned = access_key_id.to_string();
     let mut secret_access_key_owned = secret_access_key.to_string();
@@ -213,6 +227,9 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
       db_manager: Arc::new(db_manager),
       username,
       bucket_name,
+      download_timeout: Duration::from_secs(DEFAULT_DOWNLOAD_TIMEOUT_SECS),
+      upload_timeout: Duration::from_secs(DEFAULT_UPLOAD_TIMEOUT_SECS),
+      metadata_timeout: Duration::from_secs(DEFAULT_METADATA_TIMEOUT_SECS),
     })
   }
 
@@ -227,6 +244,9 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
       db_manager: Arc::new(db_manager),
       username: "mock_user".to_string(),
       bucket_name: bucket_name.unwrap_or("timon").to_owned(),
+      download_timeout: Duration::from_secs(DEFAULT_DOWNLOAD_TIMEOUT_SECS),
+      upload_timeout: Duration::from_secs(DEFAULT_UPLOAD_TIMEOUT_SECS),
+      metadata_timeout: Duration::from_secs(DEFAULT_METADATA_TIMEOUT_SECS),
     }
   }
 
@@ -384,14 +404,17 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
 
       let local_modified_datetime = get_local_file_modified_time(&file_path.to_string_lossy()).unwrap_or_default();
 
-      // Use `head()` to check if file exists and get metadata
-      let s3_modified_datetime = match s3_store.store_head(&StorePath::from(target_path.clone())).await {
-        Ok(meta) => meta.last_modified,
-        Err(_) => {
+      // Use `head()` to check if file exists and get metadata (with timeout)
+      let s3_modified_datetime = match tokio::time::timeout(self.metadata_timeout, s3_store.store_head(&StorePath::from(target_path.clone()))).await {
+        Ok(Ok(meta)) => meta.last_modified,
+        Ok(Err(_)) => {
           println!("S3 file does not exist, uploading local file...");
           self.upload_to_bucket(&file_path.to_string_lossy(), &target_path).await?;
           println!("Successfully uploaded new: '{}'", file_path.to_string_lossy());
           return Ok(None);
+        }
+        Err(_) => {
+          return Err(Box::new(TimonError::cloud_storage_timeout("head", self.metadata_timeout.as_secs())));
         }
       };
 
@@ -460,19 +483,27 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
     let mut file = tokio::fs::File::open(source_path).await?;
     let mut data = Vec::new();
     file.read_to_end(&mut data).await?;
-    object_store.store_put(&StorePath::from(target_path), data.into()).await?;
+
+    // Upload with timeout
+    tokio::time::timeout(self.upload_timeout, object_store.store_put(&StorePath::from(target_path), data.into()))
+      .await
+      .map_err(|_| Box::new(TimonError::cloud_storage_timeout("upload", self.upload_timeout.as_secs())) as Box<dyn std::error::Error>)??;
 
     Ok(())
   }
 
   pub async fn list_cloud_files(&self, prefix_path: &str) -> Result<Vec<(String, DateTime<Utc>)>, Box<dyn std::error::Error>> {
-    // List all objects under the prefix
+    // List all objects under the prefix (with timeout)
     let objects = self.s3_store.store_list(Some(&StorePath::from(prefix_path)));
     // Collect the stream of ObjectMeta into a Vec<ObjectMeta>
-    let object_metas: Vec<ObjectMeta> = objects
-      .map(|result| result.map_err(|e| Box::new(e) as Box<dyn std::error::Error>))
-      .try_collect()
-      .await?;
+    let object_metas: Vec<ObjectMeta> = tokio::time::timeout(
+      self.metadata_timeout,
+      objects
+        .map(|result| result.map_err(|e| Box::new(e) as Box<dyn std::error::Error>))
+        .try_collect(),
+    )
+    .await
+    .map_err(|_| Box::new(TimonError::cloud_storage_timeout("list", self.metadata_timeout.as_secs())) as Box<dyn std::error::Error>)??;
 
     // Extract file paths and last modified timestamps
     let files: Vec<(String, DateTime<Utc>)> = object_metas
@@ -496,15 +527,18 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
       fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory '{}': {}", parent.display(), e))?;
     }
 
-    // Stream the bytes from object storage
-    let mut stream = match object_store.store_get(&path).await {
-      Ok(s) => s.into_stream(),
-      Err(e) => {
+    // Stream the bytes from object storage (with timeout)
+    let mut stream = match tokio::time::timeout(self.download_timeout, object_store.store_get(&path)).await {
+      Ok(Ok(s)) => s.into_stream(),
+      Ok(Err(e)) => {
         if e.to_string().contains("NotFound") {
           eprintln!("Warning: File '{}' not found in S3, skipping fetch.", target_path);
           return Ok(()); // Skip processing
         }
         return Err(format!("Failed to stream object '{}': {}", target_path, e).into());
+      }
+      Err(_) => {
+        return Err(Box::new(TimonError::cloud_storage_timeout("download", self.download_timeout.as_secs())));
       }
     };
 
