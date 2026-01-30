@@ -431,11 +431,23 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
         read_parquet_batches(&file_path, &mut local_batches)?;
 
         if s3_available {
-          let merged_batches = combine_unique_batches(local_batches, s3_batches, unique_fields)?;
-          if !merged_batches.is_empty() {
-            batches.extend(merged_batches);
-            processed_files.push(PathBuf::from(&s3_temp_path));
-            return Ok(Some(target_path));
+          // Attempt to merge batches with schema validation
+          match combine_unique_batches(local_batches, s3_batches, unique_fields) {
+            Ok(merged_batches) => {
+              if !merged_batches.is_empty() {
+                batches.extend(merged_batches);
+                processed_files.push(PathBuf::from(&s3_temp_path));
+                return Ok(Some(target_path));
+              }
+            }
+            Err(e) => {
+              eprintln!("⚠️ Schema compatibility error during merge for '{}': {}", s3_filename, e);
+              eprintln!("Skipping merge and uploading local file as-is to avoid data corruption.");
+              // Upload the local file without merging to prevent data loss
+              self.upload_to_bucket(&file_path.to_string_lossy(), &target_path).await?;
+              println!("Successfully uploaded local file (without merge): '{}'", file_path.to_string_lossy());
+              return Ok(None);
+            }
           }
         }
       } else {

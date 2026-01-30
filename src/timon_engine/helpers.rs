@@ -611,11 +611,81 @@ pub fn get_local_file_modified_time(local_path: &str) -> Option<DateTime<Utc>> {
   None
 }
 
+/// Validates schema compatibility between two schemas for merging operations.
+/// Returns Ok(()) if schemas are compatible, otherwise returns an error with details.
+pub fn validate_schema_compatibility(local_schema: &Schema, s3_schema: &Schema) -> Result<(), Box<dyn std::error::Error>> {
+  // Check if both schemas have the same number of fields
+  if local_schema.fields().len() != s3_schema.fields().len() {
+    return Err(
+      format!(
+        "Schema field count mismatch: local has {} fields, S3 has {} fields",
+        local_schema.fields().len(),
+        s3_schema.fields().len()
+      )
+      .into(),
+    );
+  }
+
+  // Check each field for compatibility
+  for (local_field, s3_field) in local_schema.fields().iter().zip(s3_schema.fields().iter()) {
+    // Check if field names match
+    if local_field.name() != s3_field.name() {
+      return Err(
+        format!(
+          "Schema field name mismatch at position: expected '{}', found '{}'",
+          local_field.name(),
+          s3_field.name()
+        )
+        .into(),
+      );
+    }
+
+    // Check if data types match or are compatible for conversion
+    if local_field.data_type() != s3_field.data_type() {
+      // Check if this is a compatible conversion that convert_batch_schema can handle
+      let is_compatible_conversion = match (local_field.data_type(), s3_field.data_type()) {
+        // Allow Int64 <-> List<Int64> conversion (both directions)
+        (DataType::List(inner), DataType::Int64) | (DataType::Int64, DataType::List(inner)) => *inner.data_type() == DataType::Int64,
+        _ => false,
+      };
+
+      if !is_compatible_conversion {
+        return Err(
+          format!(
+            "Schema data type mismatch for field '{}': local has {:?}, S3 has {:?}",
+            local_field.name(),
+            local_field.data_type(),
+            s3_field.data_type()
+          )
+          .into(),
+        );
+      }
+    }
+
+    // Check if nullability matches (this is less strict, but good to warn)
+    if local_field.is_nullable() != s3_field.is_nullable() {
+      eprintln!(
+        "Warning: Nullability mismatch for field '{}': local is {}, S3 is {}",
+        local_field.name(),
+        if local_field.is_nullable() { "nullable" } else { "not nullable" },
+        if s3_field.is_nullable() { "nullable" } else { "not nullable" }
+      );
+    }
+  }
+
+  Ok(())
+}
+
 pub fn combine_unique_batches(
   local_batches: Vec<RecordBatch>,
   s3_batches: Vec<RecordBatch>,
   unique_fields: &[String],
 ) -> Result<Vec<RecordBatch>, Box<dyn std::error::Error>> {
+  // Validate schema compatibility before merging
+  if let (Some(local_batch), Some(s3_batch)) = (local_batches.first(), s3_batches.first()) {
+    validate_schema_compatibility(&local_batch.schema(), &s3_batch.schema())?;
+  }
+
   let schema = local_batches
     .first()
     .map(|b| b.schema())
