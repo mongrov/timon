@@ -90,7 +90,7 @@ fn test_insert_and_query_data() {
     .block_on(db_manager.query("test_db", "SELECT * FROM test_table", None, true, None))
     .unwrap();
 
-  match result {
+  match result.output {
     DataFusionOutput::Json(json_result) => {
       // Note: partition_date field is added by the query engine
       assert_eq!(json_result.as_array().unwrap().len(), 2);
@@ -211,7 +211,7 @@ fn test_simple_join_query_without_alias() {
     ))
     .unwrap();
 
-  match result {
+  match result.output {
     DataFusionOutput::Json(json_result) => {
       assert_eq!(
         json_result,
@@ -272,7 +272,7 @@ fn test_join_query_with_alias_and_group_by() {
     ))
     .unwrap();
 
-  match result {
+  match result.output {
     DataFusionOutput::Json(json_result) => {
       // Should have two groups: A and B
       assert!(json_result.as_array().unwrap().iter().any(|row| row["cat"] == "A"));
@@ -322,7 +322,7 @@ fn test_date_range_query_hourly_bucket() {
     ))
     .unwrap();
 
-  match result {
+  match result.output {
     DataFusionOutput::Json(json_result) => {
       // Should include 3 records (A, B, C)
       assert_eq!(json_result[0]["total"], 3);
@@ -353,7 +353,7 @@ fn test_date_range_query_daily_bucket() {
     ))
     .unwrap();
 
-  match result {
+  match result.output {
     DataFusionOutput::Json(json_result) => {
       // Should include 2 records (A, B)
       assert_eq!(json_result[0]["total"], 2);
@@ -384,7 +384,7 @@ fn test_date_range_query_weekly_bucket() {
     ))
     .unwrap();
 
-  match result {
+  match result.output {
     DataFusionOutput::Json(json_result) => {
       // Should include all 4 records
       assert_eq!(json_result[0]["total"], 4);
@@ -415,7 +415,7 @@ fn test_date_range_query_monthly_bucket() {
     ))
     .unwrap();
 
-  match result {
+  match result.output {
     DataFusionOutput::Json(json_result) => {
       // Should include all 4 records
       assert_eq!(json_result[0]["total"], 4);
@@ -2142,7 +2142,7 @@ fn test_atomic_file_insert_basic() {
     .block_on(db_manager.query("test_db", "SELECT * FROM test_table ORDER BY date", None, true, None))
     .unwrap();
 
-  match result {
+  match result.output {
     DataFusionOutput::Json(json_result) => {
       let records = json_result.as_array().unwrap();
       assert_eq!(records.len(), 3, "Should have 3 records total");
@@ -2229,7 +2229,7 @@ fn test_concurrent_inserts_same_partition() {
     .block_on(db_manager.query("test_db", "SELECT * FROM test_table", None, true, None))
     .unwrap();
 
-  match result {
+  match result.output {
     DataFusionOutput::Json(json_result) => {
       let records = json_result.as_array().unwrap();
       let expected_count = num_threads * records_per_thread;
@@ -2314,7 +2314,7 @@ fn test_concurrent_updates_same_record() {
     .block_on(db_manager.query("test_db", "SELECT * FROM test_table", None, true, None))
     .unwrap();
 
-  match result {
+  match result.output {
     DataFusionOutput::Json(json_result) => {
       let records = json_result.as_array().unwrap();
       assert_eq!(records.len(), 1, "Should have exactly 1 record, got {}", records.len());
@@ -2430,7 +2430,7 @@ fn test_mixed_insert_update_concurrent() {
     .block_on(db_manager.query("test_db", "SELECT * FROM test_table", None, true, None))
     .unwrap();
 
-  match result {
+  match result.output {
     DataFusionOutput::Json(json_result) => {
       let records = json_result.as_array().unwrap();
       // Should have: 2 initial + 5 new inserts = 7 unique records
@@ -2621,7 +2621,7 @@ fn test_partition_isolation() {
     .block_on(db_manager.query("test_db", "SELECT * FROM test_table", None, true, None))
     .unwrap();
 
-  match result {
+  match result.output {
     DataFusionOutput::Json(json_result) => {
       let records = json_result.as_array().unwrap();
       let expected_count = num_partitions * records_per_partition;
@@ -2685,7 +2685,7 @@ fn test_file_write_atomicity() {
       .block_on(db_manager.query("test_db", "SELECT * FROM test_table", None, true, None))
       .unwrap();
 
-    match result {
+    match result.output {
       DataFusionOutput::Json(json_result) => {
         let records = json_result.as_array().unwrap();
         // Should see i+1 records (all complete)
@@ -2787,7 +2787,7 @@ fn test_mutex_locking_prevents_race_conditions() {
     .block_on(db_manager.query("test_db", "SELECT * FROM test_table", None, true, None))
     .unwrap();
 
-  match result {
+  match result.output {
     DataFusionOutput::Json(json_result) => {
       let records = json_result.as_array().unwrap();
       let expected_count = num_threads * records_per_thread;
@@ -2849,7 +2849,7 @@ fn test_atomic_operation_error_handling() {
     .block_on(db_manager.query("test_db", "SELECT * FROM test_table", None, true, None))
     .unwrap();
 
-  match result {
+  match result.output {
     DataFusionOutput::Json(json_result) => {
       let records = json_result.as_array().unwrap();
       assert_eq!(records.len(), 1, "Should have 1 record (the one inserted before the error)");
@@ -2870,7 +2870,7 @@ fn test_atomic_operation_error_handling() {
     .block_on(db_manager.query("test_db", "SELECT * FROM test_table", None, true, None))
     .unwrap();
 
-  match result {
+  match result.output {
     DataFusionOutput::Json(json_result) => {
       let records = json_result.as_array().unwrap();
       assert_eq!(records.len(), 2, "Should have 2 records after valid insert");
@@ -2945,7 +2945,7 @@ fn test_datafusion_output_debug_with_empty_dataframe() {
   match result {
     Ok(output) => {
       // Format the debug output to trigger the Debug impl
-      let debug_str = format!("{:?}", output);
+      let debug_str = format!("{:?}", output.output);
       assert!(debug_str.len() > 0, "Debug output should not be empty");
       println!("Debug output length: {}", debug_str.len());
     }
@@ -3852,7 +3852,7 @@ fn test_query_with_partition_limit() {
   let result = rt.block_on(db_manager.query("test_db", "SELECT * FROM test_table", None, true, Some(2)));
 
   match result {
-    Ok(output) => match output {
+    Ok(output) => match output.output {
       DataFusionOutput::Json(json_result) => {
         println!("Query with partition limit returned {} records", json_result.as_array().unwrap().len());
       }

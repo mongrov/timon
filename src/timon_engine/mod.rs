@@ -31,6 +31,8 @@ pub struct TimonResponse {
   pub status: u16,
   pub message: String,
   pub json_value: Option<Value>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub warnings: Option<Vec<String>>,
 }
 
 // Store separate DatabaseManager instances per username
@@ -125,6 +127,7 @@ pub fn init_timon(storage_path: &str, bucket_interval: u32, username: &str) -> T
       username
     ),
     json_value: None,
+    warnings: None,
   };
   serde_json::to_value(&result).map_err(TimonError::from)
 }
@@ -138,6 +141,7 @@ pub fn create_database(db_name: &str) -> TimonResult<Value> {
         status: 200,
         message: format!("'{}' database created successfully", db_name),
         json_value: None,
+        warnings: None,
       };
       serde_json::to_value(&result).map_err(TimonError::from)
     }
@@ -147,6 +151,7 @@ pub fn create_database(db_name: &str) -> TimonResult<Value> {
         status: timon_error.status_code(),
         message: timon_error.to_string(),
         json_value: None,
+        warnings: None,
       };
       serde_json::to_value(&result).map_err(TimonError::from)
     }
@@ -162,6 +167,7 @@ pub fn create_table(db_name: &str, table_name: &str, schema: &str) -> TimonResul
         status: 200,
         message: format!("'{}.{}' table created successfully", db_name, table_name),
         json_value: None,
+        warnings: None,
       };
       serde_json::to_value(&result).map_err(TimonError::from)
     }
@@ -171,6 +177,7 @@ pub fn create_table(db_name: &str, table_name: &str, schema: &str) -> TimonResul
         status: timon_error.status_code(),
         message: timon_error.to_string(),
         json_value: None,
+        warnings: None,
       };
       serde_json::to_value(&result).map_err(TimonError::from)
     }
@@ -187,6 +194,7 @@ pub fn list_databases() -> TimonResult<Value> {
         status: 200,
         message: "success fetching all databases".to_string(),
         json_value: Some(json_value),
+        warnings: None,
       };
       serde_json::to_value(&result).map_err(TimonError::from)
     }
@@ -196,6 +204,7 @@ pub fn list_databases() -> TimonResult<Value> {
         status: timon_error.status_code(),
         message: timon_error.to_string(),
         json_value: None,
+        warnings: None,
       };
       serde_json::to_value(&result).map_err(TimonError::from)
     }
@@ -212,6 +221,7 @@ pub fn list_tables(db_name: &str) -> TimonResult<Value> {
         status: 200,
         message: format!("success fetching '{}' tables", db_name),
         json_value: Some(json_value),
+        warnings: None,
       };
       serde_json::to_value(&result).map_err(TimonError::from)
     }
@@ -221,6 +231,7 @@ pub fn list_tables(db_name: &str) -> TimonResult<Value> {
         status: timon_error.status_code(),
         message: timon_error.to_string(),
         json_value: None,
+        warnings: None,
       };
       serde_json::to_value(&result).map_err(TimonError::from)
     }
@@ -236,6 +247,7 @@ pub fn delete_database(db_name: &str) -> TimonResult<Value> {
         status: 200,
         message: format!("Database '{}' was deleted!", db_name),
         json_value: None,
+        warnings: None,
       };
       serde_json::to_value(&result).map_err(TimonError::from)
     }
@@ -245,6 +257,7 @@ pub fn delete_database(db_name: &str) -> TimonResult<Value> {
         status: timon_error.status_code(),
         message: timon_error.to_string(),
         json_value: None,
+        warnings: None,
       };
       serde_json::to_value(&result).map_err(TimonError::from)
     }
@@ -260,6 +273,7 @@ pub fn delete_table(db_name: &str, table_name: &str) -> TimonResult<Value> {
         status: 200,
         message: format!("Table '{}.{}' was deleted!", db_name, table_name),
         json_value: None,
+        warnings: None,
       };
       serde_json::to_value(&result).map_err(TimonError::from)
     }
@@ -269,6 +283,7 @@ pub fn delete_table(db_name: &str, table_name: &str) -> TimonResult<Value> {
         status: timon_error.status_code(),
         message: timon_error.to_string(),
         json_value: None,
+        warnings: None,
       };
       serde_json::to_value(&result).map_err(TimonError::from)
     }
@@ -284,6 +299,7 @@ pub fn insert(db_name: &str, table_name: &str, json_data: &str) -> TimonResult<V
         status: 200,
         message: "Records that violated (min, max) constraints will be logged and returned".to_string(),
         json_value: Some(json!(value)),
+        warnings: None,
       };
       serde_json::to_value(&result).map_err(TimonError::from)
     }
@@ -293,6 +309,7 @@ pub fn insert(db_name: &str, table_name: &str, json_data: &str) -> TimonResult<V
         status: timon_error.status_code(),
         message: timon_error.to_string(),
         json_value: None,
+        warnings: None,
       };
       serde_json::to_value(&result).map_err(TimonError::from)
     }
@@ -303,25 +320,33 @@ pub fn insert(db_name: &str, table_name: &str, json_data: &str) -> TimonResult<V
 pub async fn query(db_name: &str, sql_query: &str, username: Option<&str>, limit_partitions: Option<usize>) -> TimonResult<Value> {
   let database_manager = get_database_manager(username)?;
   match database_manager.query(db_name, sql_query, username, true, limit_partitions).await {
-    Ok(db_manager::DataFusionOutput::Json(data)) => {
-      let json_value = serde_json::to_value(&data).map_err(TimonError::from)?;
-      let result = TimonResponse {
-        status: 200,
-        message: format!("query data with success from '{}' with '{}'", db_name, sql_query),
-        json_value: Some(json_value),
-      };
-      serde_json::to_value(&result).map_err(TimonError::from)
-    }
-    Ok(db_manager::DataFusionOutput::DataFrame(_df)) => Err(TimonError::new(
-      TimonErrorKind::InternalError,
-      "DataFrame output is not directly convertible to string",
-    )),
+    Ok(query_result) => match query_result.output {
+      db_manager::DataFusionOutput::Json(data) => {
+        let json_value = serde_json::to_value(&data).map_err(TimonError::from)?;
+        let result = TimonResponse {
+          status: 200,
+          message: format!("query data with success from '{}' with '{}'", db_name, sql_query),
+          json_value: Some(json_value),
+          warnings: if query_result.warnings.is_empty() {
+            None
+          } else {
+            Some(query_result.warnings)
+          },
+        };
+        serde_json::to_value(&result).map_err(TimonError::from)
+      }
+      db_manager::DataFusionOutput::DataFrame(_df) => Err(TimonError::new(
+        TimonErrorKind::InternalError,
+        "DataFrame output is not directly convertible to string",
+      )),
+    },
     Err(err) => {
       let timon_error: TimonError = err.into();
       let result = TimonResponse {
         status: timon_error.status_code(),
         message: timon_error.to_string(),
         json_value: None,
+        warnings: None,
       };
       serde_json::to_value(&result).map_err(TimonError::from)
     }
@@ -332,8 +357,20 @@ pub async fn query(db_name: &str, sql_query: &str, username: Option<&str>, limit
 pub async fn query_df(db_name: &str, sql_query: &str, username: Option<&str>, limit_partitions: Option<usize>) -> TimonResult<DataFrame> {
   let database_manager = get_database_manager(username)?;
   match database_manager.query(db_name, sql_query, username, false, limit_partitions).await {
-    Ok(db_manager::DataFusionOutput::DataFrame(df)) => Ok(df),
-    Ok(db_manager::DataFusionOutput::Json(_)) => Err(TimonError::new(TimonErrorKind::InternalError, "Expected DataFrame output, but got JSON")),
+    Ok(query_result) => {
+      // Log warnings to stderr (query_df doesn't return warnings to API)
+      if !query_result.warnings.is_empty() {
+        eprintln!("⚠️ Query warnings:");
+        for warning in query_result.warnings {
+          eprintln!("  {}", warning);
+        }
+      }
+
+      match query_result.output {
+        db_manager::DataFusionOutput::DataFrame(df) => Ok(df),
+        db_manager::DataFusionOutput::Json(_) => Err(TimonError::new(TimonErrorKind::InternalError, "Expected DataFrame output, but got JSON")),
+      }
+    }
     Err(err) => {
       let timon_error: TimonError = err.into();
       Err(timon_error)
@@ -359,10 +396,7 @@ pub fn init_bucket(
 ) -> TimonResult<Value> {
   // Security check: Detect debugging/tampering
   if let Err(e) = security::security::perform_security_checks() {
-    return Err(TimonError::new(
-      TimonErrorKind::SecurityError,
-      e,
-    ));
+    return Err(TimonError::new(TimonErrorKind::SecurityError, e));
   }
 
   let database_manager = get_database_manager(None)?;
@@ -400,6 +434,7 @@ pub fn init_bucket(
     status: 200,
     message: format!("CloudStorageManager initialized successfully with '{}'", username),
     json_value: None,
+    warnings: None,
   };
   serde_json::to_value(&result).map_err(TimonError::from)
 }
@@ -409,7 +444,7 @@ pub async fn cloud_sync_parquet(db_name: &str, table_name: &str, date_range: Has
   let cloud_storage_manager = get_cloud_storage_manager()?;
 
   match cloud_storage_manager.cloud_sync_parquet(db_name, table_name, &date_range, username).await {
-    Ok(_) => {
+    Ok(warnings) => {
       let result = TimonResponse {
         status: 200,
         message: format!(
@@ -417,6 +452,7 @@ pub async fn cloud_sync_parquet(db_name: &str, table_name: &str, date_range: Has
           cloud_storage_manager.bucket_name, db_name, table_name
         ),
         json_value: None,
+        warnings: if warnings.is_empty() { None } else { Some(warnings) },
       };
       serde_json::to_value(&result).map_err(TimonError::from)
     }
@@ -426,6 +462,7 @@ pub async fn cloud_sync_parquet(db_name: &str, table_name: &str, date_range: Has
         status: timon_error.status_code(),
         message: timon_error.to_string(),
         json_value: None,
+        warnings: None,
       };
       serde_json::to_value(&result).map_err(TimonError::from)
     }
@@ -449,7 +486,7 @@ pub async fn cloud_sink_parquet(db_name: &str, table_name: &str) -> TimonResult<
   }
 
   match cloud_storage_manager.cloud_sink_parquet(db_name, table_name).await {
-    Ok(_) => {
+    Ok(warnings) => {
       let result = TimonResponse {
         status: 200,
         message: format!(
@@ -457,6 +494,7 @@ pub async fn cloud_sink_parquet(db_name: &str, table_name: &str) -> TimonResult<
           db_name, table_name, cloud_storage_manager.bucket_name, cloud_storage_manager.username
         ),
         json_value: None,
+        warnings: if warnings.is_empty() { None } else { Some(warnings) },
       };
       serde_json::to_value(&result).map_err(TimonError::from)
     }
@@ -466,6 +504,7 @@ pub async fn cloud_sink_parquet(db_name: &str, table_name: &str) -> TimonResult<
         status: timon_error.status_code(),
         message: timon_error.to_string(),
         json_value: None,
+        warnings: None,
       };
       serde_json::to_value(&result).map_err(TimonError::from)
     }
@@ -479,7 +518,7 @@ pub async fn cloud_fetch_parquet(username: &str, db_name: &str, table_name: &str
     .cloud_fetch_parquet(username, db_name, table_name, &date_range)
     .await
   {
-    Ok(_) => {
+    Ok(warnings) => {
       let result = TimonResponse {
         status: 200,
         message: format!(
@@ -487,6 +526,7 @@ pub async fn cloud_fetch_parquet(username: &str, db_name: &str, table_name: &str
           username, cloud_storage_manager.bucket_name, db_name, table_name
         ),
         json_value: None,
+        warnings: if warnings.is_empty() { None } else { Some(warnings) },
       };
       serde_json::to_value(&result).map_err(TimonError::from)
     }
@@ -496,6 +536,7 @@ pub async fn cloud_fetch_parquet(username: &str, db_name: &str, table_name: &str
         status: timon_error.status_code(),
         message: timon_error.to_string(),
         json_value: None,
+        warnings: None,
       };
       serde_json::to_value(&result).map_err(TimonError::from)
     }
@@ -578,6 +619,7 @@ pub async fn cloud_fetch_parquet_batch(
       "duration_seconds": duration.as_secs_f64(),
       "errors": errors
     })),
+    warnings: None,
   };
   serde_json::to_value(&result).map_err(TimonError::from)
 }

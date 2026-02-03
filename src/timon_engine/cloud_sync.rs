@@ -33,6 +33,16 @@ const DEFAULT_UPLOAD_TIMEOUT_SECS: u64 = 60;
 /// Default timeout for S3 list/head operations (15 seconds)
 const DEFAULT_METADATA_TIMEOUT_SECS: u64 = 15;
 
+// TODO: FUTURE ENHANCEMENT - Propagate warnings to API responses
+// Currently, schema conversion warnings are logged to stderr via eprintln!.
+// To expose these warnings in API responses:
+// 1. Modify CloudSync struct to collect warnings in a Vec<String> field
+// 2. Update cloud_sync_parquet, cloud_sink_parquet, cloud_fetch_parquet to return Result<Vec<String>, Error>
+// 3. Aggregate warnings from combine_unique_batches calls
+// 4. Return warnings alongside success responses in the API layer (main.rs handlers)
+// 5. Include warnings in JSON responses with a "warnings" field
+// Example response: { "status": "success", "warnings": ["DEPRECATION: Schema conversion used..."] }
+
 pub trait DatabaseManagerInterface: Send + Sync {
   fn build_files_list(&self, db_name: &str, table_name: &str, username: Option<&str>) -> Result<Vec<String>, Box<dyn std::error::Error>>;
   fn get_table_schema(&self, db_name: &str, table_name: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>>;
@@ -256,20 +266,25 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
     table_name: &str,
     date_range: &HashMap<&str, &str>,
     username: Option<&str>,
-  ) -> Result<(), Box<dyn std::error::Error>> {
+  ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let default_username = &self.db_manager.get_username();
+    let mut all_warnings = Vec::new();
 
-    self.cloud_sink_parquet(db_name, table_name).await?;
-    self.cloud_fetch_parquet(default_username, db_name, table_name, date_range).await?;
+    let sink_warnings = self.cloud_sink_parquet(db_name, table_name).await?;
+    all_warnings.extend(sink_warnings);
+
+    let fetch_warnings = self.cloud_fetch_parquet(default_username, db_name, table_name, date_range).await?;
+    all_warnings.extend(fetch_warnings);
 
     if let Some(group_username) = username.filter(|u| *u != self.db_manager.get_username()) {
-      self.cloud_fetch_parquet(group_username, db_name, table_name, date_range).await?;
+      let group_warnings = self.cloud_fetch_parquet(group_username, db_name, table_name, date_range).await?;
+      all_warnings.extend(group_warnings);
     }
 
-    Ok(())
+    Ok(all_warnings)
   }
 
-  pub async fn cloud_sink_parquet(&self, db_name: &str, table_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+  pub async fn cloud_sink_parquet(&self, db_name: &str, table_name: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let files = self.db_manager.build_files_list(db_name, table_name, None)?;
     if files.is_empty() {
       return Err(format!("No data files found for Table '{}' in Database '{}'.", table_name, db_name).into());
@@ -281,13 +296,19 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
     let mut batches = Vec::new();
     let mut processed_files = Vec::new();
     let mut merge_target_paths = Vec::new();
+    let mut all_warnings = Vec::new();
 
     for file in &files {
-      if let Some(target_path) = self
+      match self
         .process_sink_parquet_file(file, username, db_name, table_name, &unique_fields, &mut batches, &mut processed_files)
-        .await?
+        .await
       {
-        merge_target_paths.push(target_path);
+        Ok(Some((target_path, warnings))) => {
+          merge_target_paths.push(target_path);
+          all_warnings.extend(warnings);
+        }
+        Ok(None) => {}
+        Err(e) => return Err(e),
       }
     }
 
@@ -297,7 +318,7 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
 
     cleanup_old_files(&processed_files).await;
 
-    Ok(())
+    Ok(all_warnings)
   }
 
   pub async fn cloud_fetch_parquet(
@@ -306,7 +327,7 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
     db_name: &str,
     table_name: &str,
     date_range: &HashMap<&str, &str>,
-  ) -> Result<(), Box<dyn std::error::Error>> {
+  ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let prefix_path = format!("{}/{}/{}", username, db_name, table_name);
     let cloud_files = self.list_cloud_files(&prefix_path).await?;
     let start_date = date_range.get("start_date").ok_or("Missing start_date")?;
@@ -362,7 +383,7 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
       }
     }
 
-    Ok(())
+    Ok(Vec::new()) // cloud_fetch doesn't merge, so no warnings
   }
 
   async fn process_sink_parquet_file(
@@ -374,7 +395,7 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
     unique_fields: &[String],
     batches: &mut Vec<RecordBatch>,
     processed_files: &mut Vec<PathBuf>,
-  ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+  ) -> Result<Option<(String, Vec<String>)>, Box<dyn std::error::Error>> {
     let s3_store = &self.s3_store;
     let file_path = PathBuf::from(file);
 
@@ -433,20 +454,29 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
         if s3_available {
           // Attempt to merge batches with schema validation
           match combine_unique_batches(local_batches, s3_batches, unique_fields) {
-            Ok(merged_batches) => {
+            Ok((merged_batches, warnings)) => {
+              // Log any deprecation warnings from schema conversion
+              for warning in &warnings {
+                eprintln!("⚠️ {}", warning);
+              }
+
               if !merged_batches.is_empty() {
                 batches.extend(merged_batches);
                 processed_files.push(PathBuf::from(&s3_temp_path));
-                return Ok(Some(target_path));
+                return Ok(Some((target_path, warnings)));
               }
             }
             Err(e) => {
-              eprintln!("⚠️ Schema compatibility error during merge for '{}': {}", s3_filename, e);
+              let error_warning = format!(
+                "Schema compatibility error for '{}': {}. File uploaded without merge to prevent data loss.",
+                s3_filename, e
+              );
+              eprintln!("⚠️ {}", error_warning);
               eprintln!("Skipping merge and uploading local file as-is to avoid data corruption.");
               // Upload the local file without merging to prevent data loss
               self.upload_to_bucket(&file_path.to_string_lossy(), &target_path).await?;
               println!("Successfully uploaded local file (without merge): '{}'", file_path.to_string_lossy());
-              return Ok(None);
+              return Ok(Some((target_path, vec![error_warning])));
             }
           }
         }

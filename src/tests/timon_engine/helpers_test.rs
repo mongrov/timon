@@ -93,11 +93,13 @@ fn test_combine_unique_batches() {
   let batch2 = RecordBatch::try_new(Arc::new(schema.clone()), vec![id_array2, value_array2]).unwrap();
 
   // Combine batches with id as unique field
-  let result = combine_unique_batches(vec![batch1], vec![batch2], &["id".to_string()]).unwrap();
+  let (result, warnings) = combine_unique_batches(vec![batch1], vec![batch2], &["id".to_string()]).unwrap();
 
   assert_eq!(result.len(), 1);
   let combined_batch = &result[0];
   assert_eq!(combined_batch.num_rows(), 3);
+  // No warnings expected for matching schemas
+  assert!(warnings.is_empty());
 }
 
 #[test]
@@ -184,7 +186,7 @@ fn test_combine_unique_batches_with_empty_batches() {
 
   let result = combine_unique_batches(vec![batch], empty_batches, &["id".to_string()]);
   assert!(result.is_ok());
-  let combined = result.unwrap();
+  let (combined, _warnings) = result.unwrap();
   assert_eq!(combined.len(), 1);
   assert_eq!(combined[0].num_rows(), 3);
 }
@@ -344,7 +346,7 @@ fn test_combine_unique_batches_comprehensive() {
   let result = combine_unique_batches(vec![local_batch], vec![s3_batch], &["id".to_string()]);
   assert!(result.is_ok());
 
-  let combined = result.unwrap();
+  let (combined, _warnings) = result.unwrap();
   assert_eq!(combined.len(), 1);
   assert_eq!(combined[0].num_rows(), 4); // Should have 4 unique rows
 }
@@ -2213,9 +2215,11 @@ fn test_combine_unique_batches_with_compatible_schemas() {
   let result = combine_unique_batches(vec![local_batch], vec![s3_batch], &["id".to_string()]);
   assert!(result.is_ok(), "Combining batches with compatible schemas should succeed");
 
-  let merged_batches = result.unwrap();
+  let (merged_batches, warnings) = result.unwrap();
   assert_eq!(merged_batches.len(), 1, "Should produce one merged batch");
   assert_eq!(merged_batches[0].num_rows(), 3, "Should have 3 unique rows (1, 2, 3)");
+  // No warnings expected since schemas are identical (no conversion needed)
+  assert!(warnings.is_empty(), "Should not have warnings when schemas match exactly");
 }
 
 #[test]

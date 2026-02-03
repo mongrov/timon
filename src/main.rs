@@ -2571,14 +2571,9 @@ async fn ziva_app_queries() -> Result<(), Box<dyn std::error::Error>> {
     ORDER BY day, hour;
   "#;
 
-    let result_x = query("zivaring", &query_x, None, None).await?;
+    let result_x = query("zivaring", &query_x, Some(*username), None).await?;
     let duration = start_time.elapsed();
-    println!(
-      "result_x: {} status: {} (Time taken: {:.3} seconds)",
-      result_x["json_value"],
-      result_x["status"],
-      duration.as_secs_f64()
-    );
+    println!("result_x: {:?} (Time taken: {:.3} seconds)", result_x, duration.as_secs_f64());
   }
 
   Ok(())

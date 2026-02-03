@@ -122,6 +122,12 @@ pub enum DataFusionOutput {
   DataFrame(DataFrame),
 }
 
+/// Result type for query operations that includes warnings
+pub struct QueryResult {
+  pub output: DataFusionOutput,
+  pub warnings: Vec<String>,
+}
+
 impl fmt::Debug for DataFusionOutput {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
@@ -709,7 +715,9 @@ impl DatabaseManager {
     username: Option<&str>,
     is_json_format: bool,
     limit_partitions: Option<usize>,
-  ) -> DataFusionResult<DataFusionOutput> {
+  ) -> DataFusionResult<QueryResult> {
+    let mut all_warnings = Vec::new();
+
     // Validate database name to prevent path traversal attacks
     Self::validate_name(db_name, NameType::Database)?;
 
@@ -746,8 +754,10 @@ impl DatabaseManager {
         }
       }
 
+      // Register tables and collect warnings
       for table_name in &table_names {
-        self.register_single_table(db_name, table_name, username).await?;
+        let table_warnings = self.register_single_table(db_name, table_name, username).await?;
+        all_warnings.extend(table_warnings);
       }
     }
 
@@ -802,7 +812,7 @@ impl DatabaseManager {
     let final_df = self.session_context.sql(&effective_sql).await?;
     let final_results = final_df.collect().await?;
 
-    let result = if is_json_format {
+    let output = if is_json_format {
       let json_result = record_batches_to_json(&final_results)
         .map_err(|e| DataFusionError::Execution(format!("Failed to convert record batches to JSON: {:?}", e)))?;
       DataFusionOutput::Json(json_result)
@@ -813,10 +823,15 @@ impl DatabaseManager {
       DataFusionOutput::DataFrame(final_df)
     };
 
-    Ok(result)
+    Ok(QueryResult {
+      output,
+      warnings: all_warnings,
+    })
   }
 
-  async fn register_single_table(&self, db_name: &str, table_name: &str, username: Option<&str>) -> DataFusionResult<()> {
+  async fn register_single_table(&self, db_name: &str, table_name: &str, username: Option<&str>) -> DataFusionResult<Vec<String>> {
+    let mut warnings = Vec::new();
+
     // ALWAYS deregister the table FIRST, before resolving the path
     // This is critical: even if the table doesn't exist, try to deregister it
     // This ensures we don't use a stale registration from a previous query with a different username
@@ -834,7 +849,7 @@ impl DatabaseManager {
             "INFO: Table '{}' does not exist for group user '{:?}': {}. Skipping registration - query will return 0 rows for this table.",
             table_name, username, e
           );
-          return Ok(());
+          return Ok(warnings);
         } else {
           // For local users, this is an error - the table should exist
           let error = TimonError::table_not_found_for_user(table_name, username);
@@ -871,7 +886,7 @@ impl DatabaseManager {
           "INFO: Table '{}' exists for group user '{:?}' but contains no parquet files. Skipping registration - query will return 0 rows for this table.",
           table_name, username
         );
-        return Ok(());
+        return Ok(warnings);
       } else {
         // For local users, this is an error condition - the table exists but has no data
         // This helps distinguish between "empty result set" and "table not properly initialized"
@@ -899,13 +914,24 @@ impl DatabaseManager {
     let table_url = ListingTableUrl::parse(&table_dir).map_err(|e| DataFusionError::Execution(format!("Failed to parse table URL: {}", e)))?;
 
     // Infer schema with type coercion to handle schema mismatches (e.g., Int64 vs Float64)
+    // NOTE: infer_schema_with_coercion now returns (schema, warnings) - collect and return them
     let merged_schema = match infer_schema_with_coercion(&table_dir).await {
-      Ok(schema) => {
+      Ok((schema, schema_warnings)) => {
         eprintln!(
           "Successfully merged schema for table '{}' with {} fields",
           table_name,
           schema.fields().len()
         );
+
+        // Collect schema coercion warnings
+        if !schema_warnings.is_empty() {
+          eprintln!("⚠️ Schema coercion warnings for table '{}':", table_name);
+          for warning in &schema_warnings {
+            eprintln!("  {}", warning);
+          }
+          warnings.extend(schema_warnings);
+        }
+
         Some(schema)
       }
       Err(e) => {
@@ -937,7 +963,7 @@ impl DatabaseManager {
       .register_table(table_name, Arc::new(listing_table))
       .map_err(|e| DataFusionError::Execution(format!("Failed to register table '{}': {}", table_name, e)))?;
 
-    Ok(())
+    Ok(warnings)
   }
 
   // Resolve the effective directory path for a logical table, preferring group/user path when provided
@@ -1397,11 +1423,6 @@ impl DatabaseManager {
     let schema_obj = schema.as_object().ok_or("Schema should be a JSON object")?;
 
     for (field_name, field_rules) in schema_obj {
-      // Skip validation for max_rows as it's a configuration property, not a data field
-      if field_name == "max_rows" {
-        continue;
-      }
-
       let field_rules_obj = field_rules
         .as_object()
         .ok_or(format!("Invalid validation rules for field '{}'", field_name))?;
@@ -1448,11 +1469,6 @@ impl DatabaseManager {
 
     // Validate each field in the schema
     for (field_name, field_rules) in schema_obj {
-      // Skip validation for max_rows as it's a configuration property, not a data field
-      if field_name == "max_rows" {
-        continue;
-      }
-
       let field_rules_obj = field_rules
         .as_object()
         .ok_or(format!("Invalid validation rules for field '{}'", field_name))?;

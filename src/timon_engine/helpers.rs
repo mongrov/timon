@@ -642,6 +642,10 @@ pub fn validate_schema_compatibility(local_schema: &Schema, s3_schema: &Schema) 
 
     // Check if data types match or are compatible for conversion
     if local_field.data_type() != s3_field.data_type() {
+      // TODO: DEPRECATION WARNING - This compatibility check is planned for removal
+      // Reason: Automatic schema conversion can hide data inconsistencies and lead to unexpected behavior.
+      // Future: Schemas should match exactly, or explicit conversion should be handled at data ingestion time.
+      // Impact: After removal, mismatched schemas will fail validation immediately.
       // Check if this is a compatible conversion that convert_batch_schema can handle
       let is_compatible_conversion = match (local_field.data_type(), s3_field.data_type()) {
         // Allow Int64 <-> List<Int64> conversion (both directions)
@@ -660,6 +664,16 @@ pub fn validate_schema_compatibility(local_schema: &Schema, s3_schema: &Schema) 
           .into(),
         );
       }
+
+      // Log warning about schema conversion being used
+      eprintln!(
+        "WARNING: Schema auto-conversion applied for field '{}': {:?} <-> {:?}. \
+        This feature is deprecated and will be removed in a future version. \
+        Please ensure schemas match exactly to avoid future issues.",
+        local_field.name(),
+        local_field.data_type(),
+        s3_field.data_type()
+      );
     }
 
     // Check if nullability matches (this is less strict, but good to warn)
@@ -676,14 +690,31 @@ pub fn validate_schema_compatibility(local_schema: &Schema, s3_schema: &Schema) 
   Ok(())
 }
 
-pub fn combine_unique_batches(
-  local_batches: Vec<RecordBatch>,
-  s3_batches: Vec<RecordBatch>,
-  unique_fields: &[String],
-) -> Result<Vec<RecordBatch>, Box<dyn std::error::Error>> {
+/// Result type that includes both the record batches and any warnings generated during processing
+pub type CombineBatchesResult = Result<(Vec<RecordBatch>, Vec<String>), Box<dyn std::error::Error>>;
+
+pub fn combine_unique_batches(local_batches: Vec<RecordBatch>, s3_batches: Vec<RecordBatch>, unique_fields: &[String]) -> CombineBatchesResult {
+  let mut warnings = Vec::new();
+
   // Validate schema compatibility before merging
   if let (Some(local_batch), Some(s3_batch)) = (local_batches.first(), s3_batches.first()) {
-    validate_schema_compatibility(&local_batch.schema(), &s3_batch.schema())?;
+    // Check for schema mismatches that require conversion
+    let local_schema = local_batch.schema();
+    let s3_schema = s3_batch.schema();
+
+    for (local_field, s3_field) in local_schema.fields().iter().zip(s3_schema.fields().iter()) {
+      if local_field.data_type() != s3_field.data_type() {
+        warnings.push(format!(
+          "DEPRECATION WARNING: Schema auto-conversion applied for field '{}': {:?} <-> {:?}. \
+          This feature will be removed in a future version. Please ensure schemas match exactly.",
+          local_field.name(),
+          local_field.data_type(),
+          s3_field.data_type()
+        ));
+      }
+    }
+
+    validate_schema_compatibility(&local_schema, &s3_schema)?;
   }
 
   let schema = local_batches
@@ -700,7 +731,11 @@ pub fn combine_unique_batches(
   let mut unique_map: HashMap<Vec<ScalarValue>, Vec<ScalarValue>> = HashMap::new();
 
   for batch in s3_batches.into_iter().chain(local_batches) {
-    let unified_batch = convert_batch_schema(&batch, &schema)?; // Fixed type mismatch
+    // TODO: DEPRECATION WARNING - convert_batch_schema is planned for removal
+    // This automatic schema conversion is being used here to handle mismatched schemas between local and S3 data.
+    // Reason for removal: Implicit conversions can mask data quality issues and create unexpected behavior.
+    // Future approach: Enforce strict schema matching at data ingestion time, fail fast on mismatches.
+    let unified_batch = convert_batch_schema(&batch, &schema)?;
 
     for row_index in 0..unified_batch.num_rows() {
       let unique_key: Vec<ScalarValue> = unique_indices
@@ -737,9 +772,30 @@ pub fn combine_unique_batches(
   }
 
   let combined_unique_batches = RecordBatch::try_new(schema.clone(), final_columns)?;
-  Ok(vec![combined_unique_batches])
+  Ok((vec![combined_unique_batches], warnings))
 }
 
+/// TODO: DEPRECATION - This function is planned for removal in a future version
+///
+/// # Why this should be removed:
+/// 1. **Data Integrity**: Automatic schema conversion can silently transform data in unexpected ways,
+///    potentially causing data loss or corruption (e.g., converting Int64 to List<Int64> changes semantics)
+/// 2. **Hidden Bugs**: Schema mismatches often indicate upstream data quality issues that should be
+///    caught and fixed at the source, not masked by automatic conversion
+/// 3. **Performance**: Runtime schema conversion adds overhead and complexity to the merge process
+/// 4. **Maintainability**: Supporting multiple conversion paths increases code complexity and test surface area
+/// 5. **Predictability**: Users should know exactly what schema their data has without implicit transformations
+///
+/// # Recommended approach:
+/// - Enforce strict schema validation at data ingestion time
+/// - Fail fast with clear error messages when schemas don't match
+/// - Require explicit schema migration/evolution steps when schema changes are needed
+/// - Use schema versioning to track changes over time
+///
+/// # Migration path:
+/// - Add warnings when this function is used (already implemented in validate_schema_compatibility)
+/// - Update data ingestion pipelines to ensure schema consistency
+/// - Remove this function and related compatibility checks once all data sources are aligned
 fn convert_batch_schema(batch: &RecordBatch, target_schema: &Schema) -> Result<RecordBatch, Box<dyn std::error::Error>> {
   let mut new_columns = Vec::new();
   for field in target_schema.fields() {
@@ -901,15 +957,25 @@ fn read_parquet_schema(file_path: &Path) -> Result<Arc<Schema>, Box<dyn Error>> 
   Ok(builder.schema().clone())
 }
 
+// TODO: DEPRECATION - Schema Auto-Coercion (Target removal: Q4 2026)
+// This function automatically merges schemas with type coercion (e.g., Int64 → Float64).
+// This should be removed in favor of strict schema validation.
+// See SCHEMA_CONVERSION_DEPRECATION.md for full details and migration plan.
+
 /// Merge multiple schemas, handling type coercion for compatible types
-fn merge_schemas(schemas: Vec<Arc<Schema>>) -> Result<Arc<Schema>, Box<dyn Error>> {
+///
+/// **DEPRECATION WARNING**: This function will be removed in a future version.
+/// Returns (merged_schema, warnings) where warnings contain deprecation messages.
+fn merge_schemas(schemas: Vec<Arc<Schema>>) -> Result<(Arc<Schema>, Vec<String>), Box<dyn Error>> {
   if schemas.is_empty() {
     return Err("No schemas to merge".into());
   }
 
   if schemas.len() == 1 {
-    return Ok(schemas[0].clone());
+    return Ok((schemas[0].clone(), Vec::new()));
   }
+
+  let mut warnings = Vec::new();
 
   // Start with the first schema
   let mut merged_fields: Vec<Arc<datafusion::arrow::datatypes::Field>> = schemas[0].fields().to_vec();
@@ -922,10 +988,30 @@ fn merge_schemas(schemas: Vec<Arc<Schema>>) -> Result<Arc<Schema>, Box<dyn Error
     // For each field in the merged schema, try to find and merge with fields from the new schema
     for merged_field in &merged_fields {
       if let Some(new_field) = schema_fields.iter().find(|f| f.name() == merged_field.name()) {
-        // Field exists in both schemas, merge the data types
-        let merged_type = merge_data_types(merged_field.data_type(), new_field.data_type());
-        let merged_field = merged_field.clone().as_ref().clone().with_data_type(merged_type);
-        updated_fields.push(Arc::new(merged_field));
+        // Field exists in both schemas, check if types differ
+        if merged_field.data_type() != new_field.data_type() {
+          // Types differ - perform coercion and generate warning
+          let merged_type = merge_data_types(merged_field.data_type(), new_field.data_type());
+
+          // Generate deprecation warning
+          let warning = format!(
+            "DEPRECATION WARNING: Schema auto-coercion applied for field '{}': {:?} <-> {:?} merged to {:?}. \
+            This feature will be removed in a future version. Please ensure schemas match exactly across all parquet files.",
+            merged_field.name(),
+            merged_field.data_type(),
+            new_field.data_type(),
+            merged_type
+          );
+
+          warnings.push(warning.clone());
+          eprintln!("{}", warning);
+
+          let merged_field = merged_field.clone().as_ref().clone().with_data_type(merged_type);
+          updated_fields.push(Arc::new(merged_field));
+        } else {
+          // Types match, no coercion needed
+          updated_fields.push(merged_field.clone());
+        }
       } else {
         // Field only exists in merged schema, keep it
         updated_fields.push(merged_field.clone());
@@ -942,11 +1028,19 @@ fn merge_schemas(schemas: Vec<Arc<Schema>>) -> Result<Arc<Schema>, Box<dyn Error
     merged_fields = updated_fields;
   }
 
-  Ok(Arc::new(Schema::new(merged_fields)))
+  Ok((Arc::new(Schema::new(merged_fields)), warnings))
 }
 
+// TODO: DEPRECATION - Schema Auto-Coercion (Target removal: Q4 2026)
+// This function automatically infers and merges schemas with type coercion.
+// This should be removed in favor of strict schema validation.
+// See SCHEMA_CONVERSION_DEPRECATION.md for full details and migration plan.
+
 /// Infer schema from parquet files with type coercion support
-pub async fn infer_schema_with_coercion(table_dir: &str) -> Result<Arc<Schema>, Box<dyn Error>> {
+///
+/// **DEPRECATION WARNING**: This function will be removed in a future version.
+/// Returns (schema, warnings) where warnings contain deprecation messages about type coercions.
+pub async fn infer_schema_with_coercion(table_dir: &str) -> Result<(Arc<Schema>, Vec<String>), Box<dyn Error>> {
   let dir_path = Path::new(table_dir);
   let parquet_files = collect_parquet_files(dir_path);
 
@@ -970,6 +1064,6 @@ pub async fn infer_schema_with_coercion(table_dir: &str) -> Result<Arc<Schema>, 
     return Err("No valid schemas found in parquet files".into());
   }
 
-  // Merge all schemas with type coercion
+  // Merge all schemas with type coercion (returns warnings)
   merge_schemas(schemas)
 }
