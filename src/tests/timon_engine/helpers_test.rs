@@ -1573,10 +1573,9 @@ fn test_filter_files_by_date_range_none_day_case() {
 
 #[test]
 fn test_convert_batch_schema_list_conversion_path() {
-  // Test convert_batch_schema List conversion path (lines 611-612, 618-622)
-  // Test Int64 to List<Int64> conversion via combine_unique_batches
+  // Test that Int64 to List<Int64> conversion is no longer supported
   // The first batch determines the target schema, so we need the first batch to have List<Int64>
-  // and the second batch to have Int64 to trigger the conversion
+  // and the second batch to have Int64 - this should now fail when trying to create RecordBatch
 
   // First batch with List<Int64> - this sets the target schema
   let inner_field = Field::new("item", DataType::Int64, true);
@@ -1591,17 +1590,16 @@ fn test_convert_batch_schema_list_conversion_path() {
   let list_array = Arc::new(list_builder.finish());
   let list_batch = RecordBatch::try_new(Arc::new(list_schema), vec![list_array]).unwrap();
 
-  // Second batch with Int64 - this will be converted to List<Int64>
+  // Second batch with Int64 - this should fail to convert to List<Int64>
   let int_schema = Schema::new(vec![Field::new("id", DataType::Int64, false)]);
   let id_array = Arc::new(Int64Array::from(vec![3, 4]));
   let int_batch = RecordBatch::try_new(Arc::new(int_schema), vec![id_array]).unwrap();
 
-  // This will trigger convert_batch_schema with List conversion (lines 611-612, 618-622)
-  // The first batch in local_batches determines the target schema (List<Int64>)
-  // The int_batch in s3_batches will be converted to match the list_schema
+  // This should fail when convert_batch_schema tries to create a RecordBatch with incompatible types
+  // The error will come from RecordBatch::try_new, not from schema validation
   let result = combine_unique_batches(vec![list_batch], vec![int_batch], &["id".to_string()]);
-  // Should succeed - the Int64 batch gets converted to List<Int64>
-  assert!(result.is_ok());
+  // Should fail - RecordBatch creation will reject incompatible column types
+  assert!(result.is_err());
 }
 
 #[test]
@@ -2065,124 +2063,41 @@ fn test_record_batches_to_json_conversion_error() {
   assert!(result.is_ok(), "Should successfully convert");
 }
 
-// ============================================================================
-// Schema Validation Tests
-// ============================================================================
-
-#[test]
-fn test_validate_schema_compatibility_identical_schemas() {
-  let schema1 = Schema::new(vec![
-    Field::new("id", DataType::Int64, false),
-    Field::new("name", DataType::Utf8, true),
-    Field::new("value", DataType::Float64, true),
-  ]);
-
-  let schema2 = Schema::new(vec![
-    Field::new("id", DataType::Int64, false),
-    Field::new("name", DataType::Utf8, true),
-    Field::new("value", DataType::Float64, true),
-  ]);
-
-  let result = validate_schema_compatibility(&schema1, &schema2);
-  assert!(result.is_ok(), "Identical schemas should be compatible");
-}
-
-#[test]
-fn test_validate_schema_compatibility_different_field_count() {
-  let schema1 = Schema::new(vec![Field::new("id", DataType::Int64, false), Field::new("name", DataType::Utf8, true)]);
-
-  let schema2 = Schema::new(vec![
-    Field::new("id", DataType::Int64, false),
-    Field::new("name", DataType::Utf8, true),
-    Field::new("extra", DataType::Float64, true),
-  ]);
-
-  let result = validate_schema_compatibility(&schema1, &schema2);
-  assert!(result.is_err(), "Schemas with different field counts should be incompatible");
-  assert!(result.unwrap_err().to_string().contains("field count mismatch"));
-}
-
-#[test]
-fn test_validate_schema_compatibility_different_field_names() {
-  let schema1 = Schema::new(vec![Field::new("id", DataType::Int64, false), Field::new("name", DataType::Utf8, true)]);
-
-  let schema2 = Schema::new(vec![
-    Field::new("id", DataType::Int64, false),
-    Field::new("title", DataType::Utf8, true), // Different field name
-  ]);
-
-  let result = validate_schema_compatibility(&schema1, &schema2);
-  assert!(result.is_err(), "Schemas with different field names should be incompatible");
-  assert!(result.unwrap_err().to_string().contains("field name mismatch"));
-}
-
-#[test]
-fn test_validate_schema_compatibility_different_data_types() {
-  let schema1 = Schema::new(vec![
-    Field::new("id", DataType::Int64, false),
-    Field::new("value", DataType::Float64, true),
-  ]);
-
-  let schema2 = Schema::new(vec![
-    Field::new("id", DataType::Int64, false),
-    Field::new("value", DataType::Int32, true), // Different data type
-  ]);
-
-  let result = validate_schema_compatibility(&schema1, &schema2);
-  assert!(result.is_err(), "Schemas with different data types should be incompatible");
-  assert!(result.unwrap_err().to_string().contains("data type mismatch"));
-}
-
-#[test]
-fn test_validate_schema_compatibility_different_nullability() {
-  let schema1 = Schema::new(vec![
-    Field::new("id", DataType::Int64, false),
-    Field::new("name", DataType::Utf8, true), // nullable
-  ]);
-
-  let schema2 = Schema::new(vec![
-    Field::new("id", DataType::Int64, false),
-    Field::new("name", DataType::Utf8, false), // not nullable
-  ]);
-
-  // Nullability mismatch should still pass but print a warning
-  let result = validate_schema_compatibility(&schema1, &schema2);
-  assert!(
-    result.is_ok(),
-    "Schemas with different nullability should still be compatible (with warning)"
-  );
-}
-
 #[test]
 fn test_combine_unique_batches_with_incompatible_schemas() {
-  // Create local batch with schema: id (Int64), name (Utf8)
+  // Create local batch with schema: id (Int64), value (Float64)
   let local_schema = Arc::new(Schema::new(vec![
     Field::new("id", DataType::Int64, false),
-    Field::new("name", DataType::Utf8, true),
+    Field::new("value", DataType::Float64, false),
   ]));
 
   let local_batch = RecordBatch::try_new(
     local_schema.clone(),
-    vec![Arc::new(Int64Array::from(vec![1, 2])), Arc::new(StringArray::from(vec!["Alice", "Bob"]))],
+    vec![Arc::new(Int64Array::from(vec![1, 2])), Arc::new(Float64Array::from(vec![10.0, 20.0]))],
   )
   .unwrap();
 
-  // Create S3 batch with incompatible schema: id (Int64), title (Utf8)
+  // Create S3 batch with incompatible schema: id (Int64), value (Utf8) - incompatible type
+  // This will fail when convert_batch_schema tries to create RecordBatch with Utf8 column
+  // but Float64 schema field
   let s3_schema = Arc::new(Schema::new(vec![
     Field::new("id", DataType::Int64, false),
-    Field::new("title", DataType::Utf8, true), // Different field name
+    Field::new("value", DataType::Utf8, false), // Incompatible type - Utf8 vs Float64
   ]));
 
   let s3_batch = RecordBatch::try_new(
     s3_schema.clone(),
-    vec![Arc::new(Int64Array::from(vec![3, 4])), Arc::new(StringArray::from(vec!["Doc1", "Doc2"]))],
+    vec![
+      Arc::new(Int64Array::from(vec![3, 4])),
+      Arc::new(StringArray::from(vec!["test1", "test2"])),
+    ],
   )
   .unwrap();
 
-  // Try to combine batches - should fail due to schema incompatibility
+  // This should fail when convert_batch_schema tries to create a RecordBatch with incompatible types
+  // The error will come from RecordBatch::try_new, not from schema validation
   let result = combine_unique_batches(vec![local_batch], vec![s3_batch], &["id".to_string()]);
-  assert!(result.is_err(), "Combining batches with incompatible schemas should fail");
-  assert!(result.unwrap_err().to_string().contains("field name mismatch"));
+  assert!(result.is_err(), "Combining batches with incompatible types should fail");
 }
 
 #[test]
@@ -2216,21 +2131,4 @@ fn test_combine_unique_batches_with_compatible_schemas() {
   let merged_batches = result.unwrap();
   assert_eq!(merged_batches.len(), 1, "Should produce one merged batch");
   assert_eq!(merged_batches[0].num_rows(), 3, "Should have 3 unique rows (1, 2, 3)");
-}
-
-#[test]
-fn test_validate_schema_compatibility_with_compatible_type_conversion() {
-  // Test that Int64 <-> List<Int64> conversion is allowed
-  let int_schema = Schema::new(vec![Field::new("id", DataType::Int64, false)]);
-
-  let inner_field = Field::new("item", DataType::Int64, true);
-  let list_schema = Schema::new(vec![Field::new("id", DataType::List(Arc::new(inner_field)), false)]);
-
-  // Int64 -> List<Int64> should be compatible
-  let result1 = validate_schema_compatibility(&int_schema, &list_schema);
-  assert!(result1.is_ok(), "Int64 to List<Int64> conversion should be compatible");
-
-  // List<Int64> -> Int64 should also be compatible
-  let result2 = validate_schema_compatibility(&list_schema, &int_schema);
-  assert!(result2.is_ok(), "List<Int64> to Int64 conversion should be compatible");
 }
