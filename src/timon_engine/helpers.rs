@@ -744,14 +744,6 @@ pub fn build_rules_tree(table_schema: Value) -> Vec<Condition> {
               conditions.push(float_less_than(field, max_val));
             }
           }
-          "int|float" => {
-            if let Some(min_val) = min {
-              conditions.push(float_greater_than(field, min_val));
-            }
-            if let Some(max_val) = max {
-              conditions.push(float_less_than(field, max_val));
-            }
-          }
           _ => {}
         }
       }

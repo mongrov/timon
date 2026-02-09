@@ -521,7 +521,7 @@ async fn test_local_storage() {
         "datetime": true
       },
       "distance": {
-        "type": "int|float",
+        "type": "float",
         "max": 2500
       },
       "step": {
@@ -530,7 +530,7 @@ async fn test_local_storage() {
         "max": 100
       },
       "calories": {
-        "type": "int|float",
+        "type": "float",
         "min": 50,
         "max": 1200
       },
@@ -706,10 +706,10 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
         "type": "array"
       },
       "calories": {
-        "type": "int|float"
+        "type": "float"
       },
       "distance": {
-        "type": "int|float"
+        "type": "float"
       }
     }
   "#;
@@ -787,10 +787,10 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
         "datetime":true
       },
       "unitLength":{
-        "type":"int|float"
+        "type":"int"
       },
       "quality":{
-        "type":"int|float"
+        "type":"int"
       },
       "start":{
         "type":"string"
@@ -808,7 +808,7 @@ async fn test_ziva_ring_insert() -> Result<(), Box<dyn std::error::Error>> {
         "datetime": true
       },
       "temperature": {
-        "type": "int|float"
+        "type": "float"
       }
     }
     "#;

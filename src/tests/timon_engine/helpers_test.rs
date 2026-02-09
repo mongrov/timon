@@ -1014,10 +1014,10 @@ async fn test_cleanup_old_files_error_path() {
 }
 
 #[test]
-fn test_build_rules_tree_int_or_float_min() {
-  // Test int|float type with min only (line 692-693)
+fn test_build_rules_tree_float_min() {
+  // Test float type with min only
   let schema = json!({
-    "value": {"type": "int|float", "min": 0.0}
+    "value": {"type": "float", "min": 0.0}
   });
 
   let rules = build_rules_tree(schema);
@@ -1025,10 +1025,10 @@ fn test_build_rules_tree_int_or_float_min() {
 }
 
 #[test]
-fn test_build_rules_tree_int_or_float_max() {
-  // Test int|float type with max only (line 695-696)
+fn test_build_rules_tree_float_max() {
+  // Test float type with max only
   let schema = json!({
-    "value": {"type": "int|float", "max": 100.0}
+    "value": {"type": "float", "max": 100.0}
   });
 
   let rules = build_rules_tree(schema);
@@ -1036,10 +1036,10 @@ fn test_build_rules_tree_int_or_float_max() {
 }
 
 #[test]
-fn test_build_rules_tree_int_or_float_both() {
-  // Test int|float type with both min and max (lines 692-696)
+fn test_build_rules_tree_float_both() {
+  // Test float type with both min and max
   let schema = json!({
-    "value": {"type": "int|float", "min": 0.0, "max": 100.0}
+    "value": {"type": "float", "min": 0.0, "max": 100.0}
   });
 
   let rules = build_rules_tree(schema);

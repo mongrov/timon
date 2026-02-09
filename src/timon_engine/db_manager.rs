@@ -657,7 +657,7 @@ impl DatabaseManager {
       }
     }
 
-    for json_value in &new_json_values {
+    for json_value in new_json_values.iter_mut() {
       self.validate_data_against_schema(&table_schema, json_value)?;
     }
 
@@ -1397,11 +1397,6 @@ impl DatabaseManager {
     let schema_obj = schema.as_object().ok_or("Schema should be a JSON object")?;
 
     for (field_name, field_rules) in schema_obj {
-      // Skip validation for max_rows as it's a configuration property, not a data field
-      if field_name == "max_rows" {
-        continue;
-      }
-
       let field_rules_obj = field_rules
         .as_object()
         .ok_or(format!("Invalid validation rules for field '{}'", field_name))?;
@@ -1448,11 +1443,6 @@ impl DatabaseManager {
 
     // Validate each field in the schema
     for (field_name, field_rules) in schema_obj {
-      // Skip validation for max_rows as it's a configuration property, not a data field
-      if field_name == "max_rows" {
-        continue;
-      }
-
       let field_rules_obj = field_rules
         .as_object()
         .ok_or(format!("Invalid validation rules for field '{}'", field_name))?;
@@ -1475,8 +1465,9 @@ impl DatabaseManager {
   }
 
   fn validate_field_type(&self, field_name: &str, field_type: &str, value: &serde_json::Value) -> Result<(), Box<dyn Error>> {
-    fn get_value_type(value: &Value) -> &str {
-      if value.is_f64() {
+    /// Returns (raw_type, type_for_schema_check). Int is treated as valid for float (int is subset of float).
+    fn get_value_type(value: &Value, expected_type: &str) -> (&'static str, &'static str) {
+      let raw = if value.is_f64() {
         "float"
       } else if value.is_i64() || value.is_u64() {
         "int"
@@ -1488,12 +1479,14 @@ impl DatabaseManager {
         "array"
       } else {
         "unknown"
-      }
+      };
+      let for_check = if raw == "int" && expected_type.trim() == "float" { "float" } else { raw };
+      (raw, for_check)
     }
 
-    let actual_type = get_value_type(value);
-    let expected_types: Vec<&str> = field_type.split('|').collect();
-    if !expected_types.contains(&actual_type) {
+    let expected_type = field_type.trim();
+    let (actual_type, type_for_check) = get_value_type(value, expected_type);
+    if type_for_check != expected_type {
       return Err(
         format!(
           "Type mismatch for field '{}': expected '{}', but got '{}'.",
