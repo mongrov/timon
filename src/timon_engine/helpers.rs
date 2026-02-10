@@ -13,7 +13,7 @@ use datafusion::scalar::ScalarValue;
 use json_rules_engine::{float_greater_than, float_less_than, int_greater_than, int_less_than, Condition};
 use regex::Regex;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs::{self, metadata, File};
 use std::io::{ErrorKind, Read};
@@ -265,7 +265,7 @@ pub fn row_to_json(row: &Row) -> serde_json::Value {
   serde_json::Value::Object(json_map)
 }
 
-pub fn json_to_arrow(json_values: &[Value]) -> Result<(Vec<ArrayRef>, Schema), Box<dyn std::error::Error>> {
+pub fn json_to_arrow(json_values: &[Value], preferred_field_order: Option<&[String]>) -> Result<(Vec<ArrayRef>, Schema), Box<dyn std::error::Error>> {
   fn resolve_data_type_conflict(current: Option<DataType>, new_type: DataType) -> DataType {
     match (current, new_type) {
       (None, new) => new,
@@ -316,10 +316,24 @@ pub fn json_to_arrow(json_values: &[Value]) -> Result<(Vec<ArrayRef>, Schema), B
     }
   }
 
-  // Define schema fields
-  let fields: Vec<ArrowField> = field_types
-    .into_iter()
-    .map(|(key, data_type)| ArrowField::new(&key, data_type, false))
+  // Define schema fields in deterministic order: use preferred_field_order when provided,
+  // then append any fields present in data but not in that order (sorted by name).
+  let field_names: Vec<String> = if let Some(order) = preferred_field_order {
+    let order_set: HashSet<_> = order.iter().map(String::as_str).collect();
+    let mut ordered: Vec<String> = order.iter().filter(|n| field_types.contains_key(*n)).cloned().collect();
+    let mut rest: Vec<String> = field_types.keys().filter(|k| !order_set.contains(k.as_str())).cloned().collect();
+    rest.sort();
+    ordered.extend(rest);
+    ordered
+  } else {
+    let mut names: Vec<String> = field_types.keys().cloned().collect();
+    names.sort();
+    names
+  };
+
+  let fields: Vec<ArrowField> = field_names
+    .iter()
+    .map(|key| ArrowField::new(key, field_types[key].clone(), false))
     .collect();
   let schema = Schema::new(fields);
 
@@ -852,7 +866,8 @@ fn merge_schemas(schemas: Vec<Arc<Schema>>) -> Result<Arc<Schema>, Box<dyn Error
 /// Infer schema from parquet files with type coercion support
 pub async fn infer_schema_with_coercion(table_dir: &str) -> Result<Arc<Schema>, Box<dyn Error>> {
   let dir_path = Path::new(table_dir);
-  let parquet_files = collect_parquet_files(dir_path);
+  let mut parquet_files = collect_parquet_files(dir_path);
+  parquet_files.sort();
 
   if parquet_files.is_empty() {
     return Err("No parquet files found".into());

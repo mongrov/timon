@@ -2672,6 +2672,18 @@ async fn check_ziva_fecth_time() -> Result<(), Box<dyn std::error::Error>> {
   ];
   let fetch_range = std::collections::HashMap::from([("start_date", "2025-01-01"), ("end_date", "2025-12-30")]);
 
+  // for table_name in table_names {
+  //   let result = cloud_sink_parquet("zivaring", table_name).await;
+  //   match result {
+  //     Ok(value) => {
+  //       println!("Cloud sink parquet: {}", value);
+  //     }
+  //     Err(_) => {
+  //       println!("Error in cloud sink parquet: {}", result.err().unwrap());
+  //     }
+  //   }
+  // }
+
   // Use batch fetch for parallel execution
   let result = cloud_fetch_parquet_batch(&usernames, &db_names, &table_names, fetch_range).await;
 

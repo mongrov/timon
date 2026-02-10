@@ -636,7 +636,10 @@ impl DatabaseManager {
         .join("-")
     };
 
-    // Ensure datetime fields are present and convert them to timestamps
+    // Field order from table schema (metadata) so written Parquet columns match schema order
+    let schema_field_order: Vec<String> = table_schema.as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
+
+    // Ensure datetime fields are present and convert them to timestamps and convert them to timestamps
     for json_value in new_json_values.iter_mut() {
       match json_value.get(datetime_field) {
         Some(Value::String(date_str)) => {
@@ -691,7 +694,7 @@ impl DatabaseManager {
     // Process each file atomically: lock -> read -> merge -> write -> unlock
     for (file_path, new_records) in records_by_file {
       let file_path_clone = file_path.clone();
-      if let Err(e) = Self::atomic_file_insert(Path::new(&file_path_clone), &new_records, &build_key) {
+      if let Err(e) = Self::atomic_file_insert(Path::new(&file_path_clone), &new_records, &build_key, Some(&schema_field_order)) {
         // Log the error but don't fail the entire insert operation
         // This allows other files to be processed even if one fails
         eprintln!("Error in atomic_file_insert for '{}': {}", file_path_clone, e);
@@ -1012,7 +1015,12 @@ impl DatabaseManager {
 
   /// Atomically insert records into a parquet file: lock -> read -> merge -> write -> unlock
   /// This ensures that concurrent inserts don't lose data by always working with the latest file contents
-  fn atomic_file_insert(file_path: &Path, new_records: &[Value], build_key: &dyn Fn(&Value) -> String) -> Result<(), Box<dyn Error>> {
+  fn atomic_file_insert(
+    file_path: &Path,
+    new_records: &[Value],
+    build_key: &dyn Fn(&Value) -> String,
+    preferred_field_order: Option<&[String]>,
+  ) -> Result<(), Box<dyn Error>> {
     // Ensure parent directory exists
     if let Some(parent) = file_path.parent() {
       fs::create_dir_all(parent)?;
@@ -1100,8 +1108,8 @@ impl DatabaseManager {
       );
     }
 
-    let (arrays, schema) =
-      json_to_arrow(&existing_records).map_err(|e| format!("Failed to convert records to arrow format for '{}': {}", file_path.display(), e))?;
+    let (arrays, schema) = json_to_arrow(&existing_records, preferred_field_order)
+      .map_err(|e| format!("Failed to convert records to arrow format for '{}': {}", file_path.display(), e))?;
 
     // Write while holding the lock
     Self::parquet_file_writer_locked(file_path, schema, arrays)

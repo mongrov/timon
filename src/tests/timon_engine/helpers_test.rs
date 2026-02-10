@@ -42,7 +42,7 @@ fn test_json_to_arrow() {
     json!({"id": 2, "name": "Bob", "score": 88.0}),
   ];
 
-  let (arrays, schema) = json_to_arrow(&json_data).unwrap();
+  let (arrays, schema) = json_to_arrow(&json_data, None).unwrap();
 
   assert_eq!(schema.fields().len(), 3);
   assert_eq!(arrays.len(), 3);
@@ -143,7 +143,7 @@ fn test_json_to_arrow_with_mixed_types() {
     json!({"id": 3, "name": "Charlie", "active": true, "score": 92.5}),
   ];
 
-  let (arrays, schema) = json_to_arrow(&json_data).unwrap();
+  let (arrays, schema) = json_to_arrow(&json_data, None).unwrap();
 
   assert_eq!(schema.fields().len(), 4);
   assert_eq!(arrays.len(), 4);
@@ -253,7 +253,7 @@ fn test_json_to_arrow_complex_types() {
     json!({"id": 2, "name": "test2", "value": 20.0}),
   ];
 
-  let result = json_to_arrow(&json_data);
+  let result = json_to_arrow(&json_data, None);
   assert!(result.is_ok());
 }
 
@@ -413,7 +413,7 @@ fn test_read_parquet_batches() {
 #[test]
 fn test_json_to_arrow_with_empty_data() {
   let empty_data: Vec<serde_json::Value> = vec![];
-  let result = json_to_arrow(&empty_data);
+  let result = json_to_arrow(&empty_data, None);
   // Empty data might fail, which is expected
   assert!(result.is_ok() || result.is_err());
 }
@@ -424,7 +424,7 @@ fn test_json_to_arrow_with_null_values() {
     json!({"id": 1, "name": "test", "value": 10.5}),
     json!({"id": 2, "name": "test2", "value": 20.0}),
   ];
-  let result = json_to_arrow(&data_with_nulls);
+  let result = json_to_arrow(&data_with_nulls, None);
   assert!(result.is_ok());
 }
 
@@ -842,7 +842,7 @@ fn test_json_to_arrow_missing_list_values() {
     json!({"tags": ["c"]}),      // Has array again
   ];
 
-  let result = json_to_arrow(&json_data);
+  let result = json_to_arrow(&json_data, None);
   // Should handle missing/null arrays by appending false
   assert!(result.is_ok());
   if let Ok((_arrays, _schema)) = result {
@@ -859,7 +859,7 @@ fn test_json_to_arrow_missing_int64_list() {
     json!({"numbers": null}), // Missing
     json!({"numbers": [3]}),
   ];
-  let result = json_to_arrow(&json_data);
+  let result = json_to_arrow(&json_data, None);
   assert!(result.is_ok());
 }
 
@@ -871,7 +871,7 @@ fn test_json_to_arrow_missing_float64_list() {
     json!({"scores": null}), // Missing
     json!({"scores": [92.3]}),
   ];
-  let result = json_to_arrow(&json_data);
+  let result = json_to_arrow(&json_data, None);
   assert!(result.is_ok());
 }
 
@@ -883,7 +883,7 @@ fn test_json_to_arrow_missing_boolean_list() {
     json!({"flags": null}), // Missing
     json!({"flags": [true]}),
   ];
-  let result = json_to_arrow(&json_data);
+  let result = json_to_arrow(&json_data, None);
   assert!(result.is_ok());
 }
 
@@ -896,7 +896,7 @@ fn test_json_to_arrow_missing_other_list_types() {
     json!({"items": null}), // Missing - should append false
     json!({"items": [3]}),
   ];
-  let result = json_to_arrow(&json_data);
+  let result = json_to_arrow(&json_data, None);
   assert!(result.is_ok());
 }
 
@@ -1053,7 +1053,7 @@ fn test_json_to_arrow_unsupported_list_type() {
   // We can't easily create this scenario, but we test that the path exists
   // The error would be: "Unsupported inner data type for ListArray"
   let json_data = vec![json!({"items": [1, 2]})];
-  let result = json_to_arrow(&json_data);
+  let result = json_to_arrow(&json_data, None);
   // Should succeed for supported types
   assert!(result.is_ok());
 }
@@ -1224,7 +1224,7 @@ fn test_json_to_arrow_with_list_strings() {
     json!({"tags": ["f"]}), // At least one element to determine type
   ];
 
-  let (arrays, schema) = json_to_arrow(&json_data).unwrap();
+  let (arrays, schema) = json_to_arrow(&json_data, None).unwrap();
   assert_eq!(schema.fields().len(), 1);
   assert_eq!(arrays.len(), 1);
   assert_eq!(arrays[0].len(), 3);
@@ -1238,7 +1238,7 @@ fn test_json_to_arrow_with_list_int64() {
     json!({"numbers": [6]}), // At least one element
   ];
 
-  let (arrays, schema) = json_to_arrow(&json_data).unwrap();
+  let (arrays, schema) = json_to_arrow(&json_data, None).unwrap();
   assert_eq!(schema.fields().len(), 1);
   assert_eq!(arrays.len(), 1);
   assert_eq!(arrays[0].len(), 3);
@@ -1252,7 +1252,7 @@ fn test_json_to_arrow_with_list_float64() {
     json!({"scores": [85.0]}), // At least one element
   ];
 
-  let (arrays, schema) = json_to_arrow(&json_data).unwrap();
+  let (arrays, schema) = json_to_arrow(&json_data, None).unwrap();
   assert_eq!(schema.fields().len(), 1);
   assert_eq!(arrays.len(), 1);
   assert_eq!(arrays[0].len(), 3);
@@ -1266,7 +1266,7 @@ fn test_json_to_arrow_with_list_boolean() {
     json!({"flags": [true]}), // At least one element
   ];
 
-  let (arrays, schema) = json_to_arrow(&json_data).unwrap();
+  let (arrays, schema) = json_to_arrow(&json_data, None).unwrap();
   assert_eq!(schema.fields().len(), 1);
   assert_eq!(arrays.len(), 1);
   assert_eq!(arrays[0].len(), 3);
@@ -1282,7 +1282,7 @@ fn test_json_to_arrow_with_empty_array() {
     json!({"items": [2]}), // More content
   ];
   // This should work because the first array determines the type
-  let (arrays, schema) = json_to_arrow(&json_data).unwrap();
+  let (arrays, schema) = json_to_arrow(&json_data, None).unwrap();
   assert_eq!(schema.fields().len(), 1);
   assert_eq!(arrays.len(), 1);
 }
@@ -1296,7 +1296,7 @@ fn test_json_to_arrow_with_missing_list_values() {
     json!({"tags": ["d", "e"]}), // Valid array
   ];
 
-  let (arrays, schema) = json_to_arrow(&json_data).unwrap();
+  let (arrays, schema) = json_to_arrow(&json_data, None).unwrap();
   assert_eq!(schema.fields().len(), 1);
   assert_eq!(arrays.len(), 1);
   assert_eq!(arrays[0].len(), 3);
@@ -1310,7 +1310,7 @@ fn test_json_to_arrow_type_promotion_int64_to_float64() {
     json!({"value": 3}),   // Int64
   ];
 
-  let (_arrays, schema) = json_to_arrow(&json_data).unwrap();
+  let (_arrays, schema) = json_to_arrow(&json_data, None).unwrap();
   assert_eq!(schema.fields().len(), 1);
   // Should be Float64 after promotion
   assert!(matches!(schema.field(0).data_type(), DataType::Float64));
@@ -1324,7 +1324,7 @@ fn test_json_to_arrow_type_promotion_float64_to_float64() {
     json!({"value": 3.7}), // Float64
   ];
 
-  let (_arrays, schema) = json_to_arrow(&json_data).unwrap();
+  let (_arrays, schema) = json_to_arrow(&json_data, None).unwrap();
   assert_eq!(schema.fields().len(), 1);
   assert!(matches!(schema.field(0).data_type(), DataType::Float64));
 }
@@ -1333,7 +1333,7 @@ fn test_json_to_arrow_type_promotion_float64_to_float64() {
 fn test_json_to_arrow_with_null_values_in_lists() {
   let json_data = vec![json!({"items": [1, 2, null]}), json!({"items": [3]})];
 
-  let (arrays, schema) = json_to_arrow(&json_data).unwrap();
+  let (arrays, schema) = json_to_arrow(&json_data, None).unwrap();
   assert_eq!(schema.fields().len(), 1);
   assert_eq!(arrays.len(), 1);
 }
@@ -1342,7 +1342,7 @@ fn test_json_to_arrow_with_null_values_in_lists() {
 fn test_json_to_arrow_with_mixed_list_types() {
   // Test with arrays that have content to avoid Null type
   let json_data = vec![json!({"items": [1, 2]}), json!({"items": [3]})];
-  let (_arrays, schema) = json_to_arrow(&json_data).unwrap();
+  let (_arrays, schema) = json_to_arrow(&json_data, None).unwrap();
   assert_eq!(schema.fields().len(), 1);
   // Should result in List<Int64> type
   assert!(matches!(schema.field(0).data_type(), DataType::List(_)));
@@ -1355,7 +1355,7 @@ fn test_json_to_arrow_resolve_conflict_same_type() {
     json!({"value": 1}), // Int64
     json!({"value": 2}), // Int64 - same type
   ];
-  let (_arrays, schema) = json_to_arrow(&json_data).unwrap();
+  let (_arrays, schema) = json_to_arrow(&json_data, None).unwrap();
   assert_eq!(schema.fields().len(), 1);
   assert!(matches!(schema.field(0).data_type(), DataType::Int64));
 }
@@ -1367,7 +1367,7 @@ fn test_json_to_arrow_resolve_conflict_different_type() {
     json!({"value": "string"}), // Utf8
     json!({"value": 123}),      // Int64 - different type, should prefer new
   ];
-  let (_arrays, schema) = json_to_arrow(&json_data).unwrap();
+  let (_arrays, schema) = json_to_arrow(&json_data, None).unwrap();
   assert_eq!(schema.fields().len(), 1);
   // Should prefer the new type (Int64) or handle conflict
   assert!(matches!(schema.field(0).data_type(), DataType::Int64 | DataType::Utf8));
@@ -1381,7 +1381,7 @@ fn test_json_to_arrow_with_null_value() {
     json!({"items": [1]}),          // Array with values
   ];
   // This may create List<Null> which isn't supported, but tests the path
-  let result = json_to_arrow(&json_data);
+  let result = json_to_arrow(&json_data, None);
   // May fail due to Null type, but tests the code path
   let _ = result;
 }
@@ -1393,7 +1393,7 @@ fn test_json_to_arrow_with_unsupported_datatype() {
     json!({"value": json!({"nested": "object"})}), // Object - unsupported
     json!({"value": null}),                        // Null - unsupported
   ];
-  let result = json_to_arrow(&json_data);
+  let result = json_to_arrow(&json_data, None);
   // Should handle unsupported types
   assert!(result.is_ok() || result.is_err());
 }
@@ -1406,7 +1406,7 @@ fn test_json_to_arrow_empty_array_first() {
     json!({"items": [1]}), // Then with content
   ];
   // First empty array creates List<Null>, but second should determine type
-  let result = json_to_arrow(&json_data);
+  let result = json_to_arrow(&json_data, None);
   // May fail or succeed depending on implementation
   let _ = result;
 }
