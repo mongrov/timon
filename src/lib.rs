@@ -41,6 +41,17 @@ pub mod android {
       .map_err(|e| format!("Failed to create Java String from Rust String: {:?}", e))
   }
 
+  /// Returns a JString for the given message. If JNI fails, tries a short fallback so callers
+  /// receive JSON with an "error" key instead of null (avoids NPE on the Java/Kotlin side).
+  fn return_jstring_or_fallback(env: &mut JNIEnv, msg: &str) -> jstring {
+    if let Ok(j) = rust_string_to_jstring(env, msg) {
+      return j;
+    }
+    eprintln!("JNI: failed to create string for response, using fallback");
+    const FALLBACK: &str = r#"{"error":"JNI string conversion failed"}"#;
+    rust_string_to_jstring(env, FALLBACK).unwrap_or(std::ptr::null_mut())
+  }
+
   // ******************************** File Storage ********************************
   #[no_mangle]
   pub unsafe extern "C" fn nativeInitTimon(
@@ -55,7 +66,7 @@ pub mod android {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting storage_path: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
     // Convert `bucket_interval` from Java `int` to Rust `u32`
@@ -64,24 +75,18 @@ pub mod android {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting username: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
 
     match init_timon(&rust_storage_path, rust_bucket_interval, &rust_username) {
       Ok(result) => {
         let json_string = result.to_string();
-        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
-          eprintln!("Error creating success string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &json_string)
       }
       Err(err) => {
         let err_message = format!("Failed to initialize Timon: {:?}", err);
-        rust_string_to_jstring(&mut env, &err_message).unwrap_or_else(|e| {
-          eprintln!("Error creating error string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &err_message)
       }
     }
   }
@@ -92,24 +97,18 @@ pub mod android {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting db_name: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
 
     match create_database(&rust_db_name) {
       Ok(result) => {
         let json_string = result.to_string();
-        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
-          eprintln!("Error creating success string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &json_string)
       }
       Err(err) => {
         let err_message = format!("Failed to create database: {:?}", err);
-        rust_string_to_jstring(&mut env, &err_message).unwrap_or_else(|e| {
-          eprintln!("Error creating error string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &err_message)
       }
     }
   }
@@ -120,38 +119,32 @@ pub mod android {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting db_name: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
     let rust_table_name = match jstring_to_rust_string(&mut env, &table_name) {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting table_name: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
     let rust_schema = match jstring_to_rust_string(&mut env, &schema) {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting schema: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
 
     match create_table(&rust_db_name, &rust_table_name, &rust_schema) {
       Ok(result) => {
         let json_string = result.to_string();
-        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
-          eprintln!("Error creating success string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &json_string)
       }
       Err(err) => {
         let err_message = format!("Failed to create table: {:?}", err);
-        rust_string_to_jstring(&mut env, &err_message).unwrap_or_else(|e| {
-          eprintln!("Error creating error string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &err_message)
       }
     }
   }
@@ -161,17 +154,11 @@ pub mod android {
     match list_databases() {
       Ok(result) => {
         let json_string = result.to_string();
-        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
-          eprintln!("Error creating success string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &json_string)
       }
       Err(err) => {
         let err_message = format!("Failed to list databases: {:?}", err);
-        rust_string_to_jstring(&mut env, &err_message).unwrap_or_else(|e| {
-          eprintln!("Error creating error string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &err_message)
       }
     }
   }
@@ -182,24 +169,18 @@ pub mod android {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting db_name: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
 
     match list_tables(&rust_db_name) {
       Ok(result) => {
         let json_string = result.to_string();
-        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
-          eprintln!("Error creating success string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &json_string)
       }
       Err(err) => {
         let err_message = format!("Failed to list tables: {:?}", err);
-        rust_string_to_jstring(&mut env, &err_message).unwrap_or_else(|e| {
-          eprintln!("Error creating error string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &err_message)
       }
     }
   }
@@ -210,24 +191,18 @@ pub mod android {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting db_name: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
 
     match delete_database(&rust_db_name) {
       Ok(result) => {
         let json_string = result.to_string();
-        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
-          eprintln!("Error creating success string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &json_string)
       }
       Err(err) => {
         let err_message = format!("Failed to delete database: {:?}", err);
-        rust_string_to_jstring(&mut env, &err_message).unwrap_or_else(|e| {
-          eprintln!("Error creating error string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &err_message)
       }
     }
   }
@@ -238,31 +213,25 @@ pub mod android {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting db_name: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
     let rust_table_name = match jstring_to_rust_string(&mut env, &table_name) {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting table_name: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
 
     match delete_table(&rust_db_name, &rust_table_name) {
       Ok(result) => {
         let json_string = result.to_string();
-        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
-          eprintln!("Error creating success string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &json_string)
       }
       Err(err) => {
         let err_message = format!("Failed to delete table: {:?}", err);
-        rust_string_to_jstring(&mut env, &err_message).unwrap_or_else(|e| {
-          eprintln!("Error creating error string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &err_message)
       }
     }
   }
@@ -273,38 +242,32 @@ pub mod android {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting db_name: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
     let rust_table_name = match jstring_to_rust_string(&mut env, &table_name) {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting table_name: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
     let rust_json_data = match jstring_to_rust_string(&mut env, &json_data) {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting json_data: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
 
     match insert(&rust_db_name, &rust_table_name, &rust_json_data) {
       Ok(result) => {
         let json_string = result.to_string();
-        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
-          eprintln!("Error creating success string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &json_string)
       }
       Err(e) => {
         let error_message = format!("Error writing JSON data to Parquet file: {:?}", e);
-        rust_string_to_jstring(&mut env, &error_message).unwrap_or_else(|e| {
-          eprintln!("Error creating error string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &error_message)
       }
     }
   }
@@ -357,14 +320,14 @@ pub mod android {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting db_name: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
     let rust_sql_query = match jstring_to_rust_string(&mut env, &sql_query) {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting sql_query: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
     let rust_username: Option<String> = if username.is_null() {
@@ -374,7 +337,7 @@ pub mod android {
         Ok(s) => Some(s),
         Err(e) => {
           eprintln!("Error converting username: {}", e);
-          return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+          return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
         }
       }
     };
@@ -386,17 +349,11 @@ pub mod android {
     match RUNTIME.block_on(query(&rust_db_name, &rust_sql_query, rust_username.as_deref(), rust_limit_partitions)) {
       Ok(result) => {
         let json_string = result.to_string();
-        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
-          eprintln!("Error creating success string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &json_string)
       }
       Err(e) => {
         let error_message = format!("Error querying Parquet files: {:?}", e);
-        rust_string_to_jstring(&mut env, &error_message).unwrap_or_else(|e| {
-          eprintln!("Error creating error string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &error_message)
       }
     }
   }
@@ -413,42 +370,42 @@ pub mod android {
     bucket_region: JString,
   ) -> jstring {
     use zeroize::Zeroize;
-    
+
     let rust_bucket_endpoint = match jstring_to_rust_string(&mut env, &bucket_endpoint) {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting bucket_endpoint: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
     let rust_bucket_name = match jstring_to_rust_string(&mut env, &bucket_name) {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting bucket_name: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
-    
+
     // Create mutable owned copies for zeroization
     let mut rust_access_key_id = match jstring_to_rust_string(&mut env, &access_key_id) {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting access_key_id: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
     let mut rust_secret_access_key = match jstring_to_rust_string(&mut env, &secret_access_key) {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting secret_access_key: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
     let rust_bucket_region = match jstring_to_rust_string(&mut env, &bucket_region) {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting bucket_region: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
 
@@ -468,17 +425,11 @@ pub mod android {
     match result {
       Ok(result_value) => {
         let json_string = result_value.to_string();
-        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
-          eprintln!("Error creating success string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &json_string)
       }
       Err(err) => {
         let err_message = format!("Failed to initialize S3 bucket: {:?}", err);
-        rust_string_to_jstring(&mut env, &err_message).unwrap_or_else(|e| {
-          eprintln!("Error creating error string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &err_message)
       }
     }
   }
@@ -496,14 +447,14 @@ pub mod android {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting db_name: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
     let rust_table_name = match jstring_to_rust_string(&mut env, &table_name) {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting table_name: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
 
@@ -512,14 +463,14 @@ pub mod android {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error getting start date: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
     let rust_end = match get_date_range_value(&mut env, &date_range, "end") {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error getting end date: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
     rust_date_range.insert("start_date", &rust_start);
@@ -532,7 +483,7 @@ pub mod android {
         Ok(s) => Some(s),
         Err(e) => {
           eprintln!("Error converting username: {}", e);
-          return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+          return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
         }
       }
     };
@@ -545,17 +496,11 @@ pub mod android {
     )) {
       Ok(result) => {
         let json_string = result.to_string();
-        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
-          eprintln!("Error creating success string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &json_string)
       }
       Err(err) => {
         let err_message = format!("Failed fetch s3 parquet files: {:?}", err);
-        rust_string_to_jstring(&mut env, &err_message).unwrap_or_else(|e| {
-          eprintln!("Error creating error string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &err_message)
       }
     }
   }
@@ -566,31 +511,25 @@ pub mod android {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting db_name: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
     let rust_table_name = match jstring_to_rust_string(&mut env, &table_name) {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting table_name: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
 
     match RUNTIME.block_on(cloud_sink_parquet(&rust_db_name, &rust_table_name)) {
       Ok(result) => {
         let json_string = result.to_string();
-        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
-          eprintln!("Error creating success string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &json_string)
       }
       Err(err) => {
         let err_message = format!("Failed sink parquet files: {:?}", err);
-        rust_string_to_jstring(&mut env, &err_message).unwrap_or_else(|e| {
-          eprintln!("Error creating error string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &err_message)
       }
     }
   }
@@ -608,21 +547,21 @@ pub mod android {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting username: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
     let rust_db_name = match jstring_to_rust_string(&mut env, &db_name) {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting db_name: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
     let rust_table_name = match jstring_to_rust_string(&mut env, &table_name) {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error converting table_name: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
 
@@ -631,14 +570,14 @@ pub mod android {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error getting start date: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
     let rust_end = match get_date_range_value(&mut env, &date_range, "end") {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error getting end date: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
     rust_date_range.insert("start_date", &rust_start);
@@ -647,17 +586,11 @@ pub mod android {
     match RUNTIME.block_on(cloud_fetch_parquet(&rust_username, &rust_db_name, &rust_table_name, rust_date_range)) {
       Ok(result) => {
         let json_string = result.to_string();
-        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
-          eprintln!("Error creating success string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &json_string)
       }
       Err(err) => {
         let err_message = format!("Failed fetch s3 parquet files: {:?}", err);
-        rust_string_to_jstring(&mut env, &err_message).unwrap_or_else(|e| {
-          eprintln!("Error creating error string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &err_message)
       }
     }
   }
@@ -682,8 +615,7 @@ pub mod android {
       Ok(len) => len,
       Err(e) => {
         eprintln!("Error getting usernames array length: {:?}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "Failed to get usernames array length: {:?}"}}"#, e))
-          .unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "Failed to get usernames array length: {:?}"}}"#, e));
       }
     };
     for i in 0..usernames_length {
@@ -691,11 +623,10 @@ pub mod android {
         Ok(elem) => elem,
         Err(e) => {
           eprintln!("Error getting usernames array element at index {}: {:?}", i, e);
-          return rust_string_to_jstring(
+          return return_jstring_or_fallback(
             &mut env,
             &format!(r#"{{"error": "Failed to get usernames array element at index {}: {:?}"}}"#, i, e),
-          )
-          .unwrap_or(std::ptr::null_mut());
+          );
         }
       };
       let j_string: JString = element.into();
@@ -703,8 +634,7 @@ pub mod android {
         Ok(s) => s,
         Err(e) => {
           eprintln!("Error converting username at index {}: {}", i, e);
-          return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "Failed to convert username at index {}: {}"}}"#, i, e))
-            .unwrap_or(std::ptr::null_mut());
+          return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "Failed to convert username at index {}: {}"}}"#, i, e));
         }
       };
       rust_usernames.push(rust_string);
@@ -716,8 +646,7 @@ pub mod android {
       Ok(len) => len,
       Err(e) => {
         eprintln!("Error getting db_names array length: {:?}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "Failed to get db_names array length: {:?}"}}"#, e))
-          .unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "Failed to get db_names array length: {:?}"}}"#, e));
       }
     };
     for i in 0..db_names_length {
@@ -725,11 +654,10 @@ pub mod android {
         Ok(elem) => elem,
         Err(e) => {
           eprintln!("Error getting db_names array element at index {}: {:?}", i, e);
-          return rust_string_to_jstring(
+          return return_jstring_or_fallback(
             &mut env,
             &format!(r#"{{"error": "Failed to get db_names array element at index {}: {:?}"}}"#, i, e),
-          )
-          .unwrap_or(std::ptr::null_mut());
+          );
         }
       };
       let j_string: JString = element.into();
@@ -737,8 +665,7 @@ pub mod android {
         Ok(s) => s,
         Err(e) => {
           eprintln!("Error converting db_name at index {}: {}", i, e);
-          return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "Failed to convert db_name at index {}: {}"}}"#, i, e))
-            .unwrap_or(std::ptr::null_mut());
+          return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "Failed to convert db_name at index {}: {}"}}"#, i, e));
         }
       };
       rust_db_names.push(rust_string);
@@ -750,8 +677,7 @@ pub mod android {
       Ok(len) => len,
       Err(e) => {
         eprintln!("Error getting table_names array length: {:?}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "Failed to get table_names array length: {:?}"}}"#, e))
-          .unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "Failed to get table_names array length: {:?}"}}"#, e));
       }
     };
     for i in 0..table_names_length {
@@ -759,11 +685,10 @@ pub mod android {
         Ok(elem) => elem,
         Err(e) => {
           eprintln!("Error getting table_names array element at index {}: {:?}", i, e);
-          return rust_string_to_jstring(
+          return return_jstring_or_fallback(
             &mut env,
             &format!(r#"{{"error": "Failed to get table_names array element at index {}: {:?}"}}"#, i, e),
-          )
-          .unwrap_or(std::ptr::null_mut());
+          );
         }
       };
       let j_string: JString = element.into();
@@ -771,8 +696,7 @@ pub mod android {
         Ok(s) => s,
         Err(e) => {
           eprintln!("Error converting table_name at index {}: {}", i, e);
-          return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "Failed to convert table_name at index {}: {}"}}"#, i, e))
-            .unwrap_or(std::ptr::null_mut());
+          return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "Failed to convert table_name at index {}: {}"}}"#, i, e));
         }
       };
       rust_table_names.push(rust_string);
@@ -784,14 +708,14 @@ pub mod android {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error getting start date: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
     let rust_end = match get_date_range_value(&mut env, &date_range, "end") {
       Ok(s) => s,
       Err(e) => {
         eprintln!("Error getting end date: {}", e);
-        return rust_string_to_jstring(&mut env, &format!(r#"{{"error": "{}"}}"#, e)).unwrap_or(std::ptr::null_mut());
+        return return_jstring_or_fallback(&mut env, &format!(r#"{{"error": "{}"}}"#, e));
       }
     };
     rust_date_range.insert("start_date", &rust_start);
@@ -810,17 +734,11 @@ pub mod android {
     )) {
       Ok(result) => {
         let json_string = result.to_string();
-        rust_string_to_jstring(&mut env, &json_string).unwrap_or_else(|e| {
-          eprintln!("Error creating success string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &json_string)
       }
       Err(err) => {
         let err_message = format!("Failed to batch fetch s3 parquet files: {:?}", err);
-        rust_string_to_jstring(&mut env, &err_message).unwrap_or_else(|e| {
-          eprintln!("Error creating error string: {}", e);
-          std::ptr::null_mut()
-        })
+        return_jstring_or_fallback(&mut env, &err_message)
       }
     }
   }
@@ -1019,7 +937,8 @@ pub mod ios {
 
   // Helper function to convert Rust strings to C strings
   fn string_to_c_str(s: String) -> *mut c_char {
-    CString::new(s).unwrap().into_raw()
+    let safe = s.replace('\0', "");
+    CString::new(safe).expect("CString::new cannot fail after removing null bytes").into_raw()
   }
 
   #[no_mangle]

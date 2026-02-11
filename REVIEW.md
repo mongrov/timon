@@ -766,3 +766,60 @@ Overall, Timon is a well-designed library that effectively leverages DataFusion 
 - Potential deadlock in metadata cache access (consolidated two locks into one)
 
 The main areas for improvement are in query path resolution (merging default and group paths), documentation, handling edge cases around data synchronization between paths, and DatabaseManager lifecycle management.
+
+---
+
+## 10. Code Review: JNI/FFI Library Usage (2025)
+
+This section summarizes findings from a code review focused on using Timon as a library from mobile apps via JNI (Android) and FFI (iOS).
+
+### 10.1 JNI/FFI Interface
+
+#### ✅ Fixed: iOS `string_to_c_str` panic on embedded null bytes
+- **Location**: `lib.rs` (iOS module) – `string_to_c_str(s: String)` used `CString::new(s).unwrap()`.
+- **Problem**: `CString::new` panics if the string contains an embedded `\0`. Query results or error messages that include user-controlled or binary data could trigger this and crash the iOS app.
+- **Fix**: Strings are sanitized by stripping null bytes before creating the `CString`, so the FFI layer no longer panics on arbitrary content.
+
+#### ✅ JNI: Null return on failure (FIXED)
+- **Location**: All JNI native methods that return `jstring` (e.g. `nativeInitTimon`, `nativeCreateDatabase`, …).
+- **Previous behavior**: When `rust_string_to_jstring()` failed, the native method returned `null`, which could cause NPE on the Java/Kotlin side.
+- **Fix**: Introduced `return_jstring_or_fallback(env, msg)` which tries to create a JString for the given message; on failure it tries a static fallback `{"error":"JNI string conversion failed"}`. All JNI return paths now use this helper, so callers receive a non-null JSON string (with an `"error"` key when something went wrong) except in the extreme case where even the fallback cannot be created.
+- **Recommendation**: The Android bridge can still check for the presence of `"error"` in the JSON to detect failures; null is now only returned in rare JNI failure cases.
+
+#### ⚠️ JNI/Android: Blocking the calling thread
+- **Location**: `RUNTIME.block_on(query(...))`, `RUNTIME.block_on(cloud_sync_parquet(...))`, and similar in JNI and iOS.
+- **Behavior**: Async operations are run via `block_on` on the thread that enters the native method.
+- **Impact**: If the app calls these from the Android main (UI) thread, the thread is blocked until the operation completes and can cause ANR. Same idea on iOS if called from the main thread.
+- **Recommendation**: Call long-running operations (query, cloud_sync_parquet, cloud_sink_parquet, cloud_fetch_parquet, etc.) from a background thread or coroutine (e.g. Kotlin `Dispatchers.IO` or equivalent). Do not call them from the main/UI thread.
+- **Note**: A callback-based async API was tried and reverted because it caused app crashes. The app must ensure these native methods are invoked only from a background thread.
+
+### 10.2 API Semantics and Multi-User
+
+#### ⚠️ Username consistency: “default” vs first manager
+- **Location**: `mod.rs` – `get_database_manager(None)` and all APIs that use it without a username.
+- **Behavior**:
+  - `get_database_manager(Some("alice"))` returns the manager for `"alice"` (or auto-creates it from `INIT_PARAMS`).
+  - `get_database_manager(None)` first looks for a manager with key `"default"`. If none exists, it returns **the first entry** in the `HashMap` (arbitrary iteration order).
+- **APIs using `get_database_manager(None)`**: `create_database`, `create_table`, `list_databases`, `list_tables`, `delete_database`, `delete_table`, `insert`, `init_bucket`, `cloud_sink_parquet`, and related paths.
+- **APIs using username**: `query(..., username)`, `cloud_sync_parquet(..., username)`, `cloud_fetch_parquet(username, ...)`.
+- **Impact**: In a multi-user setup (e.g. `init_timon(path, interval, "alice")` and `init_timon(path, interval, "bob")`), operations that do **not** take a username (create_database, insert, init_bucket, etc.) will run against whichever manager is returned for `None` (either `"default"` if present, or an arbitrary one). That can create or modify data for the “wrong” user from the app’s perspective. Only `query` and some cloud APIs are explicitly per-username.
+- **Recommendation**: Either (1) document that when multiple usernames are in use, the app must call `init_timon(..., "default")` and use that as the single “current” user for all non-query operations, or (2) extend the public API so that create_database, create_table, insert, delete_*, list_*, and init_bucket accept an optional username and pass it through to `get_database_manager(username)` so behavior is consistent and predictable for multi-user.
+
+### 10.3 Logic and Correctness
+
+#### Single remaining `expect()` in production code
+- **Location**: `db_manager.rs` (around line 381) – fallback regex `Regex::new(r#"^$"#).expect("...")` when the main validation regex fails to compile.
+- **Status**: Already noted in REVIEW as acceptable (compile-time constant pattern). No change required; just be aware it is the only remaining panic path in production engine code.
+
+#### Query path and default vs group (unchanged)
+- **Issue #64**: Queries use either the default path or the group path per username, not both. Data in the other path can be missed. Documented in REVIEW; no code change in this review.
+
+### 10.4 Summary for Mobile Integration
+
+| Area              | Status / Action |
+|-------------------|------------------|
+| iOS panic on `\0` | Fixed in `string_to_c_str`. |
+| JNI null return   | Fixed: `return_jstring_or_fallback` returns error JSON instead of null. |
+| Blocking main thread | Call query/cloud from background thread only (async callback API reverted due to crashes). |
+| Multi-user semantics | Document or extend API for username on all ops. |
+| Panics in engine  | Only the documented regex fallback remains. |
