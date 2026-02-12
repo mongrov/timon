@@ -360,30 +360,37 @@ impl DatabaseManager {
     }
   }
 
-  /// Validates database or table name to prevent path traversal attacks
-  /// Only allows alphanumeric characters and underscores (A-Z, a-z, 0-9, _)
+  /// Fallback validation without regex (used when the static regex fails to compile).
+  #[inline]
+  fn name_matches_pattern(name: &str) -> bool {
+    name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+  }
+
+  /// Validates database or table name to prevent path traversal attacks.
+  /// Only allows alphanumeric characters and underscores (A-Z, a-z, 0-9, _).
   fn validate_name(name: &str, name_type: NameType) -> Result<(), DataFusionError> {
     // Check for empty names
     if name.is_empty() {
       return Err(DataFusionError::Plan(format!("{} name cannot be empty", name_type)));
     }
 
-    // Use static regex to ensure name contains only alphanumeric characters and underscores (A-Z, a-z, 0-9, _)
-    static VALID_PATTERN: OnceLock<Regex> = OnceLock::new();
+    // Use static regex when available; if it fails to compile (e.g. broken env), fall back to manual check (no panic).
+    static VALID_PATTERN: OnceLock<Option<Regex>> = OnceLock::new();
     let valid_pattern = VALID_PATTERN.get_or_init(|| {
-      Regex::new(r#"^[a-zA-Z0-9_]+$"#).unwrap_or_else(|e| {
-        eprintln!("CRITICAL: Failed to compile regex pattern: {:?}", e);
-        // This should never fail, but if it does, we'll use a pattern that matches nothing
-        Regex::new(r#"^$"#).unwrap_or_else(|fallback_e| {
-          eprintln!("CRITICAL: Failed to compile fallback regex pattern: {:?}", fallback_e);
-          // Return a regex that matches nothing by using an impossible pattern
-          // This is a last resort - if this fails, the program will panic, but it should never happen
-          Regex::new(r#"^$"#).expect("Failed to compile fallback regex pattern - this should never happen")
-        })
-      })
+      Regex::new(r#"^[a-zA-Z0-9_]+$"#).map_or_else(
+        |e| {
+          eprintln!("CRITICAL: Failed to compile validation regex, using fallback: {:?}", e);
+          None
+        },
+        Some,
+      )
     });
 
-    if !valid_pattern.is_match(name) {
+    let ok = match valid_pattern {
+      Some(re) => re.is_match(name),
+      None => Self::name_matches_pattern(name),
+    };
+    if !ok {
       return Err(DataFusionError::Plan(format!(
         "{} name '{}' is not valid. Only alphanumeric characters and underscores (A-Z, a-z, 0-9, _) are allowed",
         name_type, name

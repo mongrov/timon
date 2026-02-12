@@ -807,9 +807,9 @@ This section summarizes findings from a code review focused on using Timon as a 
 
 ### 10.3 Logic and Correctness
 
-#### Single remaining `expect()` in production code
-- **Location**: `db_manager.rs` (around line 381) – fallback regex `Regex::new(r#"^$"#).expect("...")` when the main validation regex fails to compile.
-- **Status**: Already noted in REVIEW as acceptable (compile-time constant pattern). No change required; just be aware it is the only remaining panic path in production engine code.
+#### Single remaining `expect()` in production code (fixed)
+- **Was**: `db_manager.rs` – fallback regex `Regex::new(r#"^$"#).expect("...")` when the main validation regex failed to compile.
+- **Fix**: Removed the panic path. The static regex is now `OnceLock<Option<Regex>>`. If the main pattern fails to compile, we use a regex-free fallback `name_matches_pattern()` (manual `is_ascii_alphanumeric() || '_'` check). No remaining panic in this path.
 
 #### Query path and default vs group (unchanged)
 - **Issue #64**: Queries use either the default path or the group path per username, not both. Data in the other path can be missed. Documented in REVIEW; no code change in this review.
@@ -822,4 +822,4 @@ This section summarizes findings from a code review focused on using Timon as a 
 | JNI null return   | Fixed: `return_jstring_or_fallback` returns error JSON instead of null. |
 | Blocking main thread | Call query/cloud from background thread only (async callback API reverted due to crashes). |
 | Multi-user semantics | Document or extend API for username on all ops. |
-| Panics in engine  | Only the documented regex fallback remains. |
+| Panics in engine  | Removed: regex fallback now uses manual validation (no panic). |
