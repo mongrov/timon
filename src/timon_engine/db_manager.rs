@@ -701,7 +701,13 @@ impl DatabaseManager {
     // Process each file atomically: lock -> read -> merge -> write -> unlock
     for (file_path, new_records) in records_by_file {
       let file_path_clone = file_path.clone();
-      if let Err(e) = Self::atomic_file_insert(Path::new(&file_path_clone), &new_records, &build_key, Some(&schema_field_order)) {
+      if let Err(e) = Self::atomic_file_insert(
+        Path::new(&file_path_clone),
+        &new_records,
+        &build_key,
+        Some(&schema_field_order),
+        Some(&table_schema),
+      ) {
         // Log the error but don't fail the entire insert operation
         // This allows other files to be processed even if one fails
         eprintln!("Error in atomic_file_insert for '{}': {}", file_path_clone, e);
@@ -1027,6 +1033,7 @@ impl DatabaseManager {
     new_records: &[Value],
     build_key: &dyn Fn(&Value) -> String,
     preferred_field_order: Option<&[String]>,
+    table_schema: Option<&Value>,
   ) -> Result<(), Box<dyn Error>> {
     // Ensure parent directory exists
     if let Some(parent) = file_path.parent() {
@@ -1115,7 +1122,7 @@ impl DatabaseManager {
       );
     }
 
-    let (arrays, schema) = json_to_arrow(&existing_records, preferred_field_order)
+    let (arrays, schema) = json_to_arrow(&existing_records, preferred_field_order, table_schema)
       .map_err(|e| format!("Failed to convert records to arrow format for '{}': {}", file_path.display(), e))?;
 
     // Write while holding the lock

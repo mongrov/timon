@@ -265,7 +265,14 @@ pub fn row_to_json(row: &Row) -> serde_json::Value {
   serde_json::Value::Object(json_map)
 }
 
-pub fn json_to_arrow(json_values: &[Value], preferred_field_order: Option<&[String]>) -> Result<(Vec<ArrayRef>, Schema), Box<dyn std::error::Error>> {
+/// Convert JSON records to Arrow arrays and schema. When `table_schema` is provided (from table creation),
+/// each field's nullability is taken from `"required"`: `required: false` or omitted => nullable; `required: true` => not nullable.
+/// That schema is written into Parquet so DESCRIBE and readers see the correct is_nullable.
+pub fn json_to_arrow(
+  json_values: &[Value],
+  preferred_field_order: Option<&[String]>,
+  table_schema: Option<&Value>,
+) -> Result<(Vec<ArrayRef>, Schema), Box<dyn std::error::Error>> {
   fn resolve_data_type_conflict(current: Option<DataType>, new_type: DataType) -> DataType {
     match (current, new_type) {
       (None, new) => new,
@@ -331,9 +338,18 @@ pub fn json_to_arrow(json_values: &[Value], preferred_field_order: Option<&[Stri
     names
   };
 
+  let table_obj = table_schema.and_then(Value::as_object);
   let fields: Vec<ArrowField> = field_names
     .iter()
-    .map(|key| ArrowField::new(key, field_types[key].clone(), false))
+    .map(|key| {
+      let nullable = table_obj
+        .and_then(|o| o.get(key))
+        .and_then(|f| f.get("required"))
+        .and_then(Value::as_bool)
+        .map(|required| !required)
+        .unwrap_or(true); // default: not required => nullable
+      ArrowField::new(key, field_types[key].clone(), nullable)
+    })
     .collect();
   let schema = Schema::new(fields);
 
