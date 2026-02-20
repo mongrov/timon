@@ -1,5 +1,5 @@
 use super::db_manager::DatabaseManager;
-use super::errors::TimonError;
+use super::errors::{TimonError, TimonErrorKind};
 use super::helpers::{
   cleanup_old_files, combine_unique_batches, filter_files_by_date_range, get_local_file_modified_time, get_property_fields, read_parquet_batches,
 };
@@ -441,12 +441,10 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
               }
             }
             Err(e) => {
-              eprintln!("⚠️ Schema compatibility error during merge for '{}': {}", s3_filename, e);
-              eprintln!("Skipping merge and uploading local file as-is to avoid data corruption.");
-              // Upload the local file without merging to prevent data loss
-              self.upload_to_bucket(&file_path.to_string_lossy(), &target_path).await?;
-              println!("Successfully uploaded local file (without merge): '{}'", file_path.to_string_lossy());
-              return Ok(None);
+              return Err(Box::new(TimonError::new(
+                TimonErrorKind::SchemaValidationFailed,
+                format!("Schema compatibility error during merge for '{}': {}", s3_filename, e),
+              )));
             }
           }
         }
