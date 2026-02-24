@@ -35,12 +35,23 @@ pub struct TimonResponse {
 
 // Store separate DatabaseManager instances per username
 // This allows each username to have its own isolated SessionContext
-static DATABASE_MANAGERS: LazyLock<Arc<Mutex<HashMap<String, DatabaseManager>>>> = LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
+static DATABASE_MANAGERS: LazyLock<Mutex<HashMap<String, DatabaseManager>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 // Store initialization parameters to auto-create managers for new usernames
-static INIT_PARAMS: LazyLock<Arc<Mutex<Option<(String, u32)>>>> = LazyLock::new(|| Arc::new(Mutex::new(None)));
-static CLOUD_STORAGE_MANAGER: LazyLock<Arc<Mutex<Option<Arc<CloudStorageManager<AmazonS3>>>>>> = LazyLock::new(|| Arc::new(Mutex::new(None)));
+static INIT_PARAMS: LazyLock<Mutex<Option<(String, u32)>>> = LazyLock::new(|| Mutex::new(None));
+static CLOUD_STORAGE_MANAGER: LazyLock<Mutex<Option<Arc<CloudStorageManager<AmazonS3>>>>> = LazyLock::new(|| Mutex::new(None));
 
 fn get_database_manager(username: Option<&str>) -> TimonResult<DatabaseManager> {
+  // Global lock order: INIT_PARAMS before DATABASE_MANAGERS (matches init_timon and avoids deadlock)
+  let init_params: Option<(String, u32)> = {
+    let guard = INIT_PARAMS.lock().map_err(|e| {
+      TimonError::new(
+        TimonErrorKind::LockAcquisitionFailed,
+        format!("Failed to acquire init params lock: {}", e),
+      )
+    })?;
+    guard.clone()
+  };
+
   let mut managers_guard = DATABASE_MANAGERS.lock().map_err(|e| {
     TimonError::new(
       TimonErrorKind::LockAcquisitionFailed,
@@ -63,18 +74,9 @@ fn get_database_manager(username: Option<&str>) -> TimonResult<DatabaseManager> 
     }
   }
 
-  // Manager doesn't exist - try to auto-create it using stored init params
   if let Some(username_str) = username {
-    let init_params_guard = INIT_PARAMS.lock().map_err(|e| {
-      TimonError::new(
-        TimonErrorKind::LockAcquisitionFailed,
-        format!("Failed to acquire init params lock: {}", e),
-      )
-    })?;
-
-    if let Some((storage_path, bucket_interval)) = init_params_guard.as_ref() {
-      // Auto-create manager for this username
-      let new_manager = DatabaseManager::new(storage_path, *bucket_interval, username_str);
+    if let Some((ref storage_path, bucket_interval)) = init_params {
+      let new_manager = DatabaseManager::new(storage_path, bucket_interval, username_str);
       managers_guard.insert(username_str.to_string(), new_manager.clone());
       return Ok(new_manager);
     }
@@ -359,10 +361,7 @@ pub fn init_bucket(
 ) -> TimonResult<Value> {
   // Security check: Detect debugging/tampering
   if let Err(e) = security::security::perform_security_checks() {
-    return Err(TimonError::new(
-      TimonErrorKind::SecurityError,
-      e,
-    ));
+    return Err(TimonError::new(TimonErrorKind::SecurityError, e));
   }
 
   let database_manager = get_database_manager(None)?;
