@@ -1668,13 +1668,15 @@ impl DatabaseManager {
   /// Manually invalidate the metadata cache
   /// Should be called after any operation that modifies metadata (create_table, delete_table, etc.)
   fn invalidate_cache(&self) {
-    if let Ok(mut cache) = self.cache.write() {
-      // Atomically invalidate both cache fields with a single lock
-      cache.metadata = None;
-      cache.timestamp = None;
-    } else {
-      eprintln!("Warning: Failed to acquire write lock on cache for invalidation (poisoned)");
-    }
+    // Use into_inner() to recover from a poisoned lock and still invalidate cache.
+    // A poisoned lock means a thread panicked while holding it, but we still want
+    // to clear the cache so stale data isn't served. Setting fields to None is safe.
+    let mut cache = self.cache.write().unwrap_or_else(|e| {
+      eprintln!("Warning: cache RwLock was poisoned; recovering and invalidating anyway");
+      e.into_inner()
+    });
+    cache.metadata = None;
+    cache.timestamp = None;
   }
 
   fn save_metadata(&self) -> TokioResult<()> {
