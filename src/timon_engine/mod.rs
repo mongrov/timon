@@ -92,7 +92,7 @@ fn get_cloud_storage_manager() -> TimonResult<Arc<CloudStorageManager<AmazonS3>>
       format!("Failed to acquire cloud storage manager lock: {}", e),
     )
   })?;
-  manager_guard.as_ref().cloned().ok_or_else(|| TimonError::cloud_storage_not_initialized())
+  manager_guard.as_ref().cloned().ok_or_else(TimonError::cloud_storage_not_initialized)
 }
 
 #[allow(dead_code)]
@@ -360,7 +360,7 @@ pub fn init_bucket(
   bucket_region: &str,
 ) -> TimonResult<Value> {
   // Security check: Detect debugging/tampering
-  if let Err(e) = security::security::perform_security_checks() {
+  if let Err(e) = security::security_checks::perform_security_checks() {
     return Err(TimonError::new(TimonErrorKind::SecurityError, e));
   }
 

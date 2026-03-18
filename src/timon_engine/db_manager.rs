@@ -1,6 +1,7 @@
 use super::errors::TimonError;
 use super::helpers::{
-  build_rules_tree, get_property_fields, infer_schema_with_coercion, json_to_arrow, record_batches_to_json, rounded_timestamp, row_to_json,
+  build_rules_tree, collect_files_recursive, get_property_fields, infer_schema_with_coercion, json_to_arrow, record_batches_to_json,
+  rounded_timestamp, row_to_json,
 };
 use super::sql_query_parser::extract_table_names_and_ctes;
 use chrono::{NaiveDateTime, TimeZone, Utc};
@@ -630,9 +631,7 @@ impl DatabaseManager {
     }
 
     let datetime_binding = get_property_fields(&table_schema, "datetime")?;
-    let datetime_field = datetime_binding
-      .get(0)
-      .ok_or_else(|| format!("No 'datetime' field found in the table schema."))?;
+    let datetime_field = datetime_binding.first().ok_or("No 'datetime' field found in the table schema.")?;
     let unique_fields = get_property_fields(&table_schema, "unique")?;
 
     let build_key = |record: &Value| -> String {
@@ -695,7 +694,7 @@ impl DatabaseManager {
       }
       let target_file = format!("{}/data.parquet", partition_dir);
 
-      records_by_file.entry(target_file).or_insert_with(Vec::new).push(new_record);
+      records_by_file.entry(target_file).or_default().push(new_record);
     }
 
     // Process each file atomically: lock -> read -> merge -> write -> unlock
@@ -731,7 +730,7 @@ impl DatabaseManager {
 
     // Extract table names and CTE names from the AST
     let (mut table_names, cte_names) =
-      extract_table_names_and_ctes(&sql_query).map_err(|e| DataFusionError::Execution(format!("Failed to extract table names: {}", e)))?;
+      extract_table_names_and_ctes(sql_query).map_err(|e| DataFusionError::Execution(format!("Failed to extract table names: {}", e)))?;
 
     // Validate all table names to prevent path traversal attacks
     for table_name in &table_names {
@@ -772,7 +771,7 @@ impl DatabaseManager {
       // Get all partition directories for all tables in the database
       let mut all_partitions = Vec::new();
       if let Some(database) = metadata.databases.get(db_name) {
-        for (table_name, _) in &database.tables {
+        for table_name in database.tables.keys() {
           let table_dir = self
             .resolve_table_dir(db_name, table_name, username)
             .map_err(|e| DataFusionError::Execution(format!("Failed to resolve table directory: {}", e)))?;
@@ -999,9 +998,9 @@ impl DatabaseManager {
     let base_root = base_table_path
       .ancestors()
       .nth(2) // This gives us "tmp/data"
-      .ok_or_else(|| format!("Failed to determine base directory from '{}'", base_table_path.display()))?
+      .ok_or(format!("Failed to determine base directory from '{}'", base_table_path.display()))?
       .parent() // Get parent of "data" to get "tmp"
-      .ok_or_else(|| format!("Failed to get parent of base directory"))?
+      .ok_or("Failed to get parent of base directory")?
       .to_path_buf();
 
     // For group users, ONLY check for exact table name match
@@ -1076,13 +1075,7 @@ impl DatabaseManager {
     // Now that we have the lock, read the latest data from the file (if it exists)
     let mut existing_records: Vec<Value> = if file_path.exists() {
       // Re-read the file to get the latest data (another thread may have written)
-      match Self::read_parquet_file_static(file_path) {
-        Ok(records) => records,
-        Err(_) => {
-          // If file is corrupted or unreadable, start with empty records
-          Vec::new()
-        }
-      }
+      Self::read_parquet_file_static(file_path).unwrap_or_default()
     } else {
       Vec::new()
     };
@@ -1226,10 +1219,10 @@ impl DatabaseManager {
   fn read_parquet_file_static(file_path: &Path) -> Result<Vec<Value>, Box<dyn Error>> {
     let file = fs::File::open(file_path)?;
     let reader = SerializedFileReader::new(file)?;
-    let mut iter = reader.get_row_iter(None)?;
+    let iter = reader.get_row_iter(None)?;
 
-    let mut json_records = Vec::new();
-    while let Some(record_result) = iter.next() {
+    let mut json_records: Vec<Value> = Vec::new();
+    for record_result in iter {
       match record_result {
         Ok(record) => {
           let json_record = row_to_json(&record);
@@ -1388,31 +1381,12 @@ impl DatabaseManager {
 
     // Collect all files in the chosen directory (recursively to support partitioned tables)
     let mut file_list = Vec::new();
-    self.collect_files_recursive(&final_table_path, &mut file_list)?;
+    collect_files_recursive(&final_table_path, &mut file_list)?;
 
     // Sort files by their name for consistency
     file_list.sort();
 
     Ok(file_list)
-  }
-
-  /// Helper method to recursively collect all files from a directory
-  fn collect_files_recursive(&self, dir: &Path, file_list: &mut Vec<String>) -> Result<(), Box<dyn Error>> {
-    if dir.is_dir() {
-      for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.is_dir() {
-          // Recursively collect files from subdirectories
-          self.collect_files_recursive(&path, file_list)?;
-        } else if path.is_file() {
-          // Add file to the list
-          file_list.push(path.to_string_lossy().to_string());
-        }
-      }
-    }
-    Ok(())
   }
 
   fn validate_schema_structure(&self, schema: &Value) -> Result<(), Box<dyn Error>> {
@@ -1470,10 +1444,8 @@ impl DatabaseManager {
         .ok_or(format!("Invalid validation rules for field '{}'", field_name))?;
 
       // Check if the field is required and if it's missing from the data
-      if field_rules_obj.get("required").and_then(|v| v.as_bool()).unwrap_or(false) {
-        if !data_obj.contains_key(field_name) {
-          return Err(format!("Missing required field '{}'", field_name).into());
-        }
+      if field_rules_obj.get("required").and_then(|v| v.as_bool()).unwrap_or(false) && !data_obj.contains_key(field_name) {
+        return Err(format!("Missing required field '{}'", field_name).into());
       }
 
       // Check the field type if the field exists in the data
@@ -1909,7 +1881,7 @@ impl DatabaseManager {
       match File::create(&lock_file_path) {
         Ok(file) => {
           // Try to acquire an exclusive lock using fs2
-          if let Err(_) = file.lock_exclusive() {
+          if file.lock_exclusive().is_err() {
             if retries >= max_retries {
               return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,

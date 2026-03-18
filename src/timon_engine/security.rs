@@ -1,7 +1,7 @@
 // Security module for detecting debugging, tampering, and Frida hooks
 
 /// Security module for detecting debugging, tampering, and Frida hooks
-pub mod security {
+pub mod security_checks {
 
   /// Check if debugging is detected
   #[cfg(target_os = "android")]

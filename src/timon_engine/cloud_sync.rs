@@ -111,7 +111,7 @@ impl S3StoreInterface for MockS3Store {
         self.cloud_files.get(k).map(|data| {
           let meta = ObjectMeta {
             location: StorePath::from(k.clone()),
-            last_modified: self.modified_times.get(k).unwrap_or(&Utc::now()).clone(),
+            last_modified: *self.modified_times.get(k).unwrap_or(&Utc::now()),
             size: data.len(),
             e_tag: None,
             version: None,
@@ -127,7 +127,7 @@ impl S3StoreInterface for MockS3Store {
   async fn store_head(&self, path: &StorePath) -> Result<ObjectMeta, Box<dyn std::error::Error>> {
     let path_str = path.to_string();
     if let Some(data) = self.cloud_files.get(&path_str) {
-      let last_modified = self.modified_times.get(&path_str).unwrap_or(&Utc::now()).clone();
+      let last_modified = *self.modified_times.get(&path_str).unwrap_or(&Utc::now());
       Ok(ObjectMeta {
         location: path.clone(),
         last_modified,
@@ -148,7 +148,7 @@ impl S3StoreInterface for MockS3Store {
         payload: GetResultPayload::Stream(Box::pin(futures::stream::once(async move { Ok(bytes::Bytes::from(data_clone)) }))),
         meta: ObjectMeta {
           location: path.clone(),
-          last_modified: self.modified_times.get(&path_str).unwrap_or(&Utc::now()).clone(),
+          last_modified: *self.modified_times.get(&path_str).unwrap_or(&Utc::now()),
           size: data.len(),
           e_tag: None,
           version: None,
@@ -179,6 +179,13 @@ pub struct CloudStorageManager<S: S3StoreInterface> {
 #[derive(Serialize, Deserialize)]
 struct Metadata {
   files: Vec<String>,
+}
+
+struct SinkParquetParams<'a> {
+  username: &'a str,
+  db_name: &'a str,
+  table_name: &'a str,
+  unique_fields: &'a [String],
 }
 
 impl<S: S3StoreInterface> CloudStorageManager<S> {
@@ -278,13 +285,19 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
     let username = &self.db_manager.get_username();
     let table_schema = self.db_manager.get_table_schema(db_name, table_name)?;
     let unique_fields = get_property_fields(&table_schema, "unique")?;
+    let sink_params = SinkParquetParams {
+      username,
+      db_name,
+      table_name,
+      unique_fields: &unique_fields,
+    };
     let mut batches = Vec::new();
     let mut processed_files = Vec::new();
     let mut merge_target_paths = Vec::new();
 
     for file in &files {
       if let Some(target_path) = self
-        .process_sink_parquet_file(file, username, db_name, table_name, &unique_fields, &mut batches, &mut processed_files)
+        .process_sink_parquet_file(file, &sink_params, &mut batches, &mut processed_files)
         .await?
       {
         merge_target_paths.push(target_path);
@@ -368,10 +381,7 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
   async fn process_sink_parquet_file(
     &self,
     file: &str,
-    username: &str,
-    db_name: &str,
-    table_name: &str,
-    unique_fields: &[String],
+    params: &SinkParquetParams<'_>,
     batches: &mut Vec<RecordBatch>,
     processed_files: &mut Vec<PathBuf>,
   ) -> Result<Option<String>, Box<dyn std::error::Error>> {
@@ -396,10 +406,18 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
       let day = caps.name("day").map(|m| m.as_str()).unwrap_or("01"); // Default to day 01 for monthly partitions
 
       // Generate S3 filename that includes the date
-      let s3_filename = format!("{}_{}-{}-{}.parquet", table_name, year, month, day);
-      let target_path = format!("{}/{}/{}/{}/{}/{}", username, db_name, table_name, year, month, s3_filename);
+      let s3_filename = format!("{}_{}-{}-{}.parquet", params.table_name, year, month, day);
+      let target_path = format!(
+        "{}/{}/{}/{}/{}/{}",
+        params.username, params.db_name, params.table_name, year, month, s3_filename
+      );
 
-      let s3_temp_path = format!("{}/merge_workspace/{}/{}", self.db_manager.get_storage_path(), username, s3_filename);
+      let s3_temp_path = format!(
+        "{}/merge_workspace/{}/{}",
+        self.db_manager.get_storage_path(),
+        params.username,
+        s3_filename
+      );
       let mut s3_batches = Vec::new();
 
       let local_modified_datetime = get_local_file_modified_time(&file_path.to_string_lossy()).unwrap_or_default();
@@ -432,7 +450,7 @@ impl<S: S3StoreInterface> CloudStorageManager<S> {
 
         if s3_available {
           // Attempt to merge batches with schema validation
-          match combine_unique_batches(local_batches, s3_batches, unique_fields) {
+          match combine_unique_batches(local_batches, s3_batches, params.unique_fields) {
             Ok(merged_batches) => {
               if !merged_batches.is_empty() {
                 batches.extend(merged_batches);

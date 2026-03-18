@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 mod timon_engine;
 use chrono::{DateTime, Duration, Local, Utc};
 use serde_json::json;

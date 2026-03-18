@@ -243,7 +243,7 @@ pub fn row_to_json(row: &Row) -> serde_json::Value {
       ParquetField::TimestampMillis(t) => json!(t),
       ParquetField::Decimal(d) => json!(decimal_to_string(d)),
       ParquetField::ListInternal(list) => {
-        let json_array: Vec<serde_json::Value> = list.elements().iter().map(|element| parquet_value_to_json(element)).collect();
+        let json_array: Vec<serde_json::Value> = list.elements().iter().map(parquet_value_to_json).collect();
         serde_json::Value::Array(json_array)
       }
       ParquetField::Group(g) => {
@@ -362,28 +362,28 @@ pub fn json_to_arrow(
         DataType::Int64 => {
           let values: Vec<i64> = json_values
             .iter()
-            .map(|v| v.get(&field.name()).and_then(Value::as_i64).unwrap_or_default())
+            .map(|v| v.get(field.name()).and_then(Value::as_i64).unwrap_or_default())
             .collect();
           Arc::new(Int64Array::from(values)) as ArrayRef
         }
         DataType::Float64 => {
           let values: Vec<f64> = json_values
             .iter()
-            .map(|v| v.get(&field.name()).and_then(Value::as_f64).unwrap_or_default())
+            .map(|v| v.get(field.name()).and_then(Value::as_f64).unwrap_or_default())
             .collect();
           Arc::new(Float64Array::from(values)) as ArrayRef
         }
         DataType::Utf8 => {
           let values: Vec<String> = json_values
             .iter()
-            .map(|v| v.get(&field.name()).and_then(Value::as_str).unwrap_or_default().to_string())
+            .map(|v| v.get(field.name()).and_then(Value::as_str).unwrap_or_default().to_string())
             .collect();
           Arc::new(StringArray::from(values)) as ArrayRef
         }
         DataType::Boolean => {
           let values: Vec<bool> = json_values
             .iter()
-            .map(|v| v.get(&field.name()).and_then(Value::as_bool).unwrap_or_default())
+            .map(|v| v.get(field.name()).and_then(Value::as_bool).unwrap_or_default())
             .collect();
           Arc::new(BooleanArray::from(values)) as ArrayRef
         }
@@ -395,7 +395,7 @@ pub fn json_to_arrow(
               let string_builder = StringBuilder::new();
               let mut list_builder = ListBuilder::new(string_builder);
 
-              for value in json_values.iter().map(|v| v.get(&field.name())) {
+              for value in json_values.iter().map(|v| v.get(field.name())) {
                 if let Some(Value::Array(arr)) = value {
                   let string_builder = list_builder.values();
                   for item in arr {
@@ -415,7 +415,7 @@ pub fn json_to_arrow(
               let int_builder = Int64Builder::new();
               let mut list_builder = ListBuilder::new(int_builder);
 
-              for value in json_values.iter().map(|v| v.get(&field.name())) {
+              for value in json_values.iter().map(|v| v.get(field.name())) {
                 if let Some(Value::Array(arr)) = value {
                   let int_builder = list_builder.values();
                   for item in arr {
@@ -435,7 +435,7 @@ pub fn json_to_arrow(
               let float_builder = Float64Builder::new();
               let mut list_builder = ListBuilder::new(float_builder);
 
-              for value in json_values.iter().map(|v| v.get(&field.name())) {
+              for value in json_values.iter().map(|v| v.get(field.name())) {
                 if let Some(Value::Array(arr)) = value {
                   let float_builder = list_builder.values();
                   for item in arr {
@@ -455,7 +455,7 @@ pub fn json_to_arrow(
               let bool_builder = BooleanBuilder::new();
               let mut list_builder = ListBuilder::new(bool_builder);
 
-              for value in json_values.iter().map(|v| v.get(&field.name())) {
+              for value in json_values.iter().map(|v| v.get(field.name())) {
                 if let Some(Value::Array(arr)) = value {
                   let bool_builder = list_builder.values();
                   for item in arr {
@@ -604,8 +604,8 @@ pub fn filter_files_by_date_range(files: Vec<String>, start_date: &str, end_date
           // Parse date components - .ok() is intentional here: invalid date formats
           // should be skipped (return false) rather than causing the filter to fail
           let year = caps["year"].parse::<i32>().ok();
-          let month = caps.name("month").map(|m| m.as_str().parse::<u32>().ok()).flatten();
-          let day = caps.name("day").map(|d| d.as_str().parse::<u32>().ok()).flatten();
+          let month = caps.name("month").and_then(|d| d.as_str().parse::<u32>().ok());
+          let day = caps.name("day").and_then(|d| d.as_str().parse::<u32>().ok());
 
           if let Some(year) = year {
             let file_date = match (month, day) {
@@ -738,7 +738,7 @@ pub async fn cleanup_old_files(processed_files: &[PathBuf]) {
     if let Some(filename) = file_path.file_name().and_then(|n| n.to_str()) {
       if let Some(caps) = regx.captures(filename) {
         let file_date_str = format!("{}-{}-{}", &caps[1], &caps[2], &caps[3]);
-        if NaiveDate::parse_from_str(&file_date_str, "%Y-%m-%d").map_or(false, |file_date| file_date < current_date) {
+        if NaiveDate::parse_from_str(&file_date_str, "%Y-%m-%d").is_ok_and(|file_date| file_date < current_date) {
           if let Err(e) = fs::remove_file(file_path) {
             eprintln!("Warning: Failed to delete file {}: {:?}", file_path.display(), e);
           }
@@ -907,4 +907,23 @@ pub async fn infer_schema_with_coercion(table_dir: &str) -> Result<Arc<Schema>, 
 
   // Merge all schemas with type coercion
   merge_schemas(schemas)
+}
+
+/// Helper method to recursively collect all files from a directory
+pub fn collect_files_recursive(dir: &Path, file_list: &mut Vec<String>) -> Result<(), Box<dyn Error>> {
+  if dir.is_dir() {
+    for entry in fs::read_dir(dir)? {
+      let entry = entry?;
+      let path = entry.path();
+
+      if path.is_dir() {
+        // Recursively collect files from subdirectories
+        collect_files_recursive(&path, file_list)?;
+      } else if path.is_file() {
+        // Add file to the list
+        file_list.push(path.to_string_lossy().to_string());
+      }
+    }
+  }
+  Ok(())
 }
