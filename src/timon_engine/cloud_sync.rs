@@ -3,26 +3,7 @@ use super::errors::{TimonError, TimonErrorKind};
 use super::helpers::{
   cleanup_old_files, combine_unique_batches, filter_files_by_date_range, get_local_file_modified_time, get_property_fields, read_parquet_batches,
 };
-use chrono::{DateTime, Utc};
-use datafusion::arrow::array::RecordBatch;
-use datafusion::parquet::arrow::ArrowWriter;
-use futures::{stream, StreamExt, TryStreamExt};
-use object_store::aws::{AmazonS3, AmazonS3Builder};
-use object_store::path::Path as StorePath;
-use object_store::{Attributes, ClientOptions, GetResultPayload, ObjectMeta};
-use object_store::{GetResult, ObjectStore};
-use regex::Regex;
-use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::fs::File;
-use std::fs::{self};
-use std::io::{BufWriter, Write};
-use std::path::Path;
-use std::path::PathBuf;
-use std::time::Duration;
-use std::{collections::HashMap, sync::Arc};
-use tokio::io::AsyncReadExt;
-use zeroize::Zeroize;
+include!("imports/cloud_sync.inc");
 
 /// Default timeout for S3 download operations (30 seconds)
 const DEFAULT_DOWNLOAD_TIMEOUT_SECS: u64 = 30;

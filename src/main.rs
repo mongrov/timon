@@ -1,12 +1,6 @@
 #![allow(clippy::all)]
 mod timon_engine;
-use chrono::{DateTime, Duration, Local, Utc};
-use serde_json::json;
-use std::time::Instant;
-pub use timon_engine::{
-  cloud_fetch_parquet, cloud_fetch_parquet_batch, cloud_sink_parquet, cloud_sync_parquet, create_database, create_table, delete_database,
-  delete_table, init_bucket, init_timon, insert, list_databases, list_tables, query, query_df,
-};
+include!("imports/main.inc");
 #[cfg(feature = "dev_cli")]
 mod cli;
 #[cfg(feature = "cloud_server")]
@@ -64,22 +58,22 @@ async fn test_concurrent_inserts() -> Result<(), Box<dyn std::error::Error>> {
   println!("\n=== TESTING CONCURRENT INSERTS TO SAME PARTITION ===");
   println!("This test will run multiple times to check for non-deterministic corruption...");
 
-  let mut corruption_detected = false;
-
   let result = test_concurrent_inserts_single_run().await;
-  match result {
+  let corruption_detected = match result {
     Ok(had_corruption) => {
       if had_corruption {
-        corruption_detected = true;
         println!("\n🔴 CORRUPTION DETECTED");
+        true
       } else {
         println!("\n✅ No corruption");
+        false
       }
     }
     Err(e) => {
       eprintln!("\n❌ Error: {}", e);
+      false
     }
-  }
+  };
 
   println!("\n{}", "=".repeat(60));
   println!("FINAL RESULTS: Corruption detected: {}", corruption_detected);

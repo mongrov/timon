@@ -4,32 +4,7 @@ use super::helpers::{
   rounded_timestamp, row_to_json,
 };
 use super::sql_query_parser::extract_table_names_and_ctes;
-use chrono::{NaiveDateTime, TimeZone, Utc};
-use datafusion::arrow::array::Array;
-use datafusion::arrow::datatypes::{DataType, Schema};
-use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::datasource::file_format::parquet::ParquetFormat;
-use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl};
-use datafusion::datasource::MemTable;
-use datafusion::error::{DataFusionError, Result as DataFusionResult};
-use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use datafusion::parquet::arrow::ArrowWriter;
-use datafusion::parquet::file::properties::WriterProperties;
-use datafusion::parquet::file::reader::{FileReader, SerializedFileReader};
-use datafusion::prelude::*;
-use fs2::FileExt;
-use futures::executor;
-use regex::Regex;
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use std::collections::HashMap;
-use std::error::Error;
-use std::fs::File;
-use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
-use std::time::{Duration, Instant};
-use std::{fmt, fs};
-use tokio::io::Result as TokioResult;
+include!("imports/db_manager.inc");
 
 // ============================================================================
 // Configuration Constants

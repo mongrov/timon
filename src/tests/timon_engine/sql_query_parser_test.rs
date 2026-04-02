@@ -456,7 +456,7 @@ fn test_delete_with_from_keyword_lines44_45() {
 
   // DELETE with multiple tables in FROM
   let sql = "DELETE FROM table1, table2 WHERE id = 1";
-  let (tables, _) = extract_table_names_and_ctes(sql).unwrap();
+  let tables = extract_table_names_and_ctes(sql).unwrap().0;
   assert!(tables.contains("table1"));
   assert!(tables.contains("table2"));
 }

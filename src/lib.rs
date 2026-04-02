@@ -4,18 +4,7 @@ pub mod timon_engine;
 // cbindgen:ignore
 #[cfg(target_os = "android")]
 pub mod android {
-  use crate::timon_engine::{
-    cloud_fetch_parquet, cloud_fetch_parquet_batch, cloud_sink_parquet, cloud_sync_parquet, create_database, create_table, delete_database,
-    delete_table, init_bucket, init_timon, insert, list_databases, list_tables, query,
-  };
-  use jni::objects::{JClass, JObject, JString, JValue};
-  use jni::sys::{jint, jstring};
-  use jni::JNIEnv;
-  use jni::NativeMethod;
-  use std::collections::HashMap;
-  use std::ffi::c_void;
-  use std::sync::LazyLock;
-  use tokio::runtime::Runtime;
+  include!("imports/android.inc");
 
   // Shared runtime instance for all JNI calls to avoid creating multiple runtimes
   static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
