@@ -3,7 +3,7 @@ use super::helpers::{
   build_rules_tree, collect_files_recursive, get_property_fields, infer_schema_with_coercion, json_to_arrow, record_batches_to_json,
   rounded_timestamp, row_to_json,
 };
-use super::sql_query_parser::extract_table_names_and_ctes;
+use super::sql_query_parser::{extract_table_names_and_ctes, inject_partition_filter};
 include!("imports/db_manager.inc");
 
 // ============================================================================
@@ -771,19 +771,10 @@ impl DatabaseManager {
       // Sort and take last N partitions (most recent)
       all_partitions.sort();
       let selected_dates: Vec<_> = all_partitions.iter().rev().take(limit).cloned().collect();
-      if !selected_dates.is_empty() {
-        // Build IN clause for the selected dates
-        let date_list = selected_dates.iter().map(|d| format!("'{}'", d)).collect::<Vec<_>>().join(", ");
-        // Inject partition_date filter into the SQL query
-        let has_where = sql_query.to_uppercase().contains("WHERE");
-        if has_where {
-          format!("{} AND partition_date IN ({})", sql_query, date_list)
-        } else {
-          format!("{} WHERE partition_date IN ({})", sql_query, date_list)
-        }
-      } else {
-        sql_query.to_string()
-      }
+      // Inject the partition_date filter through the AST so that trailing clauses (ORDER BY, LIMIT,
+      // GROUP BY, HAVING) keep their position and an existing WHERE clause is combined with AND
+      inject_partition_filter(sql_query, "partition_date", &selected_dates)
+        .map_err(|e| DataFusionError::Execution(format!("Failed to apply partition limit: {}", e)))?
     } else {
       sql_query.to_string()
     };

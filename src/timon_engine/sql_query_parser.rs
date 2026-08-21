@@ -1,7 +1,7 @@
 use datafusion::error::DataFusionError;
 use datafusion::sql::sqlparser;
 use datafusion::sql::sqlparser::{
-  ast::{Expr, Query, Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins},
+  ast::{BinaryOperator, Expr, Ident, Query, Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, Value},
   dialect::GenericDialect,
   parser::Parser,
 };
@@ -59,6 +59,131 @@ pub fn extract_table_names_and_ctes(sql_query: &str) -> Result<(HashSet<String>,
   }
 
   Ok((table_names, cte_names))
+}
+
+/// Restrict a query to a set of partition values by adding `<column> IN (...)` to the WHERE clause
+/// of every SELECT that reads a stored table.
+///
+/// The predicate is injected through the AST instead of being appended to the query text, so clauses
+/// that must stay at the end of the statement (ORDER BY, LIMIT, GROUP BY, HAVING) keep their place and
+/// an existing WHERE clause is preserved by combining both conditions with AND.
+///
+/// SELECTs that only read a CTE are left untouched: the filter is pushed into the CTE body instead,
+/// where the partition column is still available. An empty `partition_values` leaves the query as is.
+pub fn inject_partition_filter(sql_query: &str, column: &str, partition_values: &[String]) -> Result<String, DataFusionError> {
+  if partition_values.is_empty() {
+    return Ok(sql_query.to_string());
+  }
+
+  let dialect = GenericDialect {};
+  let mut statements = Parser::parse_sql(&dialect, sql_query).map_err(|e| DataFusionError::Execution(format!("Failed to parse SQL: {}", e)))?;
+
+  let predicate = Expr::InList {
+    expr: Box::new(Expr::Identifier(Ident::new(column))),
+    list: partition_values
+      .iter()
+      .map(|value| Expr::Value(Value::SingleQuotedString(value.clone())))
+      .collect(),
+    negated: false,
+  };
+
+  for statement in statements.iter_mut() {
+    if let Statement::Query(query) = statement {
+      inject_into_query(query, &HashSet::new(), &predicate);
+    }
+  }
+
+  Ok(statements.iter().map(|statement| statement.to_string()).collect::<Vec<_>>().join("; "))
+}
+
+/// Inject the partition predicate into a Query AST node, walking CTEs first so that names they
+/// define are not mistaken for stored tables in the outer SELECT
+fn inject_into_query(query: &mut Query, outer_cte_names: &HashSet<String>, predicate: &Expr) {
+  let mut cte_names = outer_cte_names.clone();
+
+  if let Some(with) = &mut query.with {
+    for cte in with.cte_tables.iter_mut() {
+      inject_into_query(&mut cte.query, &cte_names, predicate);
+      cte_names.insert(cte.alias.name.value.to_lowercase());
+    }
+  }
+
+  inject_into_set_expr(&mut query.body, &cte_names, predicate);
+}
+
+/// Inject the partition predicate into SetExpr (SELECT, UNION, etc.)
+fn inject_into_set_expr(set_expr: &mut SetExpr, cte_names: &HashSet<String>, predicate: &Expr) {
+  match set_expr {
+    SetExpr::Select(select) => {
+      inject_into_select(select, cte_names, predicate);
+    }
+    SetExpr::Query(query) => {
+      inject_into_query(query, cte_names, predicate);
+    }
+    SetExpr::SetOperation { left, right, .. } => {
+      inject_into_set_expr(left, cte_names, predicate);
+      inject_into_set_expr(right, cte_names, predicate);
+    }
+    _ => {
+      // VALUES / INSERT / UPDATE bodies do not scan partitioned tables
+    }
+  }
+}
+
+/// Inject the partition predicate into a SELECT statement, descending into derived tables first
+fn inject_into_select(select: &mut Select, cte_names: &HashSet<String>, predicate: &Expr) {
+  let mut reads_stored_table = false;
+
+  for table_with_joins in select.from.iter_mut() {
+    if inject_into_table_with_joins(table_with_joins, cte_names, predicate) {
+      reads_stored_table = true;
+    }
+  }
+
+  // Only SELECTs that scan a stored table expose the partition column
+  if !reads_stored_table {
+    return;
+  }
+
+  select.selection = Some(match select.selection.take() {
+    // Wrap the original condition so that an OR at its top level keeps binding before the AND
+    Some(existing) => Expr::BinaryOp {
+      left: Box::new(Expr::Nested(Box::new(existing))),
+      op: BinaryOperator::And,
+      right: Box::new(predicate.clone()),
+    },
+    None => predicate.clone(),
+  });
+}
+
+/// Inject into TableWithJoins, returning true when it references a stored table
+fn inject_into_table_with_joins(table_with_joins: &mut TableWithJoins, cte_names: &HashSet<String>, predicate: &Expr) -> bool {
+  let mut reads_stored_table = inject_into_table_factor(&mut table_with_joins.relation, cte_names, predicate);
+
+  for join in table_with_joins.joins.iter_mut() {
+    if inject_into_table_factor(&mut join.relation, cte_names, predicate) {
+      reads_stored_table = true;
+    }
+  }
+
+  reads_stored_table
+}
+
+/// Inject into TableFactor, returning true when it is a stored table rather than a CTE or a subquery
+fn inject_into_table_factor(table_factor: &mut TableFactor, cte_names: &HashSet<String>, predicate: &Expr) -> bool {
+  match table_factor {
+    TableFactor::Table { name, .. } => match name.0.last() {
+      Some(table_name) => !cte_names.contains(&table_name.value.to_lowercase()),
+      None => false,
+    },
+    TableFactor::Derived { subquery, .. } => {
+      // The filter belongs inside the subquery, where the partition column is still selectable
+      inject_into_query(subquery, cte_names, predicate);
+      false
+    }
+    TableFactor::NestedJoin { table_with_joins, .. } => inject_into_table_with_joins(table_with_joins, cte_names, predicate),
+    _ => false,
+  }
 }
 
 /// Extract table names from a Query AST node
