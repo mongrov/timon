@@ -4027,3 +4027,118 @@ fn test_insert_with_atomic_file_error() {
 
   cleanup_temp_dir(temp_dir);
 }
+
+// Tests for the `limit_partitions` argument of `query`
+
+/// Create a table holding one record in each of three consecutive 30 minute partitions:
+/// Alice in `2025-02-20_10-00`, Bob in `2025-02-20_11-00` and Carol in `2025-02-20_12-00`
+fn setup_partitioned_table(storage_path: &str) -> DatabaseManager {
+  let mut db_manager = DatabaseManager::new(storage_path, 30, "ahmed_test");
+
+  db_manager.create_database("test_db").unwrap();
+  let schema = json!({
+      "date": {"type": "int", "required": true, "unique": true, "datetime": true},
+      "id": {"type": "int", "required": true},
+      "name": {"type": "string", "required": true}
+  });
+  db_manager.create_table("test_db", "test_table", &schema.to_string()).unwrap();
+
+  let data = json!([
+      {"date": "2025.02.20 10:15:00", "id": 1, "name": "Alice"},
+      {"date": "2025.02.20 11:15:00", "id": 2, "name": "Bob"},
+      {"date": "2025.02.20 12:15:00", "id": 3, "name": "Carol"}
+  ]);
+  db_manager.insert("test_db", "test_table", &data.to_string()).unwrap();
+
+  db_manager
+}
+
+/// Run a query and return the `id` of every row it produced
+fn query_ids(db_manager: &DatabaseManager, sql_query: &str, limit_partitions: Option<usize>) -> Vec<i64> {
+  let rt = Runtime::new().unwrap();
+  let result = rt
+    .block_on(db_manager.query("test_db", sql_query, None, true, limit_partitions))
+    .unwrap_or_else(|e| panic!("query '{}' failed: {}", sql_query, e));
+
+  match result {
+    DataFusionOutput::Json(json_result) => json_result.as_array().unwrap().iter().map(|row| row["id"].as_i64().unwrap()).collect(),
+    _ => panic!("Expected JSON output"),
+  }
+}
+
+#[test]
+fn test_query_limit_partitions_scans_most_recent_partitions() {
+  let temp_dir = create_temp_dir();
+  let db_manager = setup_partitioned_table(temp_dir.to_str().unwrap());
+
+  // Without a limit every partition is scanned
+  assert_eq!(query_ids(&db_manager, "SELECT * FROM test_table", None), vec![1, 2, 3]);
+
+  // With a limit only the most recent partitions are scanned
+  assert_eq!(query_ids(&db_manager, "SELECT * FROM test_table", Some(1)), vec![3]);
+  assert_eq!(query_ids(&db_manager, "SELECT * FROM test_table", Some(2)), vec![2, 3]);
+
+  cleanup_temp_dir(temp_dir);
+}
+
+#[test]
+fn test_query_limit_partitions_with_order_by() {
+  let temp_dir = create_temp_dir();
+  let db_manager = setup_partitioned_table(temp_dir.to_str().unwrap());
+
+  assert_eq!(query_ids(&db_manager, "SELECT * FROM test_table ORDER BY date DESC", Some(2)), vec![3, 2]);
+
+  cleanup_temp_dir(temp_dir);
+}
+
+#[test]
+fn test_query_limit_partitions_with_limit_clause() {
+  let temp_dir = create_temp_dir();
+  let db_manager = setup_partitioned_table(temp_dir.to_str().unwrap());
+
+  assert_eq!(query_ids(&db_manager, "SELECT * FROM test_table ORDER BY date LIMIT 1", Some(2)), vec![2]);
+
+  cleanup_temp_dir(temp_dir);
+}
+
+#[test]
+fn test_query_limit_partitions_with_group_by() {
+  let temp_dir = create_temp_dir();
+  let db_manager = setup_partitioned_table(temp_dir.to_str().unwrap());
+
+  let rt = Runtime::new().unwrap();
+  let result = rt
+    .block_on(db_manager.query("test_db", "SELECT COUNT(*) AS total FROM test_table GROUP BY name", None, true, Some(2)))
+    .unwrap();
+
+  match result {
+    DataFusionOutput::Json(json_result) => {
+      // One group per name, and only the two most recent partitions contribute a name
+      assert_eq!(json_result.as_array().unwrap().len(), 2);
+    }
+    _ => panic!("Expected JSON output"),
+  }
+
+  cleanup_temp_dir(temp_dir);
+}
+
+#[test]
+fn test_query_limit_partitions_narrows_an_existing_where_clause() {
+  let temp_dir = create_temp_dir();
+  let db_manager = setup_partitioned_table(temp_dir.to_str().unwrap());
+
+  // Both rows match the WHERE clause but only Carol sits in the most recent partition,
+  // so the OR must be evaluated before the partition condition is applied
+  assert_eq!(
+    query_ids(&db_manager, "SELECT * FROM test_table WHERE id = 1 OR id = 3", Some(1)),
+    vec![3]
+  );
+
+  // A simple condition keeps working alongside the partition filter
+  assert_eq!(
+    query_ids(&db_manager, "SELECT * FROM test_table WHERE id > 1 ORDER BY date", Some(3)),
+    vec![2, 3]
+  );
+
+  cleanup_temp_dir(temp_dir);
+}

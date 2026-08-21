@@ -1,4 +1,4 @@
-use crate::timon_engine::sql_query_parser::extract_table_names_and_ctes;
+use crate::timon_engine::sql_query_parser::{extract_table_names_and_ctes, inject_partition_filter};
 
 // Tests for uncovered lines in sql_query_parser.rs
 
@@ -470,4 +470,147 @@ fn test_setexpr_query_lines90_91() {
   let (tables, _) = extract_table_names_and_ctes(sql).unwrap();
   assert!(tables.contains("t1"));
   assert!(tables.contains("t2"));
+}
+
+// Tests for inject_partition_filter
+
+fn partitions() -> Vec<String> {
+  vec!["2025-02-20_11-00".to_string(), "2025-02-20_12-00".to_string()]
+}
+
+#[test]
+fn test_inject_partition_filter_simple_select() {
+  let sql = "SELECT * FROM readings";
+  let rewritten = inject_partition_filter(sql, "partition_date", &partitions()).unwrap();
+  assert_eq!(
+    rewritten,
+    "SELECT * FROM readings WHERE partition_date IN ('2025-02-20_11-00', '2025-02-20_12-00')"
+  );
+}
+
+#[test]
+fn test_inject_partition_filter_keeps_order_by_last() {
+  // Appending the filter as text produced "... ORDER BY date WHERE ..." which is not parseable
+  let sql = "SELECT * FROM readings ORDER BY date";
+  let rewritten = inject_partition_filter(sql, "partition_date", &partitions()).unwrap();
+  assert_eq!(
+    rewritten,
+    "SELECT * FROM readings WHERE partition_date IN ('2025-02-20_11-00', '2025-02-20_12-00') ORDER BY date"
+  );
+  // The result must still be valid SQL
+  assert!(extract_table_names_and_ctes(&rewritten).is_ok());
+}
+
+#[test]
+fn test_inject_partition_filter_keeps_limit_last() {
+  let sql = "SELECT * FROM readings LIMIT 10";
+  let rewritten = inject_partition_filter(sql, "partition_date", &partitions()).unwrap();
+  assert_eq!(
+    rewritten,
+    "SELECT * FROM readings WHERE partition_date IN ('2025-02-20_11-00', '2025-02-20_12-00') LIMIT 10"
+  );
+  assert!(extract_table_names_and_ctes(&rewritten).is_ok());
+}
+
+#[test]
+fn test_inject_partition_filter_keeps_group_by_and_having_last() {
+  let sql = "SELECT name, COUNT(*) FROM readings GROUP BY name HAVING COUNT(*) > 1";
+  let rewritten = inject_partition_filter(sql, "partition_date", &partitions()).unwrap();
+  assert_eq!(
+    rewritten,
+    "SELECT name, COUNT(*) FROM readings WHERE partition_date IN ('2025-02-20_11-00', '2025-02-20_12-00') GROUP BY name HAVING COUNT(*) > 1"
+  );
+  assert!(extract_table_names_and_ctes(&rewritten).is_ok());
+}
+
+#[test]
+fn test_inject_partition_filter_combines_with_existing_where() {
+  let sql = "SELECT * FROM readings WHERE id > 1 ORDER BY date";
+  let rewritten = inject_partition_filter(sql, "partition_date", &partitions()).unwrap();
+  assert_eq!(
+    rewritten,
+    "SELECT * FROM readings WHERE (id > 1) AND partition_date IN ('2025-02-20_11-00', '2025-02-20_12-00') ORDER BY date"
+  );
+}
+
+#[test]
+fn test_inject_partition_filter_wraps_or_condition() {
+  // Without the parentheses the AND would bind to the right side of the OR only,
+  // and rows from older partitions would still be returned
+  let sql = "SELECT * FROM readings WHERE id = 1 OR id = 3";
+  let rewritten = inject_partition_filter(sql, "partition_date", &partitions()).unwrap();
+  assert_eq!(
+    rewritten,
+    "SELECT * FROM readings WHERE (id = 1 OR id = 3) AND partition_date IN ('2025-02-20_11-00', '2025-02-20_12-00')"
+  );
+}
+
+#[test]
+fn test_inject_partition_filter_ignores_where_inside_string_literal() {
+  // Matching the text "WHERE" also fired on literals and aliases, appending "AND ..." to a query
+  // that had no WHERE clause at all
+  let sql = "SELECT 'nowhere' AS label FROM readings";
+  let rewritten = inject_partition_filter(sql, "partition_date", &partitions()).unwrap();
+  assert_eq!(
+    rewritten,
+    "SELECT 'nowhere' AS label FROM readings WHERE partition_date IN ('2025-02-20_11-00', '2025-02-20_12-00')"
+  );
+  assert!(extract_table_names_and_ctes(&rewritten).is_ok());
+}
+
+#[test]
+fn test_inject_partition_filter_pushes_into_cte_body() {
+  let sql = "WITH recent AS (SELECT * FROM readings) SELECT * FROM recent";
+  let rewritten = inject_partition_filter(sql, "partition_date", &partitions()).unwrap();
+  assert_eq!(
+    rewritten,
+    "WITH recent AS (SELECT * FROM readings WHERE partition_date IN ('2025-02-20_11-00', '2025-02-20_12-00')) SELECT * FROM recent"
+  );
+}
+
+#[test]
+fn test_inject_partition_filter_pushes_into_derived_table() {
+  let sql = "SELECT * FROM (SELECT * FROM readings) AS sub";
+  let rewritten = inject_partition_filter(sql, "partition_date", &partitions()).unwrap();
+  assert_eq!(
+    rewritten,
+    "SELECT * FROM (SELECT * FROM readings WHERE partition_date IN ('2025-02-20_11-00', '2025-02-20_12-00')) AS sub"
+  );
+}
+
+#[test]
+fn test_inject_partition_filter_covers_both_union_branches() {
+  let sql = "SELECT id FROM readings UNION SELECT id FROM events";
+  let rewritten = inject_partition_filter(sql, "partition_date", &partitions()).unwrap();
+  assert_eq!(
+    rewritten,
+    "SELECT id FROM readings WHERE partition_date IN ('2025-02-20_11-00', '2025-02-20_12-00') UNION SELECT id FROM events WHERE partition_date IN ('2025-02-20_11-00', '2025-02-20_12-00')"
+  );
+}
+
+#[test]
+fn test_inject_partition_filter_covers_joined_tables() {
+  let sql = "SELECT * FROM readings JOIN events ON readings.id = events.id";
+  let rewritten = inject_partition_filter(sql, "partition_date", &partitions()).unwrap();
+  assert_eq!(
+    rewritten,
+    "SELECT * FROM readings JOIN events ON readings.id = events.id WHERE partition_date IN ('2025-02-20_11-00', '2025-02-20_12-00')"
+  );
+}
+
+#[test]
+fn test_inject_partition_filter_without_partitions_is_a_no_op() {
+  let sql = "SELECT * FROM readings ORDER BY date";
+  assert_eq!(inject_partition_filter(sql, "partition_date", &[]).unwrap(), sql);
+}
+
+#[test]
+fn test_inject_partition_filter_skips_select_without_table() {
+  let sql = "SELECT 1";
+  assert_eq!(inject_partition_filter(sql, "partition_date", &partitions()).unwrap(), "SELECT 1");
+}
+
+#[test]
+fn test_inject_partition_filter_reports_invalid_sql() {
+  assert!(inject_partition_filter("SELECT FROM", "partition_date", &partitions()).is_err());
 }
